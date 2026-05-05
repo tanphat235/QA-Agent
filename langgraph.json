@@ -1,0 +1,7 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "qa_agent": "./src/qa_agent/graph.py:graph"
+  },
+  "env": ".env"
+}

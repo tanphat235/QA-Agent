@@ -35,3 +35,7 @@ def build_graph():
     graph.add_edge("return_to_ui", END)
 
     return graph.compile()
+
+
+# Module-level export required by LangGraph Studio
+graph = build_graph()

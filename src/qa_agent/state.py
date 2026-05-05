@@ -19,8 +19,11 @@ class PDFContent(TypedDict):
     metadata: dict
 
 
-class GraphState(TypedDict):
+class _GraphStateRequired(TypedDict):
     pdf_path: str
+
+
+class GraphState(_GraphStateRequired, total=False):
     pdf_content: Optional[PDFContent]
     spell_issues: Optional[list[Issue]]
     bend_issues: Optional[list[Issue]]
