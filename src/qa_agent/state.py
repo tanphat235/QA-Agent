@@ -24,6 +24,7 @@ class _GraphStateRequired(TypedDict):
 
 
 class GraphState(_GraphStateRequired, total=False):
+    enabled_checks: Optional[list[str]]   # subset of ["spell", "bend", "rebar"]
     page_count: Optional[int]
     spell_issues: Optional[list[Issue]]
     bend_issues: Optional[list[Issue]]

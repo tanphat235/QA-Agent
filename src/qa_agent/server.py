@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -35,18 +35,28 @@ def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
+_ALL_CHECKS = ["spell", "bend", "rebar"]
+
+
 @app.post("/api/analyze")
-async def analyze(file: UploadFile = File(...)):
+async def analyze(
+    file: UploadFile = File(...),
+    checks: str = Form("spell,bend,rebar"),
+):
+    enabled_checks = [c.strip() for c in checks.split(",") if c.strip() in _ALL_CHECKS]
+    if not enabled_checks:
+        enabled_checks = _ALL_CHECKS[:]
+
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(await file.read())
         tmp_path = tmp.name
 
-    print(f"\n[server] === New analysis request: {file.filename} → {tmp_path} ===")
+    print(f"\n[server] === New analysis request: {file.filename} → {tmp_path} | checks: {enabled_checks} ===")
 
     async def stream():
         yield _sse({"type": "ack"})
         try:
-            async for node_name, node_data in stream_analysis(tmp_path):
+            async for node_name, node_data in stream_analysis(tmp_path, enabled_checks):
                 print(f"[server] ✓ node completed: {node_name}  |  keys: {list(node_data.keys()) if isinstance(node_data, dict) else type(node_data)}")
 
                 label = NODE_LABELS.get(node_name, node_name)

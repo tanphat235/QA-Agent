@@ -32,13 +32,19 @@ type AppState = 'idle' | 'ready' | 'analyzing' | 'done' | 'error'
 
 // ── Constants ────────────────────────────────────────────────
 const NODES = [
-  { key: 'preprocess',        label: 'Extracting PDF content' },
-  { key: 'spell_check',       label: 'Checking spelling & labels' },
-  { key: 'bend_check',        label: 'Validating bending details' },
-  { key: 'rebar_check',       label: 'Validating rebar specs' },
-  { key: 'aggregate_results', label: 'Aggregating results' },
-  { key: 'return_to_ui',      label: 'Preparing report' },
+  { key: 'preprocess',        label: 'Extracting PDF content',      checkKey: null },
+  { key: 'spell_check',       label: 'Checking spelling & labels',  checkKey: 'spell' },
+  { key: 'bend_check',        label: 'Validating bending details',  checkKey: 'bend' },
+  { key: 'rebar_check',       label: 'Validating rebar specs',      checkKey: 'rebar' },
+  { key: 'aggregate_results', label: 'Aggregating results',         checkKey: null },
+  { key: 'return_to_ui',      label: 'Preparing report',            checkKey: null },
 ]
+
+const CHECK_OPTIONS = [
+  { key: 'spell', label: 'Spelling & Labels',   color: 'gray' },
+  { key: 'bend',  label: 'Bending & Schedule',  color: 'purple' },
+  { key: 'rebar', label: 'Rebar Specs',          color: 'blue' },
+] as const
 const NAV = [
   { icon: LayoutDashboard, label: 'Dashboard', active: true },
   { icon: Upload,          label: 'Uploads' },
@@ -195,7 +201,18 @@ export default function App() {
   const [doneNodes, setDoneNodes]       = useState<string[]>([])
   const [activeNode, setActiveNode]     = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen]   = useState(true)
+  const [enabledChecks, setEnabledChecks] = useState<string[]>(['spell', 'bend', 'rebar'])
   const inputRef = useRef<HTMLInputElement>(null)
+
+  const toggleCheck = (key: string) => {
+    setEnabledChecks(prev =>
+      prev.includes(key) ? prev.filter(c => c !== key) : [...prev, key]
+    )
+  }
+
+  const visibleNodes = NODES.filter(n =>
+    n.checkKey === null || enabledChecks.includes(n.checkKey)
+  )
 
   const pickFile = (f: File) => {
     if (!f.name.toLowerCase().endsWith('.pdf')) return
@@ -214,6 +231,7 @@ export default function App() {
 
     const form = new FormData()
     form.append('file', file)
+    form.append('checks', enabledChecks.join(','))
 
     try {
       const res = await fetch('/api/analyze', { method: 'POST', body: form })
@@ -250,7 +268,7 @@ export default function App() {
           )
         }
         setResult(normalized)
-        setDoneNodes(NODES.map((n) => n.key))
+        setDoneNodes(visibleNodes.map((n) => n.key))
         setActiveNode(null)
         setAppState('done')
         return
@@ -323,7 +341,9 @@ export default function App() {
     a.click(); URL.revokeObjectURL(a.href)
   }
 
-  const progress = Math.round((doneNodes.length / NODES.length) * 100)
+  const progress = Math.round(
+    (doneNodes.filter(k => visibleNodes.some(n => n.key === k)).length / visibleNodes.length) * 100
+  )
   const overall  = result
     ? result.summary.ERROR   > 0 ? 'FAIL'
     : result.summary.WARNING > 0 ? 'WARN' : 'PASS'
@@ -433,10 +453,44 @@ export default function App() {
 
             {/* Active checks panel */}
             <div className="bg-white rounded-2xl border border-gray-200/70 p-5 flex flex-col gap-4 shadow-sm">
-              <h2 className="text-[10px] font-bold text-gray-400 uppercase tracking-[0.15em]">Active Checks</h2>
+              <div className="flex items-center justify-between">
+                <h2 className="text-[10px] font-bold text-gray-400 uppercase tracking-[0.15em]">Active Checks</h2>
+                {enabledChecks.length === 0 && (
+                  <span className="text-[10px] text-red-400 font-semibold">Select at least one check</span>
+                )}
+              </div>
+
+              {/* Check toggles */}
+              <div className="flex gap-2 flex-wrap">
+                {CHECK_OPTIONS.map(({ key, label }) => {
+                  const on = enabledChecks.includes(key)
+                  const disabled = appState === 'analyzing'
+                  return (
+                    <button
+                      key={key}
+                      onClick={() => !disabled && toggleCheck(key)}
+                      disabled={disabled}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border transition-all ${
+                        disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+                      } ${
+                        on
+                          ? 'bg-blue-600 border-blue-600 text-white shadow-sm'
+                          : 'bg-white border-gray-200 text-gray-400 hover:border-gray-300 hover:text-gray-600'
+                      }`}
+                    >
+                      <span className={`w-3 h-3 rounded-sm border flex items-center justify-center flex-shrink-0 ${
+                        on ? 'bg-white/30 border-white/50' : 'border-gray-300'
+                      }`}>
+                        {on && <span className="text-white text-[8px] leading-none font-black">✓</span>}
+                      </span>
+                      {label}
+                    </button>
+                  )
+                })}
+              </div>
 
               {!file ? (
-                <div className="flex-1 flex flex-col items-center justify-center gap-2.5 py-8">
+                <div className="flex-1 flex flex-col items-center justify-center gap-2.5 py-6">
                   <div className="w-11 h-11 rounded-2xl bg-gray-50 border border-gray-100 flex items-center justify-center">
                     <FileText size={19} className="text-gray-300" />
                   </div>
@@ -456,8 +510,11 @@ export default function App() {
                       {appState === 'ready' && (
                         <>
                           <span className="text-[9px] bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full font-bold tracking-widest">READY</span>
-                          <button onClick={analyze}
-                            className="ml-1 px-3 py-1.5 bg-blue-600 text-white text-[11px] font-bold rounded-lg hover:bg-blue-700 transition-colors tracking-wide shadow-sm">
+                          <button
+                            onClick={analyze}
+                            disabled={enabledChecks.length === 0}
+                            title={enabledChecks.length === 0 ? 'Select at least one check' : undefined}
+                            className="ml-1 px-3 py-1.5 bg-blue-600 text-white text-[11px] font-bold rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors tracking-wide shadow-sm">
                             Start Check
                           </button>
                         </>
@@ -501,7 +558,7 @@ export default function App() {
                         </div>
                       </div>
                       <div className="space-y-2">
-                        {NODES.map(node => {
+                        {visibleNodes.map(node => {
                           const done    = doneNodes.includes(node.key)
                           const running = activeNode === node.key && !done
                           return (

@@ -8,16 +8,23 @@ from qa_agent.graph import graph
 
 load_dotenv()
 
+_ALL_CHECKS = ["spell", "bend", "rebar"]
 
-async def stream_analysis(pdf_path: str) -> AsyncIterator[tuple[str, Any]]:
-    """Run the QA graph for ``pdf_path`` and yield each completed node's name and output."""
-    async for event in graph.astream({"pdf_path": pdf_path}):
+
+async def stream_analysis(
+    pdf_path: str,
+    enabled_checks: list[str] | None = None,
+) -> AsyncIterator[tuple[str, Any]]:
+    """Run the QA graph and yield each completed node's name and output."""
+    checks = enabled_checks if enabled_checks else _ALL_CHECKS
+    init: dict[str, Any] = {"pdf_path": pdf_path, "enabled_checks": checks}
+    async for event in graph.astream(init):
         node_name = next(iter(event))
         yield node_name, event[node_name]
 
 
 def main(pdf_path: str = "sample.pdf") -> dict:
-    final_state = graph.invoke({"pdf_path": pdf_path})
+    final_state = graph.invoke({"pdf_path": pdf_path, "enabled_checks": _ALL_CHECKS})
     result = final_state["ui_response"]
     print(result)
     return result
