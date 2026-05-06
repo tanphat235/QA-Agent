@@ -2,7 +2,7 @@ import { useState, useRef, useCallback } from 'react'
 import {
   LayoutDashboard, Upload, History, Settings, HelpCircle,
   FileText, AlertCircle, CheckCircle, AlertTriangle,
-  Download, Loader2, Layers,
+  Download, Loader2, ChevronLeft, ChevronRight,
 } from 'lucide-react'
 
 // ── Types ────────────────────────────────────────────────────
@@ -166,6 +166,7 @@ export default function App() {
   const [isDragging, setIsDragging]     = useState(false)
   const [doneNodes, setDoneNodes]       = useState<string[]>([])
   const [activeNode, setActiveNode]     = useState<string | null>(null)
+  const [sidebarOpen, setSidebarOpen]   = useState(true)
   const inputRef = useRef<HTMLInputElement>(null)
 
   const pickFile = (f: File) => {
@@ -278,6 +279,12 @@ export default function App() {
     }
   }
 
+  const clearFile = () => {
+    setFile(null); setResult(null); setDoneNodes([]); setActiveNode(null)
+    setErrorMsg(''); setAppState('idle')
+    if (inputRef.current) inputRef.current.value = ''
+  }
+
   const downloadReport = () => {
     if (!result) return
     const blob = new Blob([JSON.stringify(result, null, 2)], { type: 'application/json' })
@@ -296,55 +303,79 @@ export default function App() {
 
   // ── Render ─────────────────────────────────────────────────
   return (
-    <div className="flex h-screen bg-gray-50 overflow-hidden">
+    <div className="flex h-screen bg-slate-50 overflow-hidden">
 
       {/* Sidebar */}
-      <aside className="w-56 bg-slate-900 flex flex-col flex-shrink-0 shadow-xl">
-        <div className="px-5 py-5 border-b border-slate-700">
-          <div className="flex items-center gap-3">
-            <div className="relative w-9 h-9 flex-shrink-0">
-              <div className="absolute inset-0 rounded-md border-2 border-blue-500" />
-              <div className="absolute inset-[5px] rounded border-2 border-blue-300" />
-              <Layers size={10} className="absolute bottom-1 right-1 text-blue-400" />
-            </div>
-            <div>
-              <p className="text-white font-extrabold text-xs tracking-widest leading-none">DRAWING</p>
-              <p className="text-blue-400 font-extrabold text-xs tracking-widest leading-none mt-0.5">ANALYZER</p>
-            </div>
+      <aside className={`${sidebarOpen ? 'w-72' : 'w-16'} bg-[#0f172a] flex flex-col flex-shrink-0 transition-all duration-300 relative border-r border-slate-800/80 shadow-2xl`}>
+
+        {/* Toggle */}
+        <button
+          onClick={() => setSidebarOpen(!sidebarOpen)}
+          className="absolute -right-3.5 top-8 w-7 h-7 bg-slate-800 border border-slate-700 rounded-full flex items-center justify-center text-slate-400 hover:bg-blue-600 hover:text-white hover:border-blue-500 transition-all z-20 shadow-lg"
+        >
+          {sidebarOpen ? <ChevronLeft size={13} /> : <ChevronRight size={13} />}
+        </button>
+
+        {/* Brand */}
+        <div className="border-b border-slate-800/80">
+          <div className={`flex items-center gap-3.5 px-4 py-4 ${!sidebarOpen ? 'justify-center' : ''}`}>
+            <img
+              src="/logo.png"
+              alt="Drawing Analyzer"
+              className={`object-contain flex-shrink-0 rounded-xl ring-1 ring-blue-500/20 drop-shadow-[0_0_8px_rgba(59,130,246,0.3)] transition-all duration-300 ${sidebarOpen ? 'w-11 h-11' : 'w-9 h-9'}`}
+            />
+            {sidebarOpen && (
+              <div className="overflow-hidden">
+                <p className="text-[14px] font-black tracking-[0.1em] whitespace-nowrap leading-none">
+                  <span className="text-white">DRAWING </span><span className="text-blue-400">ANALYZER</span>
+                </p>
+                <p className="text-[9px] text-slate-500 mt-1.5 tracking-[0.15em] uppercase font-semibold">AI-powered QA</p>
+              </div>
+            )}
           </div>
-          <p className="text-slate-500 text-[10px] mt-2 tracking-wide">AI-powered QA Tool</p>
         </div>
 
-        <nav className="flex-1 px-3 py-4 space-y-1">
+        {/* Nav */}
+        <nav className="flex-1 px-2.5 py-5 space-y-0.5">
           {NAV.map(({ icon: Icon, label, active }) => (
-            <button key={label}
-              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
-                active ? 'bg-blue-600 text-white shadow' : 'text-slate-400 hover:bg-slate-800 hover:text-white'
+            <button key={label} title={!sidebarOpen ? label : undefined}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-[13px] font-medium transition-all duration-150 ${
+                active
+                  ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/40'
+                  : 'text-slate-500 hover:bg-slate-800/70 hover:text-slate-200'
               }`}
             >
-              <Icon size={15} />{label}
+              <Icon size={15} className="flex-shrink-0" />
+              {sidebarOpen && <span className="truncate">{label}</span>}
             </button>
           ))}
         </nav>
 
-        <div className="px-3 pb-5">
-          <button className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-400 hover:bg-slate-800 hover:text-white transition-colors">
-            <HelpCircle size={15} />Support
+        {/* Support */}
+        <div className="px-2.5 pb-5 pt-3 border-t border-slate-800/80">
+          <button title={!sidebarOpen ? 'Support' : undefined}
+            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-[13px] font-medium text-slate-500 hover:bg-slate-800/70 hover:text-slate-200 transition-all">
+            <HelpCircle size={15} className="flex-shrink-0" />
+            {sidebarOpen && <span>Support</span>}
           </button>
         </div>
       </aside>
 
       {/* Main */}
       <div className="flex-1 flex flex-col overflow-hidden">
-        <header className="bg-white border-b px-7 py-4 flex items-center justify-between flex-shrink-0">
-          <h1 className="text-lg font-semibold text-gray-800">Dashboard</h1>
-          <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-white text-sm font-bold">P</div>
+
+        {/* Header */}
+        <header className="bg-white border-b border-gray-200/70 px-8 py-3.5 flex items-center flex-shrink-0">
+          <div>
+            <h1 className="text-[15px] font-bold text-gray-900 tracking-tight">Dashboard</h1>
+            <p className="text-[11px] text-gray-400 mt-0.5 tracking-wide">Structural drawing validation · PDF analysis</p>
+          </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto p-7 space-y-6">
+        <div className="flex-1 overflow-y-auto p-7 space-y-5">
 
           {/* Upload + Active checks */}
-          <div className="grid grid-cols-2 gap-6">
+          <div className="grid grid-cols-2 gap-5">
 
             {/* Drop zone */}
             <div
@@ -352,88 +383,101 @@ export default function App() {
               onDragOver={e => { e.preventDefault(); setIsDragging(true) }}
               onDragLeave={() => setIsDragging(false)}
               onDrop={onDrop}
-              className={`border-2 border-dashed rounded-2xl p-10 text-center cursor-pointer transition-all select-none ${
-                isDragging ? 'border-blue-400 bg-blue-50 scale-[1.01]' : 'border-gray-300 bg-white hover:border-blue-300 hover:bg-gray-50'
+              className={`relative rounded-2xl p-10 text-center cursor-pointer transition-all duration-200 select-none border-2 border-dashed ${
+                isDragging
+                  ? 'border-blue-400 bg-blue-50/70 scale-[1.01]'
+                  : 'border-gray-200 bg-white hover:border-blue-300 hover:bg-blue-50/20'
               }`}
             >
               <input ref={inputRef} type="file" accept=".pdf" className="hidden"
                 onChange={e => e.target.files?.[0] && pickFile(e.target.files[0])} />
-              <FileText size={52} className="mx-auto text-gray-300 mb-4" />
-              <p className="font-bold text-gray-700 tracking-wide">DRAG & DROP BUILDING DRAWINGS HERE</p>
-              <p className="text-xs text-gray-400 mt-1 tracking-widest">SUPPORTED FORMAT: PDF (GERMAN STANDARDS)</p>
-              <button onClick={e => e.stopPropagation()}
-                className="mt-5 px-5 py-2 bg-slate-700 text-white text-sm font-medium rounded-lg hover:bg-slate-800 transition-colors">
-                SELECT FILES FROM COMPUTER
+
+              <div className="w-16 h-16 mx-auto mb-5 rounded-2xl bg-gradient-to-br from-blue-50 to-slate-50 border border-blue-100/80 flex items-center justify-center shadow-sm">
+                <FileText size={28} className="text-blue-400" />
+              </div>
+              <p className="font-bold text-gray-800 text-sm tracking-wide">Drag & drop building drawings here</p>
+              <p className="text-xs text-gray-400 mt-1.5 tracking-wide">Supported: PDF · German Standards (DIN / EN)</p>
+              <button onClick={e => { e.stopPropagation(); inputRef.current?.click() }}
+                className="mt-6 px-6 py-2.5 bg-slate-900 text-white text-xs font-bold rounded-xl hover:bg-slate-700 transition-colors tracking-wide shadow-sm">
+                Select Files from Computer
               </button>
             </div>
 
             {/* Active checks panel */}
-            <div className="bg-white rounded-2xl border p-5 flex flex-col gap-4">
-              <h2 className="text-xs font-bold text-gray-400 uppercase tracking-widest">Active Checks</h2>
+            <div className="bg-white rounded-2xl border border-gray-200/70 p-5 flex flex-col gap-4 shadow-sm">
+              <h2 className="text-[10px] font-bold text-gray-400 uppercase tracking-[0.15em]">Active Checks</h2>
 
               {!file ? (
-                <div className="flex-1 flex items-center justify-center text-gray-300 text-sm">
-                  No file selected
+                <div className="flex-1 flex flex-col items-center justify-center gap-2.5 py-8">
+                  <div className="w-11 h-11 rounded-2xl bg-gray-50 border border-gray-100 flex items-center justify-center">
+                    <FileText size={19} className="text-gray-300" />
+                  </div>
+                  <p className="text-sm text-gray-300 font-medium">No file selected</p>
+                  <p className="text-[11px] text-gray-200 tracking-wide">Upload a PDF to begin</p>
                 </div>
               ) : (
                 <>
                   {/* File row */}
-                  <div className="border rounded-xl overflow-hidden">
-                    <div className="flex items-center gap-3 px-4 py-3 bg-gray-50">
-                      <FileText size={15} className="text-blue-500 flex-shrink-0" />
-                      <span className="text-sm font-medium text-gray-700 truncate flex-1">{file.name}</span>
+                  <div className="border border-gray-100 rounded-xl bg-gray-50/60">
+                    <div className="flex items-center gap-3 px-3.5 py-3">
+                      <div className="w-7 h-7 rounded-lg bg-blue-50 border border-blue-100 flex items-center justify-center flex-shrink-0">
+                        <FileText size={13} className="text-blue-500" />
+                      </div>
+                      <span className="text-[13px] font-medium text-gray-700 truncate flex-1">{file.name}</span>
 
                       {appState === 'ready' && (
                         <>
-                          <span className="text-[10px] bg-gray-200 text-gray-500 px-2 py-0.5 rounded-full font-medium">READY</span>
+                          <span className="text-[9px] bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full font-bold tracking-widest">READY</span>
                           <button onClick={analyze}
-                            className="ml-1 px-3 py-1.5 bg-blue-600 text-white text-xs font-semibold rounded-lg hover:bg-blue-700 transition-colors">
-                            START CHECK
+                            className="ml-1 px-3 py-1.5 bg-blue-600 text-white text-[11px] font-bold rounded-lg hover:bg-blue-700 transition-colors tracking-wide shadow-sm">
+                            Start Check
                           </button>
                         </>
                       )}
                       {appState === 'analyzing' && (
-                        <span className="text-[10px] bg-blue-100 text-blue-600 px-2 py-0.5 rounded-full font-medium flex items-center gap-1">
-                          <Loader2 size={9} className="animate-spin" /> ANALYZING
+                        <span className="text-[9px] bg-blue-50 text-blue-600 px-2 py-0.5 rounded-full font-bold flex items-center gap-1 border border-blue-100 tracking-widest">
+                          <Loader2 size={8} className="animate-spin" /> ANALYZING
                         </span>
                       )}
                       {appState === 'done' && (
-                        <span className={`text-[10px] px-2 py-0.5 rounded-full font-semibold ${
-                          overall === 'FAIL' ? 'bg-red-100 text-red-600' : 'bg-green-100 text-green-600'
+                        <span className={`text-[9px] px-2 py-0.5 rounded-full font-bold tracking-widest ${
+                          overall === 'FAIL' ? 'bg-red-50 text-red-600 border border-red-100' : 'bg-green-50 text-green-600 border border-green-100'
                         }`}>
-                          DONE · {result?.summary.errors ?? 0} ERRORS
+                          DONE · {result?.summary.errors ?? 0} ERR
                         </span>
                       )}
                       {appState === 'error' && (
-                        <span className="text-[10px] bg-red-100 text-red-600 px-2 py-0.5 rounded-full font-medium">FAILED</span>
+                        <span className="text-[9px] bg-red-50 text-red-500 px-2 py-0.5 rounded-full font-bold border border-red-100 tracking-widest">FAILED</span>
+                      )}
+                      {appState !== 'analyzing' && (
+                        <button onClick={clearFile}
+                          className="w-5 h-5 flex items-center justify-center rounded-full text-gray-300 hover:bg-red-50 hover:text-red-400 transition-colors text-base font-bold flex-shrink-0"
+                          title="Remove file">×</button>
                       )}
                     </div>
                   </div>
 
-                  {/* Progress area (only while analyzing) */}
+                  {/* Progress */}
                   {appState === 'analyzing' && (
                     <div className="space-y-3">
-                      {/* Progress bar */}
                       <div>
-                        <div className="flex justify-between text-xs text-gray-400 mb-1">
-                          <span>Analyzing drawing…</span>
-                          <span>{progress}%</span>
+                        <div className="flex justify-between text-[11px] mb-1.5">
+                          <span className="text-gray-400 font-medium">Analyzing drawing…</span>
+                          <span className="text-blue-500 font-bold">{progress}%</span>
                         </div>
-                        <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                        <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
                           <div
-                            className="h-full bg-blue-500 rounded-full transition-all duration-500"
+                            className="h-full bg-gradient-to-r from-blue-600 to-blue-400 rounded-full transition-all duration-500"
                             style={{ width: `${progress}%` }}
                           />
                         </div>
                       </div>
-
-                      {/* Node checklist */}
-                      <div className="space-y-1.5">
+                      <div className="space-y-2">
                         {NODES.map(node => {
                           const done    = doneNodes.includes(node.key)
                           const running = activeNode === node.key && !done
                           return (
-                            <div key={node.key} className="flex items-center gap-2 text-xs">
+                            <div key={node.key} className="flex items-center gap-2.5">
                               {done ? (
                                 <CheckCircle size={13} className="text-green-500 flex-shrink-0" />
                               ) : running ? (
@@ -441,7 +485,7 @@ export default function App() {
                               ) : (
                                 <div className="w-[13px] h-[13px] rounded-full border border-gray-200 flex-shrink-0" />
                               )}
-                              <span className={done ? 'text-gray-600' : running ? 'text-blue-600 font-medium' : 'text-gray-300'}>
+                              <span className={`text-[12px] ${done ? 'text-gray-500' : running ? 'text-blue-600 font-semibold' : 'text-gray-300'}`}>
                                 {node.label}
                               </span>
                             </div>
@@ -453,17 +497,23 @@ export default function App() {
 
                   {/* Error */}
                   {appState === 'error' && (
-                    <div className="text-sm text-red-600 bg-red-50 rounded-xl p-3 border border-red-100">
-                      {errorMsg}
+                    <div className="space-y-2">
+                      <div className="text-xs text-red-600 bg-red-50 rounded-xl p-3.5 border border-red-100 leading-relaxed">
+                        {errorMsg}
+                      </div>
+                      <button onClick={analyze}
+                        className="w-full py-2.5 bg-blue-600 text-white text-xs font-bold rounded-xl hover:bg-blue-700 transition-colors tracking-wide shadow-sm">
+                        Re-Analyze
+                      </button>
                     </div>
                   )}
 
                   {/* Done summary */}
                   {appState === 'done' && result && (
-                    <div className="flex gap-4 text-xs text-gray-500 px-1">
-                      <span className="text-red-500 font-medium">{result.summary.errors} errors</span>
-                      <span className="text-amber-500 font-medium">{result.summary.warnings} warnings</span>
-                      <span className="text-green-500 font-medium">{result.summary.info} OK</span>
+                    <div className="flex gap-4 text-xs px-0.5">
+                      <span className="text-red-500 font-semibold">{result.summary.errors} errors</span>
+                      <span className="text-amber-500 font-semibold">{result.summary.warnings} warnings</span>
+                      <span className="text-green-500 font-semibold">{result.summary.info} OK</span>
                       <span className="ml-auto text-gray-400">{result.pdf_pages} page(s)</span>
                     </div>
                   )}
@@ -474,37 +524,38 @@ export default function App() {
 
           {/* Results table */}
           {result && (
-            <div className="bg-white rounded-2xl border overflow-hidden shadow-sm">
+            <div className="bg-white rounded-2xl border border-gray-200/70 overflow-hidden shadow-sm">
 
-              <div className="px-6 py-4 border-b flex items-center justify-between">
+              <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
                 <div>
-                  <h2 className="font-bold text-gray-800 uppercase text-xs tracking-widest">
-                    Drawing Analysis Results · {result.pdf_pages} page(s)
+                  <h2 className="font-bold text-gray-900 text-sm tracking-tight">
+                    Analysis Results
+                    <span className="ml-2 text-xs font-normal text-gray-400">· {result.pdf_pages} page(s)</span>
                   </h2>
-                  <p className="text-xs text-gray-400 mt-0.5">
+                  <p className="text-[11px] text-gray-400 mt-0.5 tracking-wide">
                     Spell: {result.summary.by_category.spell} · Bend: {result.summary.by_category.bend} · Rebar: {result.summary.by_category.rebar}
                   </p>
                 </div>
                 <button onClick={downloadReport}
-                  className="flex items-center gap-2 px-4 py-2 bg-slate-700 text-white text-sm font-medium rounded-xl hover:bg-slate-800 transition-colors">
-                  <Download size={14} />Download Detailed Report
+                  className="flex items-center gap-2 px-4 py-2 bg-slate-900 text-white text-xs font-bold rounded-xl hover:bg-slate-700 transition-colors tracking-wide shadow-sm">
+                  <Download size={13} />Download Report
                 </button>
               </div>
 
               {/* Summary strip */}
-              <div className="px-6 py-3 bg-gray-50 border-b flex items-center gap-6 flex-wrap">
-                <span className="flex items-center gap-1.5 text-sm text-gray-600">
-                  <CheckCircle size={15} className="text-green-500" /><strong>{result.summary.info}</strong> OK
+              <div className="px-6 py-3 bg-gray-50/60 border-b border-gray-100 flex items-center gap-6 flex-wrap">
+                <span className="flex items-center gap-1.5 text-xs text-gray-600">
+                  <CheckCircle size={13} className="text-green-500" /><strong>{result.summary.info}</strong> OK
                 </span>
-                <span className="flex items-center gap-1.5 text-sm text-gray-600">
-                  <AlertTriangle size={15} className="text-amber-500" /><strong>{result.summary.warnings}</strong> Warnings
+                <span className="flex items-center gap-1.5 text-xs text-gray-600">
+                  <AlertTriangle size={13} className="text-amber-500" /><strong>{result.summary.warnings}</strong> Warnings
                 </span>
-                <span className="flex items-center gap-1.5 text-sm text-gray-600">
-                  <AlertCircle size={15} className="text-red-500" /><strong>{result.summary.errors}</strong> Errors
+                <span className="flex items-center gap-1.5 text-xs text-gray-600">
+                  <AlertCircle size={13} className="text-red-500" /><strong>{result.summary.errors}</strong> Errors
                 </span>
                 <div className="ml-auto flex items-center gap-2">
-                  <span className="text-xs text-gray-400">Overall:</span>
-                  <span className={`px-3 py-1 rounded-full text-xs font-bold tracking-wide ${
+                  <span className="text-[10px] text-gray-400 font-semibold uppercase tracking-widest">Overall</span>
+                  <span className={`px-3 py-1 rounded-full text-[11px] font-bold tracking-wide ${
                     overall === 'FAIL' ? 'bg-red-100 text-red-700' :
                     overall === 'WARN' ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'
                   }`}>{overall}</span>
@@ -513,9 +564,9 @@ export default function App() {
 
               {/* Table */}
               <div className="overflow-x-auto">
-                <table className="w-full text-sm">
+                <table className="w-full">
                   <thead>
-                    <tr className="bg-gray-50 border-b text-[11px] font-bold text-gray-400 uppercase tracking-wider">
+                    <tr className="bg-gray-50/80 border-b border-gray-100 text-[10px] font-bold text-gray-400 uppercase tracking-widest">
                       <th className="px-5 py-3 text-left w-10">#</th>
                       <th className="px-5 py-3 text-left">Category</th>
                       <th className="px-5 py-3 text-left">Page</th>
@@ -529,22 +580,22 @@ export default function App() {
                     {result.issues.map((issue, i) => {
                       const { cls, label } = severityBadge(issue.severity)
                       return (
-                        <tr key={i} className="hover:bg-gray-50 transition-colors">
-                          <td className="px-5 py-3 text-gray-300 font-mono text-xs">{String(i + 1).padStart(3, '0')}</td>
-                          <td className="px-5 py-3">
-                            <span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold uppercase ${catBadge(issue.category)}`}>
+                        <tr key={i} className="hover:bg-blue-50/20 transition-colors">
+                          <td className="px-5 py-3.5 text-gray-300 font-mono text-[11px]">{String(i + 1).padStart(3, '0')}</td>
+                          <td className="px-5 py-3.5">
+                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide ${catBadge(issue.category)}`}>
                               {issue.category}
                             </span>
                           </td>
-                          <td className="px-5 py-3 text-gray-500">{issue.page}</td>
-                          <td className="px-5 py-3 text-gray-500 max-w-[140px] truncate" title={issue.location}>
+                          <td className="px-5 py-3.5 text-gray-500 text-xs">{issue.page}</td>
+                          <td className="px-5 py-3.5 text-gray-500 max-w-[140px] truncate text-xs" title={issue.location}>
                             {issue.location}
                           </td>
-                          <td className="px-5 py-3 text-gray-500">{Math.round(issue.confidence * 100)}%</td>
-                          <td className="px-5 py-3">
-                            <span className={`px-2.5 py-0.5 rounded text-[11px] font-bold ${cls}`}>{label}</span>
+                          <td className="px-5 py-3.5 text-gray-500 text-xs">{Math.round(issue.confidence * 100)}%</td>
+                          <td className="px-5 py-3.5">
+                            <span className={`px-2.5 py-0.5 rounded text-[10px] font-bold tracking-wide ${cls}`}>{label}</span>
                           </td>
-                          <td className="px-5 py-3 text-gray-700 max-w-sm text-xs leading-relaxed">{issue.description}</td>
+                          <td className="px-5 py-3.5 text-gray-700 max-w-sm text-xs leading-relaxed">{issue.description}</td>
                         </tr>
                       )
                     })}
@@ -552,15 +603,11 @@ export default function App() {
                 </table>
               </div>
 
-              <div className="px-6 py-3 border-t bg-gray-50 flex items-center gap-6 text-xs text-gray-500">
-                <span className="flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full bg-green-500" />PASS
-                </span>
-                <span className="flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full bg-red-500" />FAIL
-                </span>
-                <span className="ml-2">
-                  Checked {result.summary.total} issues · <strong>{result.summary.total - result.summary.errors}</strong> passed · <strong className="text-red-600">{result.summary.errors}</strong> failed.
+              <div className="px-6 py-3 border-t border-gray-100 bg-gray-50/40 flex items-center gap-5 text-[11px] text-gray-400">
+                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-green-500" />PASS</span>
+                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-red-500" />FAIL</span>
+                <span className="ml-1">
+                  {result.summary.total} issues · <strong className="text-gray-600">{result.summary.total - result.summary.errors}</strong> passed · <strong className="text-red-500">{result.summary.errors}</strong> failed
                 </span>
               </div>
             </div>

@@ -1,13 +1,23 @@
 import sys
+from collections.abc import AsyncIterator
+from typing import Any
+
 from dotenv import load_dotenv
-from qa_agent.graph import build_graph
+
+from qa_agent.graph import graph
 
 load_dotenv()
 
 
+async def stream_analysis(pdf_path: str) -> AsyncIterator[tuple[str, Any]]:
+    """Run the QA graph for ``pdf_path`` and yield each completed node's name and output."""
+    async for event in graph.astream({"pdf_path": pdf_path}):
+        node_name = next(iter(event))
+        yield node_name, event[node_name]
+
+
 def main(pdf_path: str = "sample.pdf") -> dict:
-    app = build_graph()
-    final_state = app.invoke({"pdf_path": pdf_path})
+    final_state = graph.invoke({"pdf_path": pdf_path})
     result = final_state["ui_response"]
     print(result)
     return result

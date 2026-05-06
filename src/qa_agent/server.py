@@ -10,7 +10,7 @@ from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from qa_agent.graph import graph
+from qa_agent.main import stream_analysis
 
 app = FastAPI(title="Drawing Analyzer API")
 
@@ -46,9 +46,7 @@ async def analyze(file: UploadFile = File(...)):
     async def stream():
         yield _sse({"type": "ack"})
         try:
-            async for event in graph.astream({"pdf_path": tmp_path}):
-                node_name = next(iter(event))
-                node_data  = event[node_name]
+            async for node_name, node_data in stream_analysis(tmp_path):
                 print(f"[server] ✓ node completed: {node_name}  |  keys: {list(node_data.keys()) if isinstance(node_data, dict) else type(node_data)}")
 
                 label = NODE_LABELS.get(node_name, node_name)
