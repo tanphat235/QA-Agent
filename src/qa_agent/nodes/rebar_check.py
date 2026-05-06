@@ -1,3 +1,4 @@
+import base64
 from pydantic import BaseModel, Field
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -7,7 +8,7 @@ from qa_agent.state import GraphState, Issue
 _SYSTEM = """\
 You are a structural drawing QA specialist reviewing rebar specifications and schedules.
 
-Inspect the drawing text for:
+Inspect the drawing for:
 - Rebar size/designation mismatches between plan view, schedule, and sections
 - Spacing values that exceed code-maximum or violate design intent
 - Quantity discrepancies between bar marks and the schedule total
@@ -32,14 +33,19 @@ class _RebarResult(BaseModel):
 
 
 def rebar_check(state: GraphState) -> dict:
-    content = state.get("pdf_content")
-    if not content:
-        return {"rebar_issues": []}
+    with open(state["pdf_path"], "rb") as f:
+        pdf_data = base64.standard_b64encode(f.read()).decode("utf-8")
 
     llm = ChatAnthropic(model="claude-sonnet-4-5").with_structured_output(_RebarResult)
     result: _RebarResult = llm.invoke([
         SystemMessage(content=_SYSTEM),
-        HumanMessage(content=f"Drawing text to validate:\n\n{content['raw_text']}"),
+        HumanMessage(content=[
+            {
+                "type": "document",
+                "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data},
+            },
+            {"type": "text", "text": "Inspect this structural drawing PDF for rebar specification and schedule issues."},
+        ]),
     ])
 
     issues: list[Issue] = [
@@ -53,5 +59,4 @@ def rebar_check(state: GraphState) -> dict:
         }
         for item in result.issues
     ]
-
     return {"rebar_issues": issues}

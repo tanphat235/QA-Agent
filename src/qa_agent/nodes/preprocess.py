@@ -1,28 +1,51 @@
 import base64
 from anthropic import Anthropic
-from qa_agent.state import GraphState, PDFContent
+from pypdf import PdfReader
 
-_PROMPT = """\
-Extract all content from this structural drawing PDF verbatim.
-Include every label, annotation, rebar mark, bar schedule row, dimension, \
-section title, callout, and note exactly as written.
+from qa_agent.state import GraphState
 
-Begin your response with a line in this exact format (replace N with the actual number):
-PAGE_COUNT: N
+_VALIDATION_PROMPT = """\
+Validate whether this PDF is acceptable for a rebar detailing QA pipeline.
 
-Then output all extracted text with no other commentary.\
+Requirements:
+- The PDF must contain exactly one readable drawing sheet.
+- The drawing must clearly be a structural rebar detailing drawing.
+- Reject unrelated PDFs such as reports, contracts, architectural-only drawings, \
+MEP drawings, invoices, blank scans, or image placeholders.
+- Reject drawings that are unreadable, heavily cropped, or too blurry.
+
+Return ONLY one of the following formats:
+
+VALID
+
+or
+
+INVALID: <short reason>
+
+Do not include anything else.\
 """
 
 
 def preprocess(state: GraphState) -> dict:
-    client = Anthropic()
+    pdf_path = state["pdf_path"]
 
-    with open(state["pdf_path"], "rb") as f:
+    # ── Code-based checks ──────────────────────────────────────────
+    reader = PdfReader(pdf_path)
+    page_count = len(reader.pages)
+    if page_count != 1:
+        raise ValueError(
+            f"Invalid PDF: expected exactly 1 page, got {page_count}. "
+            "Please upload a single-sheet drawing."
+        )
+
+    # ── LLM-based validation ───────────────────────────────────────
+    with open(pdf_path, "rb") as f:
         pdf_data = base64.standard_b64encode(f.read()).decode("utf-8")
 
+    client = Anthropic()
     response = client.messages.create(
         model="claude-sonnet-4-5",
-        max_tokens=8096,
+        max_tokens=256,
         messages=[
             {
                 "role": "user",
@@ -35,29 +58,16 @@ def preprocess(state: GraphState) -> dict:
                             "data": pdf_data,
                         },
                     },
-                    {"type": "text", "text": _PROMPT},
+                    {"type": "text", "text": _VALIDATION_PROMPT},
                 ],
             }
         ],
     )
 
-    full_text: str = response.content[0].text  # type: ignore[union-attr]
+    verdict: str = response.content[0].text.strip()  # type: ignore[union-attr]
 
-    # Parse PAGE_COUNT from the first line, then strip it from raw_text
-    lines = full_text.splitlines()
-    page_count = 1
-    if lines and lines[0].startswith("PAGE_COUNT:"):
-        try:
-            page_count = int(lines[0].split(":", 1)[1].strip())
-        except ValueError:
-            pass
-        lines = lines[1:]
+    if not verdict.startswith("VALID"):
+        reason = verdict.removeprefix("INVALID:").strip() if "INVALID:" in verdict else verdict
+        raise ValueError(f"PDF rejected: {reason}")
 
-    pdf_content: PDFContent = {
-        "raw_text": "\n".join(lines).strip(),
-        "tables": [],
-        "page_count": page_count,
-        "metadata": {},
-    }
-
-    return {"pdf_content": pdf_content}
+    return {"page_count": page_count}

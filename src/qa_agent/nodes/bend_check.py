@@ -1,3 +1,4 @@
+import base64
 from pydantic import BaseModel, Field
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -7,7 +8,7 @@ from qa_agent.state import GraphState, Issue
 _SYSTEM = """\
 You are a structural drawing QA specialist reviewing bending details in rebar/reinforcement drawings.
 
-Inspect the drawing text for violations of standard bending rules:
+Inspect the drawing for violations of standard bending rules:
 - Bend radius less than the minimum allowed for the bar size (typically 2–4× bar diameter)
 - Hook length or extension not meeting code minimums (e.g., ACI 318 standard hooks)
 - Bending shape codes that are undefined, inconsistent, or contradictory
@@ -31,14 +32,19 @@ class _BendResult(BaseModel):
 
 
 def bend_check(state: GraphState) -> dict:
-    content = state.get("pdf_content")
-    if not content:
-        return {"bend_issues": []}
+    with open(state["pdf_path"], "rb") as f:
+        pdf_data = base64.standard_b64encode(f.read()).decode("utf-8")
 
     llm = ChatAnthropic(model="claude-sonnet-4-5").with_structured_output(_BendResult)
     result: _BendResult = llm.invoke([
         SystemMessage(content=_SYSTEM),
-        HumanMessage(content=f"Drawing text to validate:\n\n{content['raw_text']}"),
+        HumanMessage(content=[
+            {
+                "type": "document",
+                "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data},
+            },
+            {"type": "text", "text": "Inspect this structural drawing PDF for bending detail issues."},
+        ]),
     ])
 
     issues: list[Issue] = [
@@ -52,5 +58,4 @@ def bend_check(state: GraphState) -> dict:
         }
         for item in result.issues
     ]
-
     return {"bend_issues": issues}

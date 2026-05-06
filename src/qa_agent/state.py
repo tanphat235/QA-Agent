@@ -24,7 +24,7 @@ class _GraphStateRequired(TypedDict):
 
 
 class GraphState(_GraphStateRequired, total=False):
-    pdf_content: Optional[PDFContent]
+    page_count: Optional[int]
     spell_issues: Optional[list[Issue]]
     bend_issues: Optional[list[Issue]]
     rebar_issues: Optional[list[Issue]]

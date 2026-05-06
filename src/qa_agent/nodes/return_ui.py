@@ -3,11 +3,10 @@ from qa_agent.state import GraphState
 
 def return_to_ui(state: GraphState) -> dict:
     results = state.get("validation_results") or {}
-    content = state.get("pdf_content")
 
     ui_response = {
         "status": "completed",
-        "pdf_pages": content["page_count"] if content else 0,
+        "pdf_pages": state.get("page_count") or 0,
         "summary": results.get("summary", {}),
         "by_category": results.get("by_category", {}),
         "issues": results.get("issues", []),
