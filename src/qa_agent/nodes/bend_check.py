@@ -44,6 +44,20 @@ CHECKS TO PERFORM:
 - Report a missing schematic only when the mark is clearly listed and no corresponding shape/detail/placement reference is visible anywhere in the PDF.
 - Do NOT report missing coverage if the mark may be represented by a clearly shared typical detail or grouped shape reference.
 
+6. Mesh reinforcement schedule presence
+- If the drawing contains any mesh reinforcement (thép lưới / welded wire mesh / fabric reinforcement), check whether a mesh schedule or mesh usage table is present in the drawing.
+- Report as an error if mesh reinforcement is clearly shown or referenced in the drawing but no corresponding mesh schedule or mesh table is visible.
+- Do NOT report if no mesh reinforcement is present in the drawing.
+- Do NOT report if the mesh schedule may be on a separate referenced sheet that is explicitly cited.
+
+7. Mesh utilisation ratio check
+- If a mesh schedule or mesh usage table is visible, check whether the utilisation ratio (used area / total sheet area, or equivalent ratio shown in the table) is above 85% for each mesh sheet or the overall summary.
+- Report as a warning if any mesh sheet or the overall utilisation ratio is clearly shown and falls below 85%, indicating poor optimisation and excessive waste.
+- Report as an error if the ratio is below 70%.
+- Only report when the utilisation ratio or the required input values (used quantity, total quantity, or equivalent) are explicitly visible in the table.
+- Do NOT calculate or estimate the ratio if the values are not clearly shown.
+- Do NOT assume a default sheet size or standard mesh dimension that is not stated in the drawing.
+
 STRICT ANTI-HALLUCINATION RULES:
 - Report ONLY issues directly visible in the PDF.
 - Do NOT invent dimensions, bar marks, quantities, angles, or hook lengths.
@@ -89,9 +103,9 @@ def bend_check(state: GraphState) -> dict:
         pdf_data = base64.standard_b64encode(f.read()).decode("utf-8")
 
     llm = ChatAnthropic(  # type: ignore[call-arg]
-        model="claude-sonnet-4-5",
+        model="claude-sonnet-4-5",  # type: ignore[call-arg]
         temperature=0,
-        max_tokens=2048,
+        max_tokens=2048,  # type: ignore[call-arg]
     ).with_structured_output(_BendResult).with_retry(stop_after_attempt=2)
 
     result: _BendResult = llm.invoke([

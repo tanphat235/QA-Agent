@@ -115,9 +115,9 @@ def spell_check(state: GraphState) -> dict:
         pdf_data = base64.standard_b64encode(f.read()).decode("utf-8")
 
     llm = ChatAnthropic(  # type: ignore[call-arg]
-        model="claude-sonnet-4-5",
+        model="claude-sonnet-4-5",  # type: ignore[call-arg]
         temperature=0,
-        max_tokens=2048,
+        max_tokens=2048,  # type: ignore[call-arg]
     ).with_structured_output(_SpellResult).with_retry(stop_after_attempt=2)
 
     result: _SpellResult = llm.invoke([
