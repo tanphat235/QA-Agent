@@ -9,6 +9,12 @@ _CATEGORY_TITLES = {
 _CATEGORY_ORDER = ["bend", "rebar", "spell"]
 
 
+def _is_clean_summary(issue: dict) -> bool:
+    """True for auto-generated ✓ check-passed summaries, not real QA findings."""
+    desc = str(issue.get("description", ""))
+    return desc.startswith("✓")
+
+
 def return_to_ui(state: GraphState) -> dict:
     issues: list[dict] = list((state.get("validation_results") or {}).get("issues") or [])
 
@@ -16,15 +22,20 @@ def return_to_ui(state: GraphState) -> dict:
     for issue in issues:
         issue["severity"] = str(issue.get("severity", "info")).upper()
 
-    error_count   = sum(1 for i in issues if i.get("severity") == "ERROR")
-    warning_count = sum(1 for i in issues if i.get("severity") == "WARNING")
-    info_count    = sum(1 for i in issues if i.get("severity") == "INFO")
-    total_count   = len(issues)
+    # Separate real findings from clean-check summaries
+    real_issues     = [i for i in issues if not _is_clean_summary(i)]
+    summary_items   = [i for i in issues if _is_clean_summary(i)]
 
-    # Group by category and assign sequential IDs
+    error_count   = sum(1 for i in real_issues if i.get("severity") == "ERROR")
+    warning_count = sum(1 for i in real_issues if i.get("severity") == "WARNING")
+    info_count    = sum(1 for i in real_issues if i.get("severity") == "INFO")
+    real_total    = len(real_issues)
+    summary_count = len(summary_items)
+
+    # Group ALL items by category and assign sequential IDs (real first, then summaries)
     by_category: dict[str, list] = {cat: [] for cat in _CATEGORY_ORDER}
     counters: dict[str, int] = {}
-    for issue in issues:
+    for issue in real_issues + summary_items:
         cat = str(issue.get("category", "unknown")).lower()
         if cat not in by_category:
             by_category[cat] = []
@@ -36,20 +47,33 @@ def return_to_ui(state: GraphState) -> dict:
             "category": cat,
             "title": _CATEGORY_TITLES.get(cat, cat.title()),
             "count": len(by_category[cat]),
+            # Real findings count (for badge coloring)
+            "issue_count": sum(1 for i in by_category[cat] if not _is_clean_summary(i)),
             "issues": by_category[cat],
         }
         for cat in _CATEGORY_ORDER
     ]
 
-    status  = "passed" if total_count == 0 else "completed"
-    message = (
-        "No QA issues found. Drawing is clean."
-        if total_count == 0
-        else (
-            f"Analysis completed. Found {total_count} issue(s): "
+    if error_count == 0 and warning_count == 0:
+        status = "passed"
+        if real_total == 0 and summary_count > 0:
+            message = (
+                f"QA checks completed. No errors or warnings found. "
+                f"{summary_count} check area(s) verified clean."
+            )
+        elif real_total == 0:
+            message = "No QA issues found. Drawing is clean."
+        else:
+            message = (
+                f"QA checks completed. No errors or warnings. "
+                f"{info_count} minor info item(s) noted."
+            )
+    else:
+        status = "completed"
+        message = (
+            f"Analysis completed. Found {real_total} issue(s): "
             f"{error_count} error, {warning_count} warning, {info_count} info."
         )
-    )
 
     return {
         "ui_response": {
@@ -57,7 +81,7 @@ def return_to_ui(state: GraphState) -> dict:
             "message":   message,
             "pdf_pages": state.get("page_count") or 0,
             "summary": {
-                "total":   total_count,
+                "total":   real_total,
                 "ERROR":   error_count,
                 "WARNING": warning_count,
                 "INFO":    info_count,

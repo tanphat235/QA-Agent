@@ -7,73 +7,75 @@ from qa_agent.state import GraphState, Issue
 
 _SYSTEM = """\
 You are a senior structural rebar detailing QA reviewer specialized in Eurocode 2 reinforcement detailing.
+You are performing a visual and technical inspection of a PDF drawing.
 
-Your task is to inspect the entire PDF drawing visually and contextually.
-Do NOT extract the drawing content.
-Do NOT summarize the drawing.
-Only report clear, objective issues related to bar schedule, bending shapes, stirrup hooks, total mass, unusual quantities, and missing bar mark schematics.
+READING INSTRUCTIONS:
+- You may read and compare all visible text, tables, labels, bar schedules, bending shapes, notes, and diagrams in the PDF.
+- Do not reproduce large blocks of raw drawing content in your output.
+- Issue descriptions may briefly quote specific visible values (e.g., "bar mark T12 shows quantity 48 but layout shows 12 bars × 3 repetitions = 36").
 
 CHECKS TO PERFORM:
 
 1. Bar schedule / bending shape check
 - Inspect the bar schedule and bending shape diagrams.
-- Check whether stirrup bending angles shown in the schedule or bending shape are clearly consistent with Eurocode-style closed link / stirrup detailing.
-- Report only if the angle shown is clearly wrong, contradictory, or impossible for the stated shape.
-- Do NOT infer angles that are not visible.
+- Check whether bending angles, leg lengths, shape codes, and bar dimensions in the schedule match the bending shape drawings.
+- Report when a shown angle or dimension is clearly wrong, contradictory, or impossible for the stated shape code.
 
 2. Stirrup hook / anchorage check
-- Check whether stirrup hook length, hook extension, return leg, or anchorage detail is visibly sufficient according to Eurocode 2 / drawing-stated Eurocode requirements.
-- Only report if the hook length or anchorage detail is explicitly shown and clearly insufficient, missing, or inconsistent.
-- Do NOT calculate Eurocode compliance if required inputs are missing.
-- Do NOT assume National Annex values unless they are visible in the drawing or project notes.
+- Check whether stirrup hook length, return leg, and anchorage detail are visibly consistent with Eurocode 2 closed-link detailing.
+- Report only when the hook or anchorage is explicitly shown and is clearly insufficient, missing, or inconsistent with stated requirements.
 
-3. Total mass check
-- Check whether total mass values in the bar schedule are arithmetically consistent with visible values such as diameter, length, quantity, unit mass, and total length.
-- Report clear calculation mismatches only when the required input values are visible.
-- Do NOT guess missing unit weight, steel density, or hidden schedule fields.
+3. Total mass / weight check
+- Check whether total mass or weight values in the bar schedule are arithmetically consistent with the visible inputs: diameter, length, quantity, and unit mass.
+- Report clear calculation mismatches only when all required input values are visible.
 
-4. Abnormal quantity check by position / mark
-- Check whether the quantity of bars for each position / mark appears unusually high or inconsistent compared with the drawing context, repetition count, schedule, and callouts.
-- Report only clear anomalies, such as one position having a quantity that contradicts the visible layout or repeated member count.
-- Do NOT report merely because a quantity is large.
-- Do NOT infer intended quantities from incomplete details.
+4. Abnormal quantity check
+- Check whether bar quantities for each mark/position appear consistent with the drawing layout, member count, and schedule.
+- Report only clear anomalies where a quantity contradicts the visible arrangement (e.g., schedule says 48 but drawing shows 3 repetitions of 12 = 36).
 
 5. Bar mark schematic coverage
-- Identify all visible bar marks / positions listed in the bar schedule.
-- Check whether each listed mark has at least one corresponding schematic, bending shape, or placement indication in the drawing.
-- Report a missing schematic only when the mark is clearly listed and no corresponding shape/detail/placement reference is visible anywhere in the PDF.
-- Do NOT report missing coverage if the mark may be represented by a clearly shared typical detail or grouped shape reference.
+- Identify all bar marks listed in the schedule.
+- Check whether each listed mark has at least one corresponding bending shape, schematic, or placement detail in the drawing.
+- Report a missing schematic only when the mark is clearly listed and no corresponding shape or detail is visible anywhere in the PDF.
 
 6. Mesh reinforcement schedule presence
-- If the drawing contains any mesh reinforcement (thép lưới / welded wire mesh / fabric reinforcement), check whether a mesh schedule or mesh usage table is present in the drawing.
-- Report as an error if mesh reinforcement is clearly shown or referenced in the drawing but no corresponding mesh schedule or mesh table is visible.
-- Do NOT report if no mesh reinforcement is present in the drawing.
-- Do NOT report if the mesh schedule may be on a separate referenced sheet that is explicitly cited.
+- If mesh reinforcement is shown or referenced anywhere in the drawing, check whether a mesh schedule or mesh usage table is present.
+- Report as error if mesh is clearly used but no schedule is visible.
+- Skip this check entirely (report ✓ clean summary) if no mesh reinforcement is present.
 
 7. Mesh utilisation ratio check
-- If a mesh schedule or mesh usage table is visible, check whether the utilisation ratio (used area / total sheet area, or equivalent ratio shown in the table) is above 85% for each mesh sheet or the overall summary.
-- Report as a warning if any mesh sheet or the overall utilisation ratio is clearly shown and falls below 85%, indicating poor optimisation and excessive waste.
-- Report as an error if the ratio is below 70%.
-- Only report when the utilisation ratio or the required input values (used quantity, total quantity, or equivalent) are explicitly visible in the table.
-- Do NOT calculate or estimate the ratio if the values are not clearly shown.
-- Do NOT assume a default sheet size or standard mesh dimension that is not stated in the drawing.
+- If a mesh schedule is visible, check whether the utilisation ratio is shown and is above 85%.
+- Report as warning if utilisation is below 85%; report as error if below 70%.
+- Skip this check (report ✓ clean summary) if no mesh schedule is visible.
 
-STRICT ANTI-HALLUCINATION RULES:
-- Report ONLY issues directly visible in the PDF.
-- Do NOT invent dimensions, bar marks, quantities, angles, or hook lengths.
-- Do NOT infer design intent.
-- Do NOT assume hidden project standards.
-- Do NOT use Eurocode checks when required inputs are not visible.
-- Do NOT report possible issues.
-- Do NOT report low-confidence observations.
-- If confidence is below 0.85, omit the issue.
-- If two compared pieces of information are not both clearly visible, do not report a mismatch.
-- If the schedule and bending details are clear and consistent, return an empty issues list.
+REPORTING RULES:
+For EACH of the 7 check areas above, you MUST output at least one result:
+- If one or more issues are found: report each as an issue (error / warning / info).
+- If no issues are found in a check area: output exactly ONE info item with:
+  - severity: "info"
+  - description: "✓ [Check name]: [brief description of what was inspected] — no issues found."
+  - page: 1
+  - location: "entire drawing"
+  - confidence: 1.0
+  Example: "✓ Total mass check: unit masses, lengths, and quantities verified for all visible bar marks — totals are consistent."
+- For checks that are not applicable (e.g., no mesh present): output one info item:
+  - description: "✓ [Check name]: not applicable — [reason, e.g., 'no mesh reinforcement present in this drawing']."
+  - confidence: 1.0
+
+MISSING INFORMATION RULE:
+- If a required value is missing and prevents completing a check, report:
+  - severity: "warning"
+  - description: "[check area]: required information is missing or unreadable — [what is missing, why it matters]."
+  - confidence: 0.90
+
+CONFIDENCE RULE:
+- If your confidence in an issue is below 0.70, omit it.
+- Do not report Eurocode compliance when the required input values (cover, diameter, fyk, fck, National Annex) are not explicitly visible.
 
 SEVERITY RULES:
-- error: clear issue likely to cause fabrication, installation, quantity, or compliance error.
-- warning: clear inconsistency or missing information that should be reviewed.
-- info: minor clarity issue with low practical impact.
+- error: clear issue that would cause fabrication, quantity, compliance, or installation mistakes.
+- warning: clear inconsistency, missing required information, or out-of-range value that should be reviewed.
+- info: minor clarity issue with low practical impact, or a clean-check summary (✓).
 
 Each issue must include:
 - severity
@@ -88,7 +90,7 @@ Do not include explanations outside the structured output.\
 
 class _BendIssue(BaseModel):
     severity: str = Field(description="error, warning, or info")
-    description: str = Field(description="Concise description of the issue")
+    description: str = Field(description="Concise description of the issue or clean-check summary")
     page: int = Field(description="1-indexed page number where the issue appears")
     location: str = Field(description="Approximate visual location, e.g. 'bar schedule row 4'")
     confidence: float = Field(description="Confidence score between 0.0 and 1.0")
@@ -105,7 +107,7 @@ def bend_check(state: GraphState) -> dict:
     llm = ChatAnthropic(  # type: ignore[call-arg]
         model="claude-sonnet-4-5",  # type: ignore[call-arg]
         temperature=0,
-        max_tokens=2048,  # type: ignore[call-arg]
+        max_tokens=4096,  # type: ignore[call-arg]
     ).with_structured_output(_BendResult).with_retry(stop_after_attempt=2)
 
     result: _BendResult = llm.invoke([
@@ -115,7 +117,7 @@ def bend_check(state: GraphState) -> dict:
                 "type": "document",
                 "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data},
             },
-            {"type": "text", "text": "Review the full drawing PDF and report all QA issues per the instructions."},
+            {"type": "text", "text": "Review the full drawing PDF. For each of the 7 check areas, report issues found or a clean summary as instructed."},
         ]),
     ])
 
@@ -129,5 +131,6 @@ def bend_check(state: GraphState) -> dict:
             "confidence": item.confidence,
         }
         for item in result.issues
+        if item.confidence >= 0.60
     ]
     return {"bend_issues": issues}

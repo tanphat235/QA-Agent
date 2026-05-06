@@ -18,7 +18,8 @@ interface Issue {
 interface Section {
   category: string
   title: string
-  count: number
+  count: number        // total rows including ✓ clean summaries
+  issue_count: number  // real findings only (errors + warnings + non-summary info)
   issues: Issue[]
 }
 interface AnalysisResult {
@@ -172,6 +173,7 @@ function normalizeAnalyzeJsonToResult(body: unknown): AnalysisResult | null {
       category: cat,
       title: _CAT_TITLES[cat] ?? cat,
       count: byCategory[cat].length,
+      issue_count: byCategory[cat].filter(i => !i.description.startsWith('✓')).length,
       issues: byCategory[cat],
     }))
 
@@ -618,7 +620,7 @@ export default function App() {
                     <span className="ml-2 text-xs font-normal text-gray-400">· {result.pdf_pages} page(s)</span>
                   </h2>
                   <p className="text-[11px] text-gray-400 mt-0.5 tracking-wide">
-                    {result.sections.map(s => `${s.title}: ${s.count}`).join(' · ')}
+                    {result.sections.map(s => `${s.title}: ${s.issue_count ?? s.count}`).join(' · ')}
                   </p>
                 </div>
                 <button onClick={downloadReport}
@@ -663,24 +665,28 @@ export default function App() {
                   </thead>
                   <tbody className="divide-y divide-gray-50">
                     {result.sections.flatMap(s => s.issues).map((issue: Issue) => {
+                      const isSummary = issue.description.startsWith('✓')
                       const { cls, label } = severityBadge(issue.severity)
                       return (
-                        <tr key={issue.id} className="hover:bg-blue-50/20 transition-colors">
-                          <td className="px-5 py-3.5 text-gray-300 font-mono text-[11px]">{issue.id}</td>
-                          <td className="px-5 py-3.5">
-                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide ${catBadge(issue.category)}`}>
+                        <tr key={issue.id} className={`transition-colors ${isSummary ? 'bg-gray-50/40 hover:bg-gray-50/70' : 'hover:bg-blue-50/20'}`}>
+                          <td className={`px-5 py-3 font-mono text-[11px] ${isSummary ? 'text-gray-200' : 'text-gray-300'}`}>{issue.id}</td>
+                          <td className="px-5 py-3">
+                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide ${isSummary ? 'bg-gray-100 text-gray-300' : catBadge(issue.category)}`}>
                               {issue.category}
                             </span>
                           </td>
-                          <td className="px-5 py-3.5 text-gray-500 text-xs">{issue.page}</td>
-                          <td className="px-5 py-3.5 text-gray-500 max-w-[140px] truncate text-xs" title={issue.location}>
+                          <td className={`px-5 py-3 text-xs ${isSummary ? 'text-gray-300' : 'text-gray-500'}`}>{issue.page}</td>
+                          <td className={`px-5 py-3 max-w-[140px] truncate text-xs ${isSummary ? 'text-gray-300' : 'text-gray-500'}`} title={issue.location}>
                             {issue.location}
                           </td>
-                          <td className="px-5 py-3.5 text-gray-500 text-xs">{Math.round(issue.confidence * 100)}%</td>
-                          <td className="px-5 py-3.5">
-                            <span className={`px-2.5 py-0.5 rounded text-[10px] font-bold tracking-wide ${cls}`}>{label}</span>
+                          <td className={`px-5 py-3 text-xs ${isSummary ? 'text-gray-300' : 'text-gray-500'}`}>{Math.round(issue.confidence * 100)}%</td>
+                          <td className="px-5 py-3">
+                            {isSummary
+                              ? <span className="px-2.5 py-0.5 rounded text-[10px] font-bold tracking-wide bg-gray-100 text-gray-400 border border-gray-200">PASS</span>
+                              : <span className={`px-2.5 py-0.5 rounded text-[10px] font-bold tracking-wide ${cls}`}>{label}</span>
+                            }
                           </td>
-                          <td className="px-5 py-3.5 text-gray-700 max-w-sm text-xs leading-relaxed">{issue.description}</td>
+                          <td className={`px-5 py-3 max-w-sm text-xs leading-relaxed ${isSummary ? 'text-gray-400 italic' : 'text-gray-700'}`}>{issue.description}</td>
                         </tr>
                       )
                     })}

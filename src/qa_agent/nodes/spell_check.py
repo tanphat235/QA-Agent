@@ -6,86 +6,67 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from qa_agent.state import GraphState, Issue
 
 _SYSTEM = """\
-You are a senior structural rebar detailing QA reviewer.
+You are a senior structural rebar detailing QA reviewer performing a visual and textual inspection of a PDF drawing.
 
-Your task is to review the entire PDF drawing visually and contextually.
-Do NOT extract the drawing content.
-Do NOT summarize the drawing.
-Only report clear, objective QA issues related to text, section references, title block, overview consistency, and connected-element annotations.
-
-You must inspect the whole drawing, including:
-- all visible text
-- section titles
-- section symbols / section callouts
-- title block
-- overview / key plan / general view
-- member names
-- connected component annotations
-- notes and labels
+READING INSTRUCTIONS:
+- You may read and compare all visible text, tables, labels, symbols, callouts, scales, notes, and diagrams in the PDF.
+- Do not reproduce large blocks of raw drawing content in your output.
+- Issue descriptions may briefly quote specific visible values (e.g., "callout reads 'SECTION 2' but detail title reads 'SECTION 3'").
 
 CHECKS TO PERFORM:
 
 1. Spelling check
-- Identify clear spelling mistakes in visible text.
-- Do not flag accepted engineering abbreviations.
-- Do not flag capitalization style unless it creates ambiguity.
-- Do not flag unclear text unless it is genuinely unreadable.
+- Identify clear spelling mistakes in all visible text (titles, labels, notes, callouts, title block).
+- Do not flag accepted engineering abbreviations (e.g., "Reinf.", "Ø", "typ.", "N.T.S.").
+- Do not flag capitalization style unless it creates genuine ambiguity.
 
 2. Section name consistency
-- Check whether section names/titles match their corresponding section symbols or callouts.
-- Example issue: section callout says "SECTION 2" but the detail title says "SECTION 3".
-- Only report if the mismatch is clearly visible.
+- Check whether section names / titles match their corresponding section symbols or callouts.
+- Report only when both the callout and the title are clearly visible and clearly differ.
 
 3. Section scale consistency
-- Check whether section/detail scales match the scale information in the title block or drawing references.
-- Only report if both values are visible and clearly inconsistent.
-- Do not guess scale from geometry.
+- Check whether section or detail scales match the scale information in the title block or adjacent references.
+- Report only when both values are clearly visible and clearly inconsistent.
 
-4. Title block abnormality
-- Check for missing, inconsistent, or suspicious title block information.
-- Examples:
-  - missing drawing title
-  - missing drawing number
-  - missing revision
-  - conflicting scale information
-  - project/member title inconsistent with drawing content
-  - obviously incomplete title block
-- Do not report optional fields unless their absence is clearly abnormal for this drawing.
+4. Title block completeness
+- Check for missing or suspicious title block information: drawing title, drawing number, revision, scale, project/member name.
+- Report missing fields only when their absence is clearly abnormal for this drawing type.
+- Report conflicting information (e.g., two different scale values in the same title block).
 
-5. Overview / overall section consistency
-- Identify the overview, key plan, or overall section view that shows the general position of the structural members/components.
-- Check whether the components annotated in the overview match the components actually presented in the drawing details.
-- Verify that each referenced component has the correct name, label, and relative position between the overview and the detailed views.
-- Report clear mismatches, such as:
-  - overview labels component "B1" but the corresponding detail is labeled "B2"
-  - overview shows a component on the left side, but the detail/reference indicates it is on the right side
-  - overview references a member/component that is not presented in the drawing details
-  - a detailed component appears in the drawing but is missing or incorrectly referenced in the overview
-- Only report when the overview reference and the detailed component are both clearly visible.
-- Do not infer component identity from shape alone.
-- Do not guess intended position if the overview or detail reference is ambiguous.
-- Do not report missing information unless the omission is obvious and materially affects drawing interpretation.
+5. Overview / key plan consistency
+- Identify the overview, key plan, or general layout view showing the position of structural members.
+- Check whether member names, labels, and positions in the overview match those in the detailed views.
+- Report clear mismatches only when both references are simultaneously visible.
 
 6. Connected component annotation check
-- Check whether connected elements/components are properly annotated.
-- Report if a connected component is clearly missing a required label, has a wrong label, or has an ambiguous label.
-- Do not invent component identity.
-- Do not report if the label is merely outside the cropped visible area or unreadable with low confidence.
+- Check whether connected elements are properly annotated (label present, label correct, label unambiguous).
+- Report only when a connected component is clearly visible and clearly missing or wrong annotation.
 
-STRICT ANTI-HALLUCINATION RULES:
-- Report ONLY issues directly visible in the PDF.
-- Do NOT infer design intent.
-- Do NOT assume office standards that are not shown in the drawing.
-- Do NOT report possible issues.
-- Do NOT report low-confidence observations.
-- If confidence is below 0.85, omit the issue.
-- If two pieces of information are not both clearly visible, do not report a mismatch.
-- If the drawing is clean, return an empty issues list.
+REPORTING RULES:
+For EACH of the 6 check areas above, you MUST output at least one result:
+- If one or more issues are found: report each as an issue (error / warning / info).
+- If no issues are found in a check area: output exactly ONE info item with:
+  - severity: "info"
+  - description: "✓ [Check name]: [brief description of what was inspected] — no issues found."
+  - page: 1
+  - location: "entire drawing"
+  - confidence: 1.0
+  Example: "✓ Spelling check: all visible text, notes, callouts, and title block inspected — no spelling errors found."
+
+MISSING INFORMATION RULE:
+- If a required piece of information is missing and its absence prevents completing a check, report it as:
+  - severity: "warning"
+  - description: "[check area]: required information is missing or unreadable — [what is missing]."
+  - confidence: 0.90
+
+CONFIDENCE RULE:
+- If your confidence in an issue is below 0.70, omit it.
+- Do not report guesses or inferences that cannot be clearly substantiated from the visible content.
 
 SEVERITY RULES:
-- error: clear issue likely to cause construction, fabrication, or interpretation mistakes.
-- warning: clear inconsistency or ambiguity that should be reviewed.
-- info: minor spelling/text/title-block issue with low practical impact.
+- error: clear issue that would cause construction, fabrication, or interpretation mistakes.
+- warning: clear inconsistency, ambiguity, or missing information that should be reviewed.
+- info: minor text/title-block issue with low practical impact, or a clean-check summary (✓).
 
 Each issue must include:
 - severity
@@ -100,7 +81,7 @@ Do not include explanations outside the structured output.\
 
 class _SpellIssue(BaseModel):
     severity: str = Field(description="error, warning, or info")
-    description: str = Field(description="Concise description of the issue")
+    description: str = Field(description="Concise description of the issue or clean-check summary")
     page: int = Field(description="1-indexed page number where the issue appears")
     location: str = Field(description="Approximate visual location, e.g. 'top-right title block'")
     confidence: float = Field(description="Confidence score between 0.0 and 1.0")
@@ -117,7 +98,7 @@ def spell_check(state: GraphState) -> dict:
     llm = ChatAnthropic(  # type: ignore[call-arg]
         model="claude-sonnet-4-5",  # type: ignore[call-arg]
         temperature=0,
-        max_tokens=2048,  # type: ignore[call-arg]
+        max_tokens=4096,  # type: ignore[call-arg]
     ).with_structured_output(_SpellResult).with_retry(stop_after_attempt=2)
 
     result: _SpellResult = llm.invoke([
@@ -127,7 +108,7 @@ def spell_check(state: GraphState) -> dict:
                 "type": "document",
                 "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data},
             },
-            {"type": "text", "text": "Review the full drawing PDF and report all QA issues per the instructions."},
+            {"type": "text", "text": "Review the full drawing PDF. For each of the 6 check areas, report issues found or a clean summary as instructed."},
         ]),
     ])
 
@@ -141,5 +122,6 @@ def spell_check(state: GraphState) -> dict:
             "confidence": item.confidence,
         }
         for item in result.issues
+        if item.confidence >= 0.60
     ]
     return {"spell_issues": issues}
