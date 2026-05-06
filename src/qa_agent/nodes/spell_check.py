@@ -118,7 +118,7 @@ def spell_check(state: GraphState) -> dict:
         model="claude-sonnet-4-5",
         temperature=0,
         max_tokens=2048,
-    ).with_structured_output(_SpellResult).with_retry(stop_after_attempt=3)
+    ).with_structured_output(_SpellResult).with_retry(stop_after_attempt=2)
 
     result: _SpellResult = llm.invoke([
         SystemMessage(content=_SYSTEM),
