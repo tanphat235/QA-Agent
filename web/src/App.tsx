@@ -7,21 +7,26 @@ import {
 
 // ── Types ────────────────────────────────────────────────────
 interface Issue {
+  id: string
   category: string
-  severity: string
+  severity: string   // "ERROR" | "WARNING" | "INFO"
   description: string
   page: number
   location: string
   confidence: number
 }
+interface Section {
+  category: string
+  title: string
+  count: number
+  issues: Issue[]
+}
 interface AnalysisResult {
   status: string
+  message: string
   pdf_pages: number
-  summary: {
-    total: number; errors: number; warnings: number; info: number
-    by_category: { spell: number; bend: number; rebar: number }
-  }
-  issues: Issue[]
+  summary: { total: number; ERROR: number; WARNING: number; INFO: number }
+  sections: Section[]
 }
 type AppState = 'idle' | 'ready' | 'analyzing' | 'done' | 'error'
 
@@ -43,9 +48,9 @@ const NAV = [
 
 // ── Helpers ──────────────────────────────────────────────────
 function severityBadge(s: string) {
-  if (s === 'error')   return { cls: 'bg-red-100 text-red-700 border border-red-200',     label: 'FAIL' }
-  if (s === 'warning') return { cls: 'bg-amber-100 text-amber-700 border border-amber-200', label: 'WARN' }
-  return                       { cls: 'bg-green-100 text-green-700 border border-green-200',  label: 'OK' }
+  if (s === 'ERROR')   return { cls: 'bg-red-100 text-red-700 border border-red-200',      label: 'FAIL' }
+  if (s === 'WARNING') return { cls: 'bg-amber-100 text-amber-700 border border-amber-200', label: 'WARN' }
+  return                       { cls: 'bg-green-100 text-green-700 border border-green-200', label: 'OK' }
 }
 function catBadge(c: string) {
   if (c === 'rebar') return 'bg-blue-100 text-blue-700'
@@ -60,11 +65,24 @@ function isAnalysisResultShape(x: unknown): x is AnalysisResult {
   const s = o.summary
   return (
     typeof o.status === 'string' &&
+    typeof o.message === 'string' &&
     typeof o.pdf_pages === 'number' &&
     s != null &&
     typeof s === 'object' &&
-    Array.isArray(o.issues)
+    Array.isArray(o.sections)
   )
+}
+
+const _CAT_ORDER = ['bend', 'rebar', 'spell'] as const
+const _CAT_TITLES: Record<string, string> = {
+  spell: 'Drawing Labels & Annotation',
+  bend:  'Bending & Bar Schedule',
+  rebar: 'Rebar Labels & Dimensions',
+}
+
+function normalizeSeverity(s: unknown): string {
+  const up = typeof s === 'string' ? s.toUpperCase() : 'INFO'
+  return ['ERROR', 'WARNING', 'INFO'].includes(up) ? up : 'INFO'
 }
 
 function normalizeAnalyzeJsonToResult(body: unknown): AnalysisResult | null {
@@ -77,8 +95,9 @@ function normalizeAnalyzeJsonToResult(body: unknown): AnalysisResult | null {
   if (!inner || typeof inner !== 'object') return null
   const raw = inner as Record<string, unknown>
 
-  const issues: Issue[] = []
-  for (const cat of ['spell', 'bend', 'rebar'] as const) {
+  const rawIssues: Omit<Issue, 'id'>[] = []
+
+  for (const cat of _CAT_ORDER) {
     const section = raw[cat]
     if (!section || typeof section !== 'object') continue
     const list = (section as { issues?: unknown }).issues
@@ -86,74 +105,83 @@ function normalizeAnalyzeJsonToResult(body: unknown): AnalysisResult | null {
     for (const item of list) {
       if (!item || typeof item !== 'object') continue
       const it = item as Record<string, unknown>
-      const description =
-        typeof it.message === 'string'
-          ? it.message
-          : typeof it.description === 'string'
-            ? it.description
-            : JSON.stringify(item)
-      const location =
-        typeof it.token === 'string'
-          ? it.token
-          : typeof it.location === 'string'
-            ? it.location
-            : ''
-      const page = typeof it.page === 'number' ? it.page : 0
-      const severity = typeof it.severity === 'string' ? it.severity : 'info'
-      let confidence = 0.85
-      if (typeof it.confidence === 'number') {
-        confidence = it.confidence > 1 ? it.confidence / 100 : it.confidence
-      }
-      issues.push({ category: cat, severity, description, page, location, confidence })
-    }
-  }
-
-  const pdfPages =
-    typeof raw.pdf_pages === 'number'
-      ? raw.pdf_pages
-      : typeof root.pdf_pages === 'number'
-        ? root.pdf_pages
-        : 0
-
-  if (issues.length === 0 && Array.isArray(raw.issues)) {
-    for (const item of raw.issues) {
-      if (!item || typeof item !== 'object') continue
-      const it = item as Record<string, unknown>
-      const cat = typeof it.category === 'string' ? it.category : 'spell'
-      issues.push({
+      rawIssues.push({
         category: cat,
-        severity: typeof it.severity === 'string' ? it.severity : 'info',
-        description: typeof it.description === 'string' ? it.description : String(it.message ?? ''),
+        severity: normalizeSeverity(it.severity),
+        description:
+          typeof it.message === 'string' ? it.message
+          : typeof it.description === 'string' ? it.description
+          : JSON.stringify(item),
         page: typeof it.page === 'number' ? it.page : 0,
-        location: typeof it.location === 'string' ? it.location : '',
-        confidence:
-          typeof it.confidence === 'number'
-            ? (it.confidence > 1 ? it.confidence / 100 : it.confidence)
-            : 0.85,
+        location:
+          typeof it.token === 'string' ? it.token
+          : typeof it.location === 'string' ? it.location
+          : '',
+        confidence: typeof it.confidence === 'number'
+          ? (it.confidence > 1 ? it.confidence / 100 : it.confidence)
+          : 0.85,
       })
     }
   }
 
-  const total = issues.length
-  const errors = issues.filter((i) => i.severity === 'error').length
-  const warnings = issues.filter((i) => i.severity === 'warning').length
-  const info = issues.filter((i) => i.severity === 'info').length
+  if (rawIssues.length === 0 && Array.isArray(raw.issues)) {
+    for (const item of raw.issues) {
+      if (!item || typeof item !== 'object') continue
+      const it = item as Record<string, unknown>
+      rawIssues.push({
+        category: typeof it.category === 'string' ? it.category : 'spell',
+        severity: normalizeSeverity(it.severity),
+        description: typeof it.description === 'string' ? it.description : String(it.message ?? ''),
+        page: typeof it.page === 'number' ? it.page : 0,
+        location: typeof it.location === 'string' ? it.location : '',
+        confidence: typeof it.confidence === 'number'
+          ? (it.confidence > 1 ? it.confidence / 100 : it.confidence)
+          : 0.85,
+      })
+    }
+  }
+
+  const pdfPages =
+    typeof raw.pdf_pages === 'number' ? raw.pdf_pages
+    : typeof root.pdf_pages === 'number' ? root.pdf_pages
+    : 0
+
+  // Assign sequential IDs per category
+  const catCounters: Record<string, number> = {}
+  const issues: Issue[] = rawIssues.map(issue => {
+    const cat = issue.category
+    catCounters[cat] = (catCounters[cat] ?? 0) + 1
+    return { ...issue, id: `${cat.toUpperCase()}-${String(catCounters[cat]).padStart(3, '0')}` }
+  })
+
+  const byCategory: Record<string, Issue[]> = {}
+  for (const issue of issues) {
+    if (!byCategory[issue.category]) byCategory[issue.category] = []
+    byCategory[issue.category].push(issue)
+  }
+
+  const sections: Section[] = _CAT_ORDER
+    .filter(cat => (byCategory[cat]?.length ?? 0) > 0)
+    .map(cat => ({
+      category: cat,
+      title: _CAT_TITLES[cat] ?? cat,
+      count: byCategory[cat].length,
+      issues: byCategory[cat],
+    }))
+
+  const total   = issues.length
+  const ERROR   = issues.filter(i => i.severity === 'ERROR').length
+  const WARNING = issues.filter(i => i.severity === 'WARNING').length
+  const INFO    = issues.filter(i => i.severity === 'INFO').length
 
   return {
     status: 'completed',
+    message: total === 0
+      ? 'No QA issues found. Drawing is clean.'
+      : `Analysis completed. Found ${total} issue(s): ${ERROR} error, ${WARNING} warning, ${INFO} info.`,
     pdf_pages: pdfPages,
-    summary: {
-      total,
-      errors,
-      warnings,
-      info,
-      by_category: {
-        spell: issues.filter((i) => i.category === 'spell').length,
-        bend: issues.filter((i) => i.category === 'bend').length,
-        rebar: issues.filter((i) => i.category === 'rebar').length,
-      },
-    },
-    issues,
+    summary: { total, ERROR, WARNING, INFO },
+    sections,
   }
 }
 
@@ -297,8 +325,8 @@ export default function App() {
 
   const progress = Math.round((doneNodes.length / NODES.length) * 100)
   const overall  = result
-    ? result.summary.errors   > 0 ? 'FAIL'
-    : result.summary.warnings > 0 ? 'WARN' : 'PASS'
+    ? result.summary.ERROR   > 0 ? 'FAIL'
+    : result.summary.WARNING > 0 ? 'WARN' : 'PASS'
     : null
 
   // ── Render ─────────────────────────────────────────────────
@@ -443,7 +471,7 @@ export default function App() {
                         <span className={`text-[9px] px-2 py-0.5 rounded-full font-bold tracking-widest ${
                           overall === 'FAIL' ? 'bg-red-50 text-red-600 border border-red-100' : 'bg-green-50 text-green-600 border border-green-100'
                         }`}>
-                          DONE · {result?.summary.errors ?? 0} ERR
+                          DONE · {result?.summary.ERROR ?? 0} ERR
                         </span>
                       )}
                       {appState === 'error' && (
@@ -511,9 +539,9 @@ export default function App() {
                   {/* Done summary */}
                   {appState === 'done' && result && (
                     <div className="flex gap-4 text-xs px-0.5">
-                      <span className="text-red-500 font-semibold">{result.summary.errors} errors</span>
-                      <span className="text-amber-500 font-semibold">{result.summary.warnings} warnings</span>
-                      <span className="text-green-500 font-semibold">{result.summary.info} OK</span>
+                      <span className="text-red-500 font-semibold">{result.summary.ERROR} errors</span>
+                      <span className="text-amber-500 font-semibold">{result.summary.WARNING} warnings</span>
+                      <span className="text-green-500 font-semibold">{result.summary.INFO} OK</span>
                       <span className="ml-auto text-gray-400">{result.pdf_pages} page(s)</span>
                     </div>
                   )}
@@ -533,7 +561,7 @@ export default function App() {
                     <span className="ml-2 text-xs font-normal text-gray-400">· {result.pdf_pages} page(s)</span>
                   </h2>
                   <p className="text-[11px] text-gray-400 mt-0.5 tracking-wide">
-                    Spell: {result.summary.by_category.spell} · Bend: {result.summary.by_category.bend} · Rebar: {result.summary.by_category.rebar}
+                    {result.sections.map(s => `${s.title}: ${s.count}`).join(' · ')}
                   </p>
                 </div>
                 <button onClick={downloadReport}
@@ -545,13 +573,13 @@ export default function App() {
               {/* Summary strip */}
               <div className="px-6 py-3 bg-gray-50/60 border-b border-gray-100 flex items-center gap-6 flex-wrap">
                 <span className="flex items-center gap-1.5 text-xs text-gray-600">
-                  <CheckCircle size={13} className="text-green-500" /><strong>{result.summary.info}</strong> OK
+                  <CheckCircle size={13} className="text-green-500" /><strong>{result.summary.INFO}</strong> OK
                 </span>
                 <span className="flex items-center gap-1.5 text-xs text-gray-600">
-                  <AlertTriangle size={13} className="text-amber-500" /><strong>{result.summary.warnings}</strong> Warnings
+                  <AlertTriangle size={13} className="text-amber-500" /><strong>{result.summary.WARNING}</strong> Warnings
                 </span>
                 <span className="flex items-center gap-1.5 text-xs text-gray-600">
-                  <AlertCircle size={13} className="text-red-500" /><strong>{result.summary.errors}</strong> Errors
+                  <AlertCircle size={13} className="text-red-500" /><strong>{result.summary.ERROR}</strong> Errors
                 </span>
                 <div className="ml-auto flex items-center gap-2">
                   <span className="text-[10px] text-gray-400 font-semibold uppercase tracking-widest">Overall</span>
@@ -577,11 +605,11 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-50">
-                    {result.issues.map((issue, i) => {
+                    {result.sections.flatMap(s => s.issues).map((issue: Issue) => {
                       const { cls, label } = severityBadge(issue.severity)
                       return (
-                        <tr key={i} className="hover:bg-blue-50/20 transition-colors">
-                          <td className="px-5 py-3.5 text-gray-300 font-mono text-[11px]">{String(i + 1).padStart(3, '0')}</td>
+                        <tr key={issue.id} className="hover:bg-blue-50/20 transition-colors">
+                          <td className="px-5 py-3.5 text-gray-300 font-mono text-[11px]">{issue.id}</td>
                           <td className="px-5 py-3.5">
                             <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide ${catBadge(issue.category)}`}>
                               {issue.category}
@@ -607,7 +635,7 @@ export default function App() {
                 <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-green-500" />PASS</span>
                 <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-red-500" />FAIL</span>
                 <span className="ml-1">
-                  {result.summary.total} issues · <strong className="text-gray-600">{result.summary.total - result.summary.errors}</strong> passed · <strong className="text-red-500">{result.summary.errors}</strong> failed
+                  {result.summary.total} issues · <strong className="text-gray-600">{result.summary.total - result.summary.ERROR}</strong> passed · <strong className="text-red-500">{result.summary.ERROR}</strong> failed
                 </span>
               </div>
             </div>
