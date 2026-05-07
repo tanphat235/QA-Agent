@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import {
-  LayoutDashboard, Upload, History, Settings, HelpCircle,
+  LayoutDashboard, History, HelpCircle,
   FileText, CheckCircle, AlertTriangle,
   Download, Loader2, ChevronLeft, ChevronRight, ChevronDown,
   XCircle,
@@ -34,8 +34,16 @@ interface AnalysisResult {
   summary: { total: number; ERROR: number; WARNING: number; INFO: number }
   sections: Section[]
 }
+interface HistoryEntry {
+  id: string
+  filename: string
+  timestamp: number
+  checks: string[]
+  result: AnalysisResult
+}
 type AppState    = 'idle' | 'ready' | 'analyzing' | 'done' | 'error'
 type ResultFilter = null | 'passed' | 'failed' | 'issues'
+type ActiveView  = 'dashboard' | 'history'
 
 // ── Constants ────────────────────────────────────────────────
 const NODES = [
@@ -53,10 +61,8 @@ const CHECK_OPTIONS = [
   { key: 'rebar', label: 'Rebar Labels & Dims',   color: 'blue' },
 ] as const
 const NAV = [
-  { icon: LayoutDashboard, label: 'Dashboard', active: true },
-  { icon: Upload,          label: 'Uploads' },
-  { icon: History,         label: 'Check History' },
-  { icon: Settings,        label: 'Settings' },
+  { icon: LayoutDashboard, label: 'Dashboard',   view: 'dashboard' as ActiveView },
+  { icon: History,         label: 'Check History', view: 'history'   as ActiveView },
 ]
 
 // ── Tree-building types ──────────────────────────────────────
@@ -121,6 +127,37 @@ function severityBadge(s: string) {
   if (s === 'ERROR')   return { cls: 'bg-red-100 text-red-700 border border-red-200',      label: 'FAIL' }
   if (s === 'WARNING') return { cls: 'bg-amber-100 text-amber-700 border border-amber-200', label: 'WARN' }
   return                       { cls: 'bg-green-100 text-green-700 border border-green-200', label: 'OK' }
+}
+
+// ── History storage ───────────────────────────────────────────
+const HISTORY_KEY = 'qa_history'
+const HISTORY_MAX = 10
+
+function loadHistory(): HistoryEntry[] {
+  try { return JSON.parse(localStorage.getItem(HISTORY_KEY) ?? '[]') } catch { return [] }
+}
+function saveHistory(entries: HistoryEntry[]): void {
+  localStorage.setItem(HISTORY_KEY, JSON.stringify(entries.slice(0, HISTORY_MAX)))
+}
+function fmtDate(ts: number): string {
+  const d    = new Date(ts)
+  const now  = new Date()
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  if (d.toDateString() === now.toDateString()) return `Today · ${time}`
+  if (d.toDateString() === new Date(now.getTime() - 86400000).toDateString()) return `Yesterday · ${time}`
+  return `${d.toLocaleDateString([], { day: 'numeric', month: 'short', year: 'numeric' })} · ${time}`
+}
+function historyStats(entry: HistoryEntry) {
+  const all      = entry.result.sections.flatMap(s => s.issues)
+  const passed   = all.filter(i => i.passed === true).length
+  const failed   = all.filter(i => i.passed === false).length
+  const issues   = entry.result.sections.flatMap(s =>
+    buildCheckGroups(s.issues).flatMap(g => [
+      ...g.orphanIssues,
+      ...g.subItems.flatMap(sub => sub.issues),
+    ])
+  ).length
+  return { passed, failed, issues }
 }
 
 /** SSE handler sends AnalysisResult; some backends return JSON: { ok, filename, result: { spell: { issues }, ... } } */
@@ -274,6 +311,8 @@ export default function App() {
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set())
   const [expandedGroups,    setExpandedGroups]    = useState<Set<string>>(new Set())
   const [resultFilter,      setResultFilter]      = useState<ResultFilter>(null)
+  const [activeView,        setActiveView]        = useState<ActiveView>('dashboard')
+  const [historyEntries,    setHistoryEntries]    = useState<HistoryEntry[]>(() => loadHistory())
   const inputRef = useRef<HTMLInputElement>(null)
 
   const toggleSection = (cat: string) =>
@@ -304,6 +343,29 @@ export default function App() {
     }
     setExpandedGroups(expandKeys)
   }, [result])
+
+  // Save completed analysis to localStorage history
+  useEffect(() => {
+    if (appState !== 'done' || !result || !file) return
+    const entry: HistoryEntry = {
+      id: `${Date.now()}_${file.name}`,
+      filename: file.name,
+      timestamp: Date.now(),
+      checks: [...enabledChecks],
+      result,
+    }
+    setHistoryEntries(prev => {
+      const next = [entry, ...prev.filter(e => e.filename !== file.name || Math.abs(e.timestamp - entry.timestamp) > 5000)].slice(0, HISTORY_MAX)
+      saveHistory(next)
+      return next
+    })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appState])
+
+  const clearHistory = () => {
+    localStorage.removeItem(HISTORY_KEY)
+    setHistoryEntries([])
+  }
 
   const toggleCheck = (key: string) => {
     setEnabledChecks(prev =>
@@ -496,18 +558,28 @@ export default function App() {
 
         {/* Nav */}
         <nav className="flex-1 px-2.5 py-5 space-y-0.5">
-          {NAV.map(({ icon: Icon, label, active }) => (
-            <button key={label} title={!sidebarOpen ? label : undefined}
-              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-[13px] font-medium transition-all duration-150 ${
-                active
-                  ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/40'
-                  : 'text-slate-500 hover:bg-slate-800/70 hover:text-slate-200'
-              }`}
-            >
-              <Icon size={15} className="flex-shrink-0" />
-              {sidebarOpen && <span className="truncate">{label}</span>}
-            </button>
-          ))}
+          {NAV.map(({ icon: Icon, label, view }) => {
+            const isActive = activeView === view
+            const badge = view === 'history' && historyEntries.length > 0 ? historyEntries.length : null
+            return (
+              <button key={label} title={!sidebarOpen ? label : undefined}
+                onClick={() => setActiveView(view)}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-[13px] font-medium transition-all duration-150 ${
+                  isActive
+                    ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/40'
+                    : 'text-slate-500 hover:bg-slate-800/70 hover:text-slate-200'
+                }`}
+              >
+                <Icon size={15} className="flex-shrink-0" />
+                {sidebarOpen && <span className="truncate flex-1">{label}</span>}
+                {sidebarOpen && badge !== null && (
+                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${isActive ? 'bg-white/20 text-white' : 'bg-slate-700 text-slate-300'}`}>
+                    {badge}
+                  </span>
+                )}
+              </button>
+            )
+          })}
         </nav>
 
         {/* Support */}
@@ -526,12 +598,103 @@ export default function App() {
         {/* Header */}
         <header className="bg-white border-b border-gray-200/70 px-8 py-3.5 flex items-center flex-shrink-0">
           <div>
-            <h1 className="text-[15px] font-bold text-gray-900 tracking-tight">Dashboard</h1>
-            <p className="text-[11px] text-gray-400 mt-0.5 tracking-wide">Structural drawing validation · PDF analysis</p>
+            <h1 className="text-[15px] font-bold text-gray-900 tracking-tight">
+              {activeView === 'history' ? 'Check History' : 'Dashboard'}
+            </h1>
+            <p className="text-[11px] text-gray-400 mt-0.5 tracking-wide">
+              {activeView === 'history'
+                ? `${historyEntries.length} of ${HISTORY_MAX} recent analyses stored`
+                : 'Structural drawing validation · PDF analysis'}
+            </p>
           </div>
         </header>
 
         <div className="flex-1 overflow-y-auto p-7 space-y-5">
+
+          {/* ── History view ─────────────────────────────── */}
+          {activeView === 'history' && (
+            <div className="space-y-3">
+
+              {historyEntries.length === 0 ? (
+                <div className="bg-white rounded-2xl border border-gray-200/70 flex flex-col items-center justify-center py-16 gap-3 shadow-sm">
+                  <History size={32} className="text-gray-200" />
+                  <p className="text-sm font-medium text-gray-400">No analyses yet</p>
+                  <p className="text-xs text-gray-300">Complete an analysis to see it here</p>
+                  <button onClick={() => setActiveView('dashboard')}
+                    className="mt-2 px-5 py-2 bg-blue-600 text-white text-xs font-bold rounded-xl hover:bg-blue-700 transition-colors">
+                    Go to Dashboard
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <div className="flex justify-end">
+                    <button onClick={clearHistory}
+                      className="text-[11px] text-gray-400 hover:text-red-500 transition-colors font-medium flex items-center gap-1">
+                      <XCircle size={12} /> Clear all history
+                    </button>
+                  </div>
+
+                  {historyEntries.map(entry => {
+                    const { passed, failed, issues } = historyStats(entry)
+                    const checkLabels = entry.checks.map(c =>
+                      CHECK_OPTIONS.find(o => o.key === c)?.label ?? c
+                    )
+                    return (
+                      <div key={entry.id}
+                        className="bg-white rounded-2xl border border-gray-200/70 px-6 py-4 shadow-sm hover:border-blue-200 hover:shadow-md transition-all">
+                        <div className="flex items-start gap-4">
+                          <div className="w-9 h-9 rounded-xl bg-blue-50 border border-blue-100 flex items-center justify-center flex-shrink-0 mt-0.5">
+                            <FileText size={15} className="text-blue-500" />
+                          </div>
+
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-sm font-bold text-gray-800 truncate">{entry.filename}</span>
+                              <span className="text-[10px] text-gray-400 flex-shrink-0">{fmtDate(entry.timestamp)}</span>
+                            </div>
+
+                            <div className="flex gap-1.5 flex-wrap mt-1.5">
+                              {checkLabels.map(lbl => (
+                                <span key={lbl} className="text-[10px] px-2 py-0.5 bg-slate-100 text-slate-500 rounded-full font-medium">{lbl}</span>
+                              ))}
+                            </div>
+
+                            <div className="flex items-center gap-4 mt-2.5 text-xs">
+                              <span className="flex items-center gap-1 text-green-600">
+                                <CheckCircle size={11} /> <strong>{passed}</strong> passed
+                              </span>
+                              <span className={`flex items-center gap-1 ${failed > 0 ? 'text-red-600' : 'text-gray-400'}`}>
+                                <XCircle size={11} /> <strong>{failed}</strong> failed
+                              </span>
+                              {issues > 0 && (
+                                <span className="flex items-center gap-1 text-amber-600">
+                                  <AlertTriangle size={11} /> <strong>{issues}</strong> issues
+                                </span>
+                              )}
+                              <span className="text-gray-300 text-[10px]">{entry.result.pdf_pages} page(s)</span>
+                            </div>
+                          </div>
+
+                          <button
+                            onClick={() => {
+                              setResult(entry.result)
+                              setAppState('done')
+                              setActiveView('dashboard')
+                            }}
+                            className="flex-shrink-0 flex items-center gap-1.5 px-4 py-2 bg-slate-900 text-white text-xs font-bold rounded-xl hover:bg-blue-600 transition-colors self-center">
+                            View <ChevronRight size={12} />
+                          </button>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </>
+              )}
+            </div>
+          )}
+
+          {/* ── Dashboard view ───────────────────────────── */}
+          {activeView === 'dashboard' && <>
 
           {/* Upload + Active checks */}
           <div className="grid grid-cols-2 gap-5">
@@ -852,7 +1015,7 @@ export default function App() {
                     ? allGroups.filter(g =>
                         g.overall
                           ? g.overall.passed === true
-                          : g.subItems.length > 0 && g.subItems.every(s => s.summary.passed === true)
+                          : g.subItems.some(s => s.summary.passed === true)
                       )
                   : allGroups
                 if (groups.length === 0) return null
@@ -943,7 +1106,10 @@ export default function App() {
                               {gExpanded && hasContent && (
                                 <div className="pl-16 pr-5 pb-2 space-y-0.5">
 
-                                  {group.subItems.map(sub => {
+                                  {group.subItems.filter(sub =>
+                                    resultFilter === 'failed' ? sub.summary.passed === false :
+                                    resultFilter === 'passed' ? sub.summary.passed === true  : true
+                                  ).map(sub => {
                                     const label = sub.summary.check_name?.includes(' – ')
                                       ? sub.summary.check_name.split(' – ').slice(1).join(' – ')
                                       : sub.summary.check_name ?? ''
@@ -1005,6 +1171,9 @@ export default function App() {
               })}
             </div>
           )}
+
+          </>}{/* end dashboard view */}
+
         </div>
       </div>
     </div>
