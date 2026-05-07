@@ -1,9 +1,9 @@
 from qa_agent.state import GraphState
 
 _CATEGORY_TITLES = {
-    "spell": "Drawing Labels & Annotation",
-    "bend":  "Bending & Bar Schedule",
-    "rebar": "Rebar Labels & Dimensions",
+    "spell": "Spelling & Title Block",
+    "bend":  "Bending & Schedule",
+    "rebar": "Rebar Labels & Dims",
 }
 
 _CATEGORY_ORDER = ["bend", "rebar", "spell"]

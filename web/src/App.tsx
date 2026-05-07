@@ -177,9 +177,9 @@ function isAnalysisResultShape(x: unknown): x is AnalysisResult {
 
 const _CAT_ORDER = ['bend', 'rebar', 'spell'] as const
 const _CAT_TITLES: Record<string, string> = {
-  spell: 'Drawing Labels & Annotation',
-  bend:  'Bending & Bar Schedule',
-  rebar: 'Rebar Labels & Dimensions',
+  spell: 'Spelling & Title Block',
+  bend:  'Bending & Schedule',
+  rebar: 'Rebar Labels & Dims',
 }
 
 function normalizeSeverity(s: unknown): string {
@@ -313,6 +313,7 @@ export default function App() {
   const [resultFilter,      setResultFilter]      = useState<ResultFilter>(null)
   const [activeView,        setActiveView]        = useState<ActiveView>('dashboard')
   const [historyEntries,    setHistoryEntries]    = useState<HistoryEntry[]>(() => loadHistory())
+  const [viewingEntry,      setViewingEntry]      = useState<HistoryEntry | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
   const toggleSection = (cat: string) =>
@@ -380,7 +381,7 @@ export default function App() {
   const pickFile = (f: File) => {
     if (!f.name.toLowerCase().endsWith('.pdf')) return
     setFile(f); setResult(null); setDoneNodes([]); setActiveNode(null)
-    setAppState('ready')
+    setViewingEntry(null); setAppState('ready')
   }
 
   const onDrop = useCallback((e: React.DragEvent) => {
@@ -390,7 +391,7 @@ export default function App() {
 
   const analyze = async () => {
     if (!file) return
-    setAppState('analyzing'); setDoneNodes([]); setActiveNode(null); setResult(null)
+    setAppState('analyzing'); setDoneNodes([]); setActiveNode(null); setResult(null); setViewingEntry(null)
 
     const form = new FormData()
     form.append('file', file)
@@ -490,7 +491,7 @@ export default function App() {
 
   const clearFile = () => {
     setFile(null); setResult(null); setDoneNodes([]); setActiveNode(null)
-    setErrorMsg(''); setAppState('idle')
+    setViewingEntry(null); setErrorMsg(''); setAppState('idle')
     if (inputRef.current) inputRef.current.value = ''
   }
 
@@ -678,6 +679,8 @@ export default function App() {
                           <button
                             onClick={() => {
                               setResult(entry.result)
+                              setViewingEntry(entry)
+                              setFile(null)
                               setAppState('done')
                               setActiveView('dashboard')
                             }}
@@ -763,7 +766,30 @@ export default function App() {
                 })}
               </div>
 
-              {!file ? (
+              {!file && viewingEntry ? (
+                /* Viewing a history entry — show its file info */
+                <div className="space-y-3">
+                  <div className="border border-blue-100 rounded-xl bg-blue-50/40 px-4 py-3 flex items-start gap-3">
+                    <div className="w-8 h-8 rounded-lg bg-blue-100 border border-blue-200 flex items-center justify-center flex-shrink-0 mt-0.5">
+                      <History size={13} className="text-blue-500" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-[12px] font-bold text-blue-800 truncate">{viewingEntry.filename}</p>
+                      <p className="text-[10px] text-blue-500 mt-0.5">{fmtDate(viewingEntry.timestamp)}</p>
+                      <div className="flex gap-1 flex-wrap mt-1.5">
+                        {viewingEntry.checks.map(c => (
+                          <span key={c} className="text-[9px] px-1.5 py-0.5 bg-blue-100 text-blue-600 rounded-full font-semibold">
+                            {CHECK_OPTIONS.find(o => o.key === c)?.label ?? c}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                    <button onClick={clearFile} title="Close history view"
+                      className="text-blue-300 hover:text-blue-600 transition-colors flex-shrink-0 text-base font-bold leading-none">×</button>
+                  </div>
+                  <p className="text-[10px] text-gray-400 text-center">Viewing saved report · Upload a new PDF to analyze</p>
+                </div>
+              ) : !file ? (
                 <div className="flex-1 flex flex-col items-center justify-center gap-2.5 py-6">
                   <div className="w-11 h-11 rounded-2xl bg-gray-50 border border-gray-100 flex items-center justify-center">
                     <FileText size={19} className="text-gray-300" />
