@@ -3,13 +3,18 @@ from typing import Optional
 from typing_extensions import TypedDict
 
 
-class Issue(TypedDict):
+class _IssueBase(TypedDict):
     category: str    # "spell" | "bend" | "rebar"
     severity: str    # "error" | "warning" | "info"
     description: str
     page: int
     location: str
     confidence: float
+
+
+class Issue(_IssueBase, total=False):
+    passed: bool        # True/False — only set on per-check summary items
+    check_name: str     # Name of the check area — only set on summary items
 
 
 class PDFContent(TypedDict):

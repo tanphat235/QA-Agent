@@ -8,92 +8,147 @@ from qa_agent.state import GraphState, Issue
 _SYSTEM = """\
 You are a senior structural rebar detailing QA reviewer specialized in Eurocode 2 reinforcement detailing.
 You are performing a visual and technical inspection of a PDF drawing.
+German terminology: "Schnitt X-X" = section, "Pos" = bar position/mark, "Gesamt" = total, "Stahl" = steel.
 
-READING INSTRUCTIONS:
-- You may read and compare all visible text, tables, labels, bar schedules, bending shapes, notes, and diagrams in the PDF.
-- Do not reproduce large blocks of raw drawing content in your output.
-- Issue descriptions may briefly quote specific visible values (e.g., "bar mark T12 shows quantity 48 but layout shows 12 bars × 3 repetitions = 36").
+══════════════════════════════════════════════
+STEP 0 — PREPARATION (do before any check)
+══════════════════════════════════════════════
+  a) Scan the bar schedule / Bending Shapes table. List every Pos number found.
+  b) Scan the drawing. List every Schnitt X-X label found.
+You will use these two lists to drive the checks below.
 
-CHECKS TO PERFORM:
+══════════════════════════════════════════════
+CHECKS — perform all 7, output items as specified
+══════════════════════════════════════════════
 
-1. Bar schedule / bending shape check
-- Inspect the bar schedule and bending shape diagrams.
-- Check whether bending angles, leg lengths, shape codes, and bar dimensions in the schedule match the bending shape drawings.
-- Report when a shown angle or dimension is clearly wrong, contradictory, or impossible for the stated shape code.
+CHECK 1 — Bending Angle Compliance (Eurocode 2) — per Pos
+For EACH Pos in the bar schedule, inspect its bending shape diagram and verify against EC2 §8.3:
+  • Stirrup / closed link hooks: minimum 135° (90° only if concrete prevents opening).
+  • Standard bend: minimum 90°.
+  • Mandrel diameter: ≥ 4Ø for bar Ø ≤ 16 mm; ≥ 7Ø for bar Ø > 16 mm.
+  • Straight extension past last bend: ≥ 5Ø; for stirrups ≥ max(10Ø, 70 mm).
+For EACH Pos, output:
+  • ONE sub-summary item:
+      check_name = "Bending Angle (EC2) – Pos <X>"
+      passed = true (compliant or cannot assess — no shape drawn) | false (non-compliant angle/extension)
+      description = "PASS — Pos <X>: bending shape complies with EC2." OR
+                    "FAIL — Pos <X>: <issue, e.g. hook angle 90° instead of min 135°>."
+  • ONE individual issue item per non-compliant angle or extension found.
+After all Pos, output ONE overall summary:
+    check_name = "Bending Angle (EC2)"
+    passed = true only if ALL Pos passed
+    description = "PASS — all <N> Pos checked, bending shapes comply." OR
+                  "FAIL — <N> of <total> Pos have non-compliant bending angles."
 
-2. Stirrup hook / anchorage check
-- Check whether stirrup hook length, return leg, and anchorage detail are visibly consistent with Eurocode 2 closed-link detailing.
-- Report only when the hook or anchorage is explicitly shown and is clearly insufficient, missing, or inconsistent with stated requirements.
+CHECK 2 — Total Mass Existence
+Check whether the bar schedule contains a total mass / total weight row or cell
+(look for "Gesamt", "Total", "∑ kg", or a summed row at the bottom of the schedule).
+Output ONE overall summary only:
+    check_name = "Total Mass Existence"
+    passed = true if a total mass figure is found; false if none
+    description = "PASS — total mass row found: <value> kg." OR
+                  "FAIL — no total mass row found in the bar schedule."
 
-3. Total mass / weight check
-- Check whether total mass or weight values in the bar schedule are arithmetically consistent with the visible inputs: diameter, length, quantity, and unit mass.
-- Report clear calculation mismatches only when all required input values are visible.
+CHECK 3 — Total Mass Arithmetic — per Pos
+For EACH Pos where diameter, quantity, length, and unit mass are all visible, calculate:
+  expected total = quantity × length (m) × unit_mass (kg/m)
+Compare to the value shown. Flag Pos where shown value deviates > 5%.
+Also verify the grand total equals the sum of all Pos totals (if grand total is visible).
+For EACH Pos that has all required values visible, output:
+  • ONE sub-summary item:
+      check_name = "Mass Arithmetic – Pos <X>"
+      passed = true (within 5%) | false (deviation > 5%)
+      description = "PASS — Pos <X>: <qty>×<len>m×<unit>kg/m = <expected>kg, shown <shown>kg, OK." OR
+                    "FAIL — Pos <X>: expected <expected>kg but schedule shows <shown>kg (deviation <X>%)."
+  • ONE individual issue item for each Pos that fails.
+After all Pos, output ONE overall summary:
+    check_name = "Total Mass Arithmetic"
+    passed = true only if all visible Pos and grand total are consistent
 
-4. Abnormal quantity check
-- Check whether bar quantities for each mark/position appear consistent with the drawing layout, member count, and schedule.
-- Report only clear anomalies where a quantity contradicts the visible arrangement (e.g., schedule says 48 but drawing shows 3 repetitions of 12 = 36).
+CHECK 4 — Abnormal Mass Detection
+Flag any Pos whose total mass exceeds 3× the average total mass of all Pos in the schedule,
+or any total mass value that appears physically unrealistic for the member type (e.g. > 5 000 kg
+for a single-member schedule).
+Output:
+  • ONE individual issue item per flagged Pos.
+  • ONE overall summary:
+      check_name = "Abnormal Mass Detection"
+      passed = true if all values are within normal range; false if any anomaly found
 
-5. Bar mark schematic coverage
-- Identify all bar marks listed in the schedule.
-- Check whether each listed mark has at least one corresponding bending shape, schematic, or placement detail in the drawing.
-- Report a missing schematic only when the mark is clearly listed and no corresponding shape or detail is visible anywhere in the PDF.
+CHECK 5 — Pos Schema Coverage in Schnitt Views — per Pos
+For EACH Pos in the bar schedule, verify that its bending shape, schematic, or placement callout
+appears in AT LEAST ONE Schnitt view in the drawing.
+A Pos is "covered" if its Pos number, bar mark, or an identical bending shape is clearly visible
+inside or directly adjacent to a Schnitt view.
+For EACH Pos, output:
+  • ONE sub-summary item:
+      check_name = "Schema Coverage – Pos <X>"
+      passed = true (covered in ≥1 Schnitt) | false (not found in any Schnitt)
+      description = "PASS — Pos <X> found in <Schnitt name>." OR
+                    "FAIL — Pos <X> has no corresponding schema in any Schnitt view."
+  • ONE individual issue item for each Pos that is not covered.
+After all Pos, output ONE overall summary:
+    check_name = "Schema Coverage"
+    passed = true only if ALL Pos are covered
+    description = "PASS — all <N> Pos have schema coverage in Schnitt views." OR
+                  "FAIL — <N> Pos missing from all Schnitt views: Pos <list>."
 
-6. Mesh reinforcement schedule presence
-- If mesh reinforcement is shown or referenced anywhere in the drawing, check whether a mesh schedule or mesh usage table is present.
-- Report as error if mesh is clearly used but no schedule is visible.
-- Skip this check entirely (report ✓ clean summary) if no mesh reinforcement is present.
+CHECK 6 — Mesh Reinforcement Schedule Presence
+If mesh reinforcement is shown or referenced: check whether a mesh schedule or usage table is present.
+Output ONE overall summary only:
+    check_name = "Mesh Schedule Presence"
+    passed = true (schedule found) | true (N/A — no mesh) | false (mesh present, no schedule)
+    description = "PASS — mesh schedule found." OR "N/A — no mesh reinforcement present." OR
+                  "FAIL — mesh reinforcement visible but no schedule found."
 
-7. Mesh utilisation ratio check
-- If a mesh schedule is visible, check whether the utilisation ratio is shown and is above 85%.
-- Report as warning if utilisation is below 85%; report as error if below 70%.
-- Skip this check (report ✓ clean summary) if no mesh schedule is visible.
+CHECK 7 — Mesh Utilisation Ratio
+If a mesh schedule is visible: check whether the utilisation ratio is shown and ≥ 85%.
+If no mesh schedule: mark N/A.
+Output ONE overall summary only:
+    check_name = "Mesh Utilisation Ratio"
+    passed = true (ratio ≥ 85% or N/A) | false (ratio < 85% or missing)
+    description = "PASS — utilisation <X>% ≥ 85%." OR "N/A — no mesh schedule." OR
+                  "FAIL — utilisation <X>% below 85%." OR "FAIL — utilisation ratio not shown."
 
-REPORTING RULES:
-For EACH of the 7 check areas above, you MUST output at least one result:
-- If one or more issues are found: report each as an issue (error / warning / info).
-- If no issues are found in a check area: output exactly ONE info item with:
-  - severity: "info"
-  - description: "✓ [Check name]: [brief description of what was inspected] — no issues found."
-  - page: 1
-  - location: "entire drawing"
-  - confidence: 1.0
-  Example: "✓ Total mass check: unit masses, lengths, and quantities verified for all visible bar marks — totals are consistent."
-- For checks that are not applicable (e.g., no mesh present): output one info item:
-  - description: "✓ [Check name]: not applicable — [reason, e.g., 'no mesh reinforcement present in this drawing']."
-  - confidence: 1.0
+══════════════════════════════════════════════
+OUTPUT FORMAT
+══════════════════════════════════════════════
 
-MISSING INFORMATION RULE:
-- If a required value is missing and prevents completing a check, report:
-  - severity: "warning"
-  - description: "[check area]: required information is missing or unreadable — [what is missing, why it matters]."
-  - confidence: 0.90
+SUB-SUMMARY or OVERALL SUMMARY items:
+  passed:      true or false  (required — this is what fills the pass/fail report)
+  check_name:  exactly as specified above
+  severity:    "info" if passed=true; "error" or "warning" if passed=false
+  description: "PASS — …" / "FAIL — …" / "N/A — …"
+  page:        1
+  location:    relevant area (e.g. "bar schedule" or "Schnitt 7-7")
+  confidence:  1.0
 
-CONFIDENCE RULE:
-- If your confidence in an issue is below 0.70, omit it.
-- Do not report Eurocode compliance when the required input values (cover, diameter, fyk, fck, National Annex) are not explicitly visible.
+INDIVIDUAL ISSUE items:
+  passed:      omit (null)
+  check_name:  omit
+  severity:    "error" or "warning"
+  description: concise, quoting the Pos number, Schnitt, or specific value
+  page:        page where the issue appears
+  location:    specific visual location
+  confidence:  0.65–1.0  (omit item if below 0.65)
 
 SEVERITY RULES:
-- error: clear issue that would cause fabrication, quantity, compliance, or installation mistakes.
-- warning: clear inconsistency, missing required information, or out-of-range value that should be reviewed.
-- info: minor clarity issue with low practical impact, or a clean-check summary (✓).
+  error:   non-compliant angle, arithmetic mismatch, missing total, Pos without schema.
+  warning: borderline value, ambiguity, or information needing review.
+  info:    used only on PASS / N/A summary items.
 
-Each issue must include:
-- severity
-- concise description
-- page number
-- approximate visual location
-- confidence between 0.0 and 1.0
-
-Do not include explanations outside the structured output.\
+Do not include any explanations outside the structured output.\
 """
 
 
 class _BendIssue(BaseModel):
     severity: str = Field(description="error, warning, or info")
-    description: str = Field(description="Concise description of the issue or clean-check summary")
-    page: int = Field(description="1-indexed page number where the issue appears")
-    location: str = Field(description="Approximate visual location, e.g. 'bar schedule row 4'")
-    confidence: float = Field(description="Confidence score between 0.0 and 1.0")
+    description: str = Field(description="PASS/FAIL/N/A summary text or concise issue description")
+    page: int = Field(description="1-indexed page number")
+    location: str = Field(description="Visual location, e.g. 'bar schedule row 4' or 'Schnitt 7-7'")
+    confidence: float = Field(description="Confidence score 0.0–1.0")
+    passed: bool | None = Field(default=None, description="True=PASS, False=FAIL — set only on summary items; omit on individual issues")
+    check_name: str | None = Field(default=None, description="Check area name — set only on summary items")
 
 
 class _BendResult(BaseModel):
@@ -107,7 +162,7 @@ def bend_check(state: GraphState) -> dict:
     llm = ChatAnthropic(  # type: ignore[call-arg]
         model="claude-sonnet-4-5",  # type: ignore[call-arg]
         temperature=0,
-        max_tokens=4096,  # type: ignore[call-arg]
+        max_tokens=8192,  # type: ignore[call-arg]
     ).with_structured_output(_BendResult).with_retry(stop_after_attempt=2)
 
     result: _BendResult = llm.invoke([
@@ -117,12 +172,29 @@ def bend_check(state: GraphState) -> dict:
                 "type": "document",
                 "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data},
             },
-            {"type": "text", "text": "Review the full drawing PDF. For each of the 7 check areas, report issues found or a clean summary as instructed."},
+            {
+                "type": "text",
+                "text": (
+                    "Review the full drawing PDF.\n"
+                    "Step 0: List every Pos number from the bar schedule and every Schnitt label.\n"
+                    "Then perform all 7 checks:\n"
+                    "  Check 1: for EACH Pos output one sub-summary (check_name='Bending Angle – Pos X', passed=true/false) plus individual issues, then one overall summary.\n"
+                    "  Check 2: one overall summary only.\n"
+                    "  Check 3: for EACH Pos with visible values output one sub-summary (check_name='Mass Arithmetic – Pos X') plus individual issues, then one overall summary.\n"
+                    "  Check 4: individual issues + one overall summary.\n"
+                    "  Check 5: for EACH Pos output one sub-summary (check_name='Schema Coverage – Pos X', passed=true/false), then one overall summary.\n"
+                    "  Checks 6–7: one overall summary each.\n"
+                    "Do not skip any check or any Pos."
+                ),
+            },
         ]),
     ])
 
-    issues: list[Issue] = [
-        {
+    issues: list[Issue] = []
+    for item in result.issues:
+        if item.confidence < 0.60:
+            continue
+        entry: Issue = {
             "category": "bend",
             "severity": item.severity,
             "description": item.description,
@@ -130,7 +202,9 @@ def bend_check(state: GraphState) -> dict:
             "location": item.location,
             "confidence": item.confidence,
         }
-        for item in result.issues
-        if item.confidence >= 0.60
-    ]
+        if item.passed is not None:
+            entry["passed"] = item.passed
+        if item.check_name:
+            entry["check_name"] = item.check_name
+        issues.append(entry)
     return {"bend_issues": issues}

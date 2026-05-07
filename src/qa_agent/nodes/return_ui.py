@@ -9,10 +9,12 @@ _CATEGORY_TITLES = {
 _CATEGORY_ORDER = ["bend", "rebar", "spell"]
 
 
-def _is_clean_summary(issue: dict) -> bool:
-    """True for auto-generated ✓ check-passed summaries, not real QA findings."""
+def _is_check_summary(issue: dict) -> bool:
+    """True for per-check PASS/FAIL/N/A summary items (not individual findings)."""
+    if "passed" in issue:
+        return True
     desc = str(issue.get("description", ""))
-    return desc.startswith("✓")
+    return desc.startswith("✓") or desc.startswith("PASS") or desc.startswith("N/A")
 
 
 def return_to_ui(state: GraphState) -> dict:
@@ -22,9 +24,9 @@ def return_to_ui(state: GraphState) -> dict:
     for issue in issues:
         issue["severity"] = str(issue.get("severity", "info")).upper()
 
-    # Separate real findings from clean-check summaries
-    real_issues     = [i for i in issues if not _is_clean_summary(i)]
-    summary_items   = [i for i in issues if _is_clean_summary(i)]
+    # Separate real findings from per-check PASS/FAIL summaries
+    real_issues     = [i for i in issues if not _is_check_summary(i)]
+    summary_items   = [i for i in issues if _is_check_summary(i)]
 
     error_count   = sum(1 for i in real_issues if i.get("severity") == "ERROR")
     warning_count = sum(1 for i in real_issues if i.get("severity") == "WARNING")
@@ -47,8 +49,9 @@ def return_to_ui(state: GraphState) -> dict:
             "category": cat,
             "title": _CATEGORY_TITLES.get(cat, cat.title()),
             "count": len(by_category[cat]),
-            # Real findings count (for badge coloring)
-            "issue_count": sum(1 for i in by_category[cat] if not _is_clean_summary(i)),
+            "issue_count": sum(1 for i in by_category[cat] if not _is_check_summary(i)),
+            "checks_passed": sum(1 for i in by_category[cat] if i.get("passed") is True),
+            "checks_failed": sum(1 for i in by_category[cat] if i.get("passed") is False),
             "issues": by_category[cat],
         }
         for cat in _CATEGORY_ORDER

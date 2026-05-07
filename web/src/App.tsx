@@ -1,25 +1,30 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import {
   LayoutDashboard, Upload, History, Settings, HelpCircle,
-  FileText, AlertCircle, CheckCircle, AlertTriangle,
-  Download, Loader2, ChevronLeft, ChevronRight,
+  FileText, CheckCircle, AlertTriangle,
+  Download, Loader2, ChevronLeft, ChevronRight, ChevronDown,
+  XCircle,
 } from 'lucide-react'
 
 // ── Types ────────────────────────────────────────────────────
 interface Issue {
   id: string
   category: string
-  severity: string   // "ERROR" | "WARNING" | "INFO"
+  severity: string      // "ERROR" | "WARNING" | "INFO"
   description: string
   page: number
   location: string
   confidence: number
+  passed?: boolean      // set only on check-summary items
+  check_name?: string   // set only on check-summary items
 }
 interface Section {
   category: string
   title: string
-  count: number        // total rows including ✓ clean summaries
-  issue_count: number  // real findings only (errors + warnings + non-summary info)
+  count: number
+  issue_count: number
+  checks_passed?: number
+  checks_failed?: number
   issues: Issue[]
 }
 interface AnalysisResult {
@@ -29,7 +34,8 @@ interface AnalysisResult {
   summary: { total: number; ERROR: number; WARNING: number; INFO: number }
   sections: Section[]
 }
-type AppState = 'idle' | 'ready' | 'analyzing' | 'done' | 'error'
+type AppState    = 'idle' | 'ready' | 'analyzing' | 'done' | 'error'
+type ResultFilter = null | 'passed' | 'failed' | 'issues'
 
 // ── Constants ────────────────────────────────────────────────
 const NODES = [
@@ -42,9 +48,9 @@ const NODES = [
 ]
 
 const CHECK_OPTIONS = [
-  { key: 'spell', label: 'Spelling & Labels',   color: 'gray' },
-  { key: 'bend',  label: 'Bending & Schedule',  color: 'purple' },
-  { key: 'rebar', label: 'Rebar Specs',          color: 'blue' },
+  { key: 'spell', label: 'Spelling & Title Block', color: 'gray' },
+  { key: 'bend',  label: 'Bending & Schedule',    color: 'purple' },
+  { key: 'rebar', label: 'Rebar Labels & Dims',   color: 'blue' },
 ] as const
 const NAV = [
   { icon: LayoutDashboard, label: 'Dashboard', active: true },
@@ -53,16 +59,68 @@ const NAV = [
   { icon: Settings,        label: 'Settings' },
 ]
 
+// ── Tree-building types ──────────────────────────────────────
+interface CheckSubItem {
+  summary: Issue    // per-Schnitt or per-Pos summary
+  issues: Issue[]   // individual issue items directly following this sub-summary
+}
+interface CheckGroup {
+  key: string         // prefix before " – " (or full name if no sub-items)
+  displayName: string // resolved from overall summary if available
+  overall?: Issue     // the overall summary item
+  subItems: CheckSubItem[]
+  orphanIssues: Issue[]
+}
+
+function buildCheckGroups(sectionIssues: Issue[]): CheckGroup[] {
+  const groups: CheckGroup[] = []
+  const groupMap = new Map<string, CheckGroup>()
+  let currentGroup: CheckGroup | null = null
+  let currentSubItem: CheckSubItem | null = null
+
+  for (const issue of sectionIssues) {
+    if (!issue.check_name) {
+      // Orphan issue — attach to the most recent sub-item or group
+      if (currentSubItem) {
+        currentSubItem.issues.push(issue)
+      } else if (currentGroup) {
+        currentGroup.orphanIssues.push(issue)
+      }
+      continue
+    }
+
+    const dashIdx = issue.check_name.indexOf(' – ')  // ' – '
+    const groupKey = dashIdx >= 0 ? issue.check_name.substring(0, dashIdx) : issue.check_name
+
+    if (!groupMap.has(groupKey)) {
+      const g: CheckGroup = { key: groupKey, displayName: groupKey, subItems: [], orphanIssues: [] }
+      groupMap.set(groupKey, g)
+      groups.push(g)
+    }
+
+    currentGroup = groupMap.get(groupKey)!
+
+    if (dashIdx >= 0) {
+      // Sub-summary (per Pos / per Schnitt)
+      const sub: CheckSubItem = { summary: issue, issues: [] }
+      currentGroup.subItems.push(sub)
+      currentSubItem = sub
+    } else {
+      // Overall summary for this check
+      currentGroup.overall = issue
+      currentGroup.displayName = issue.check_name
+      currentSubItem = null   // overall resets the current sub-item context
+    }
+  }
+
+  return groups
+}
+
 // ── Helpers ──────────────────────────────────────────────────
 function severityBadge(s: string) {
   if (s === 'ERROR')   return { cls: 'bg-red-100 text-red-700 border border-red-200',      label: 'FAIL' }
   if (s === 'WARNING') return { cls: 'bg-amber-100 text-amber-700 border border-amber-200', label: 'WARN' }
   return                       { cls: 'bg-green-100 text-green-700 border border-green-200', label: 'OK' }
-}
-function catBadge(c: string) {
-  if (c === 'rebar') return 'bg-blue-100 text-blue-700'
-  if (c === 'bend')  return 'bg-purple-100 text-purple-700'
-  return                    'bg-gray-100 text-gray-500'
 }
 
 /** SSE handler sends AnalysisResult; some backends return JSON: { ok, filename, result: { spell: { issues }, ... } } */
@@ -127,6 +185,8 @@ function normalizeAnalyzeJsonToResult(body: unknown): AnalysisResult | null {
         confidence: typeof it.confidence === 'number'
           ? (it.confidence > 1 ? it.confidence / 100 : it.confidence)
           : 0.85,
+        ...(typeof it.passed === 'boolean'  ? { passed: it.passed }         : {}),
+        ...(typeof it.check_name === 'string' ? { check_name: it.check_name } : {}),
       })
     }
   }
@@ -144,6 +204,8 @@ function normalizeAnalyzeJsonToResult(body: unknown): AnalysisResult | null {
         confidence: typeof it.confidence === 'number'
           ? (it.confidence > 1 ? it.confidence / 100 : it.confidence)
           : 0.85,
+        ...(typeof it.passed === 'boolean'    ? { passed: it.passed }         : {}),
+        ...(typeof it.check_name === 'string' ? { check_name: it.check_name } : {}),
       })
     }
   }
@@ -169,24 +231,29 @@ function normalizeAnalyzeJsonToResult(body: unknown): AnalysisResult | null {
 
   const sections: Section[] = _CAT_ORDER
     .filter(cat => (byCategory[cat]?.length ?? 0) > 0)
-    .map(cat => ({
-      category: cat,
-      title: _CAT_TITLES[cat] ?? cat,
-      count: byCategory[cat].length,
-      issue_count: byCategory[cat].filter(i => !i.description.startsWith('✓')).length,
-      issues: byCategory[cat],
-    }))
+    .map(cat => {
+      const catIssues = byCategory[cat]
+      const checkSums = catIssues.filter(i => i.passed !== undefined)
+      return {
+        category: cat,
+        title: _CAT_TITLES[cat] ?? cat,
+        count: catIssues.length,
+        issue_count: catIssues.filter(i => i.passed === undefined).length,
+        checks_passed: checkSums.filter(i => i.passed === true).length,
+        checks_failed: checkSums.filter(i => i.passed === false).length,
+        issues: catIssues,
+      }
+    })
 
-  const total   = issues.length
-  const ERROR   = issues.filter(i => i.severity === 'ERROR').length
-  const WARNING = issues.filter(i => i.severity === 'WARNING').length
-  const INFO    = issues.filter(i => i.severity === 'INFO').length
+  const allFlat   = issues.filter(i => i.passed === undefined)
+  const total   = allFlat.length
+  const ERROR   = allFlat.filter(i => i.severity === 'ERROR').length
+  const WARNING = allFlat.filter(i => i.severity === 'WARNING').length
+  const INFO    = allFlat.filter(i => i.severity === 'INFO').length
 
   return {
     status: 'completed',
-    message: total === 0
-      ? 'No QA issues found. Drawing is clean.'
-      : `Analysis completed. Found ${total} issue(s): ${ERROR} error, ${WARNING} warning, ${INFO} info.`,
+    message: total === 0 ? 'No issues found.' : `${total} issue(s): ${ERROR} error, ${WARNING} warning.`,
     pdf_pages: pdfPages,
     summary: { total, ERROR, WARNING, INFO },
     sections,
@@ -202,9 +269,41 @@ export default function App() {
   const [isDragging, setIsDragging]     = useState(false)
   const [doneNodes, setDoneNodes]       = useState<string[]>([])
   const [activeNode, setActiveNode]     = useState<string | null>(null)
-  const [sidebarOpen, setSidebarOpen]   = useState(true)
-  const [enabledChecks, setEnabledChecks] = useState<string[]>(['spell', 'bend', 'rebar'])
+  const [sidebarOpen, setSidebarOpen]       = useState(true)
+  const [enabledChecks, setEnabledChecks]   = useState<string[]>(['spell', 'bend', 'rebar'])
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set())
+  const [expandedGroups,    setExpandedGroups]    = useState<Set<string>>(new Set())
+  const [resultFilter,      setResultFilter]      = useState<ResultFilter>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+
+  const toggleSection = (cat: string) =>
+    setCollapsedSections(prev => {
+      const next = new Set(prev); next.has(cat) ? next.delete(cat) : next.add(cat); return next
+    })
+  const toggleGroup = (key: string) =>
+    setExpandedGroups(prev => {
+      const next = new Set(prev); next.has(key) ? next.delete(key) : next.add(key); return next
+    })
+  const toggleFilter = (f: ResultFilter) =>
+    setResultFilter(prev => prev === f ? null : f)
+
+  // Auto-expand failed/issue groups when result arrives; reset on clear
+  useEffect(() => {
+    if (!result) { setExpandedGroups(new Set()); setResultFilter(null); return }
+    const expandKeys = new Set<string>()
+    for (const section of result.sections) {
+      for (const group of buildCheckGroups(section.issues)) {
+        const failed = group.overall
+          ? group.overall.passed === false
+          : group.subItems.some(s => s.summary.passed === false)
+        const hasIssues =
+          group.orphanIssues.length > 0 ||
+          group.subItems.some(s => s.issues.length > 0)
+        if (failed || hasIssues) expandKeys.add(`${section.category}::${group.key}`)
+      }
+    }
+    setExpandedGroups(expandKeys)
+  }, [result])
 
   const toggleCheck = (key: string) => {
     setEnabledChecks(prev =>
@@ -346,10 +445,20 @@ export default function App() {
   const progress = Math.round(
     (doneNodes.filter(k => visibleNodes.some(n => n.key === k)).length / visibleNodes.length) * 100
   )
-  const overall  = result
-    ? result.summary.ERROR   > 0 ? 'FAIL'
-    : result.summary.WARNING > 0 ? 'WARN' : 'PASS'
-    : null
+
+  // Stats — traverse the actual tree to count correctly
+  const allResultIssues   = result?.sections.flatMap(s => s.issues) ?? []
+  const totalChecksPassed = allResultIssues.filter(i => i.passed === true).length
+  const totalChecksFailed = allResultIssues.filter(i => i.passed === false).length
+  // Individual issue items: no check_name, no passed — exactly what appears in the flat list
+  const allIndividualIssues = (result?.sections ?? []).flatMap(section =>
+    buildCheckGroups(section.issues).flatMap(group => [
+      ...group.orphanIssues,
+      ...group.subItems.flatMap(sub => sub.issues),
+    ])
+  )
+  const totalErrors   = allIndividualIssues.filter(i => i.severity === 'ERROR').length
+  const totalWarnings = allIndividualIssues.filter(i => i.severity === 'WARNING').length
 
   // ── Render ─────────────────────────────────────────────────
   return (
@@ -445,11 +554,11 @@ export default function App() {
               <div className="w-16 h-16 mx-auto mb-5 rounded-2xl bg-gradient-to-br from-blue-50 to-slate-50 border border-blue-100/80 flex items-center justify-center shadow-sm">
                 <FileText size={28} className="text-blue-400" />
               </div>
-              <p className="font-bold text-gray-800 text-sm tracking-wide">Drag & drop building drawings here</p>
-              <p className="text-xs text-gray-400 mt-1.5 tracking-wide">Supported: PDF · German Standards (DIN / EN)</p>
+              <p className="font-bold text-gray-800 text-sm tracking-wide">Drop your rebar detailing drawing here</p>
+              <p className="text-xs text-gray-400 mt-1.5 tracking-wide">Single PDF · Structural Rebar Detailing · DIN / EN</p>
               <button onClick={e => { e.stopPropagation(); inputRef.current?.click() }}
                 className="mt-6 px-6 py-2.5 bg-slate-900 text-white text-xs font-bold rounded-xl hover:bg-slate-700 transition-colors tracking-wide shadow-sm">
-                Select Files from Computer
+                Upload PDF File
               </button>
             </div>
 
@@ -527,10 +636,8 @@ export default function App() {
                         </span>
                       )}
                       {appState === 'done' && (
-                        <span className={`text-[9px] px-2 py-0.5 rounded-full font-bold tracking-widest ${
-                          overall === 'FAIL' ? 'bg-red-50 text-red-600 border border-red-100' : 'bg-green-50 text-green-600 border border-green-100'
-                        }`}>
-                          DONE · {result?.summary.ERROR ?? 0} ERR
+                        <span className="text-[9px] bg-green-50 text-green-600 border border-green-100 px-2 py-0.5 rounded-full font-bold tracking-widest">
+                          DONE
                         </span>
                       )}
                       {appState === 'error' && (
@@ -595,12 +702,8 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* Done summary */}
                   {appState === 'done' && result && (
-                    <div className="flex gap-4 text-xs px-0.5">
-                      <span className="text-red-500 font-semibold">{result.summary.ERROR} errors</span>
-                      <span className="text-amber-500 font-semibold">{result.summary.WARNING} warnings</span>
-                      <span className="text-green-500 font-semibold">{result.summary.INFO} OK</span>
+                    <div className="flex text-xs px-0.5">
                       <span className="ml-auto text-gray-400">{result.pdf_pages} page(s)</span>
                     </div>
                   )}
@@ -609,98 +712,297 @@ export default function App() {
             </div>
           </div>
 
-          {/* Results table */}
+          {/* Results — 3-level tree */}
           {result && (
-            <div className="bg-white rounded-2xl border border-gray-200/70 overflow-hidden shadow-sm">
+            <div className="space-y-3">
 
-              <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
-                <div>
-                  <h2 className="font-bold text-gray-900 text-sm tracking-tight">
-                    Analysis Results
-                    <span className="ml-2 text-xs font-normal text-gray-400">· {result.pdf_pages} page(s)</span>
-                  </h2>
-                  <p className="text-[11px] text-gray-400 mt-0.5 tracking-wide">
-                    {result.sections.map(s => `${s.title}: ${s.issue_count ?? s.count}`).join(' · ')}
-                  </p>
+              {/* Summary bar */}
+              <div className="bg-white rounded-2xl border border-gray-200/70 px-5 py-3.5 flex items-center justify-between shadow-sm gap-4 flex-wrap">
+                <div className="flex items-center gap-2 flex-wrap">
+
+                  {/* Passed — click to filter tree to passed groups only */}
+                  <button
+                    onClick={() => toggleFilter('passed')}
+                    title={resultFilter === 'passed' ? 'Clear filter' : 'Show only passed checks'}
+                    className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border transition-all ${
+                      resultFilter === 'passed'
+                        ? 'bg-green-100 border-green-300 text-green-800 font-bold ring-2 ring-green-300'
+                        : totalChecksPassed > 0
+                          ? 'bg-green-50 border-green-200 text-green-700 hover:ring-2 hover:ring-green-200 cursor-pointer'
+                          : 'bg-gray-50 border-gray-100 text-gray-400 cursor-default'
+                    }`}
+                  >
+                    <CheckCircle size={12} className={totalChecksPassed > 0 ? 'text-green-500' : 'text-gray-300'} />
+                    <strong>{totalChecksPassed}</strong>
+                    <span>passed</span>
+                    {resultFilter === 'passed' && <span className="ml-0.5 text-[9px] font-black">✕</span>}
+                  </button>
+
+                  {/* Failed — click to filter tree to failed groups only */}
+                  <button
+                    onClick={() => toggleFilter('failed')}
+                    title={resultFilter === 'failed' ? 'Clear filter' : 'Show only failed checks'}
+                    className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border transition-all ${
+                      resultFilter === 'failed'
+                        ? 'bg-red-100 border-red-300 text-red-800 font-bold ring-2 ring-red-300'
+                        : totalChecksFailed > 0
+                          ? 'bg-red-50 border-red-200 text-red-700 hover:ring-2 hover:ring-red-200 cursor-pointer'
+                          : 'bg-gray-50 border-gray-100 text-gray-400 cursor-default'
+                    }`}
+                  >
+                    <XCircle size={12} className={totalChecksFailed > 0 ? 'text-red-400' : 'text-gray-300'} />
+                    <strong>{totalChecksFailed}</strong>
+                    <span>failed</span>
+                    {resultFilter === 'failed' && <span className="ml-0.5 text-[9px] font-black">✕</span>}
+                  </button>
+
+                  {/* Issues — click to show flat issue list */}
+                  <button
+                    onClick={() => toggleFilter('issues')}
+                    title={resultFilter === 'issues' ? 'Clear filter' : 'Show all individual issues'}
+                    className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border transition-all ${
+                      resultFilter === 'issues'
+                        ? 'bg-amber-100 border-amber-300 text-amber-800 font-bold ring-2 ring-amber-300'
+                        : (totalWarnings + totalErrors) > 0
+                          ? 'bg-amber-50 border-amber-200 text-amber-700 hover:ring-2 hover:ring-amber-200 cursor-pointer'
+                          : 'bg-gray-50 border-gray-100 text-gray-400 cursor-default'
+                    }`}
+                  >
+                    <AlertTriangle size={12} className={(totalWarnings + totalErrors) > 0 ? 'text-amber-500' : 'text-gray-300'} />
+                    <strong>{totalWarnings + totalErrors}</strong>
+                    <span>issues</span>
+                    {resultFilter === 'issues' && <span className="ml-0.5 text-[9px] font-black">✕</span>}
+                  </button>
+
+                  {resultFilter && (
+                    <span className="text-[10px] text-gray-400 italic">
+                      {resultFilter === 'passed' ? 'Showing passed checks only'
+                        : resultFilter === 'failed' ? 'Showing failed checks only'
+                        : 'Showing all issues'}
+                    </span>
+                  )}
                 </div>
+
                 <button onClick={downloadReport}
-                  className="flex items-center gap-2 px-4 py-2 bg-slate-900 text-white text-xs font-bold rounded-xl hover:bg-slate-700 transition-colors tracking-wide shadow-sm">
+                  className="flex items-center gap-2 px-4 py-2 bg-slate-900 text-white text-xs font-bold rounded-xl hover:bg-slate-700 transition-colors tracking-wide shadow-sm flex-shrink-0">
                   <Download size={13} />Download Report
                 </button>
               </div>
 
-              {/* Summary strip */}
-              <div className="px-6 py-3 bg-gray-50/60 border-b border-gray-100 flex items-center gap-6 flex-wrap">
-                <span className="flex items-center gap-1.5 text-xs text-gray-600">
-                  <CheckCircle size={13} className="text-green-500" /><strong>{result.summary.INFO}</strong> OK
-                </span>
-                <span className="flex items-center gap-1.5 text-xs text-gray-600">
-                  <AlertTriangle size={13} className="text-amber-500" /><strong>{result.summary.WARNING}</strong> Warnings
-                </span>
-                <span className="flex items-center gap-1.5 text-xs text-gray-600">
-                  <AlertCircle size={13} className="text-red-500" /><strong>{result.summary.ERROR}</strong> Errors
-                </span>
-                <div className="ml-auto flex items-center gap-2">
-                  <span className="text-[10px] text-gray-400 font-semibold uppercase tracking-widest">Overall</span>
-                  <span className={`px-3 py-1 rounded-full text-[11px] font-bold tracking-wide ${
-                    overall === 'FAIL' ? 'bg-red-100 text-red-700' :
-                    overall === 'WARN' ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'
-                  }`}>{overall}</span>
-                </div>
-              </div>
+              {/* Flat issues view — when filter = 'issues' */}
+              {resultFilter === 'issues' && (() => {
+                const allIssues = result.sections.flatMap(section =>
+                  buildCheckGroups(section.issues).flatMap(group => [
+                    ...group.orphanIssues.map(i => ({ ...i, _section: section.title })),
+                    ...group.subItems.flatMap(sub =>
+                      sub.issues.map(i => ({ ...i, _section: section.title }))
+                    ),
+                  ])
+                )
+                return (
+                  <div className="bg-white rounded-2xl border border-amber-200 overflow-hidden shadow-sm">
+                    <div className="px-6 py-3 bg-amber-50 border-b border-amber-100 flex items-center gap-2">
+                      <AlertTriangle size={14} className="text-amber-500" />
+                      <span className="text-sm font-bold text-amber-800">
+                        All Issues · {allIssues.length} item{allIssues.length !== 1 ? 's' : ''}
+                      </span>
+                      <button onClick={() => setResultFilter(null)}
+                        className="ml-auto text-[10px] text-amber-600 hover:text-amber-800 font-bold flex items-center gap-1">
+                        <XCircle size={11} /> Close
+                      </button>
+                    </div>
+                    {allIssues.length === 0 ? (
+                      <div className="px-6 py-8 text-center text-sm text-gray-400">No individual issues found.</div>
+                    ) : (
+                      <div className="divide-y divide-gray-100">
+                        {allIssues.map((issue, idx) => {
+                          const { cls, label: lbl } = severityBadge(issue.severity)
+                          return (
+                            <div key={`${issue.id}-${idx}`} className="px-6 py-3 flex items-start gap-3 hover:bg-gray-50/50">
+                              <span className={`text-[10px] font-bold px-2 py-0.5 rounded flex-shrink-0 mt-0.5 ${cls}`}>{lbl}</span>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-[12px] text-gray-700 leading-relaxed">{issue.description}</p>
+                                {issue.location && (
+                                  <p className="text-[10px] text-gray-400 mt-0.5">{issue.location}</p>
+                                )}
+                              </div>
+                              <span className="text-[10px] text-gray-300 flex-shrink-0 font-medium text-right">
+                                {issue._section}
+                              </span>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )
+              })()}
 
-              {/* Table */}
-              <div className="overflow-x-auto">
-                <table className="w-full">
-                  <thead>
-                    <tr className="bg-gray-50/80 border-b border-gray-100 text-[10px] font-bold text-gray-400 uppercase tracking-widest">
-                      <th className="px-5 py-3 text-left w-10">#</th>
-                      <th className="px-5 py-3 text-left">Category</th>
-                      <th className="px-5 py-3 text-left">Page</th>
-                      <th className="px-5 py-3 text-left">Location</th>
-                      <th className="px-5 py-3 text-left">Confidence</th>
-                      <th className="px-5 py-3 text-left">Status</th>
-                      <th className="px-5 py-3 text-left">Issue / Remark</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-50">
-                    {result.sections.flatMap(s => s.issues).map((issue: Issue) => {
-                      const isSummary = issue.description.startsWith('✓')
-                      const { cls, label } = severityBadge(issue.severity)
-                      return (
-                        <tr key={issue.id} className={`transition-colors ${isSummary ? 'bg-gray-50/40 hover:bg-gray-50/70' : 'hover:bg-blue-50/20'}`}>
-                          <td className={`px-5 py-3 font-mono text-[11px] ${isSummary ? 'text-gray-200' : 'text-gray-300'}`}>{issue.id}</td>
-                          <td className="px-5 py-3">
-                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide ${isSummary ? 'bg-gray-100 text-gray-300' : catBadge(issue.category)}`}>
-                              {issue.category}
-                            </span>
-                          </td>
-                          <td className={`px-5 py-3 text-xs ${isSummary ? 'text-gray-300' : 'text-gray-500'}`}>{issue.page}</td>
-                          <td className={`px-5 py-3 max-w-[140px] truncate text-xs ${isSummary ? 'text-gray-300' : 'text-gray-500'}`} title={issue.location}>
-                            {issue.location}
-                          </td>
-                          <td className={`px-5 py-3 text-xs ${isSummary ? 'text-gray-300' : 'text-gray-500'}`}>{Math.round(issue.confidence * 100)}%</td>
-                          <td className="px-5 py-3">
-                            {isSummary
-                              ? <span className="px-2.5 py-0.5 rounded text-[10px] font-bold tracking-wide bg-gray-100 text-gray-400 border border-gray-200">PASS</span>
-                              : <span className={`px-2.5 py-0.5 rounded text-[10px] font-bold tracking-wide ${cls}`}>{label}</span>
-                            }
-                          </td>
-                          <td className={`px-5 py-3 max-w-sm text-xs leading-relaxed ${isSummary ? 'text-gray-400 italic' : 'text-gray-700'}`}>{issue.description}</td>
-                        </tr>
+              {/* Tree view — normal or filtered to failed-only */}
+              {resultFilter !== 'issues' && result.sections.map(section => {
+                const allGroups      = buildCheckGroups(section.issues)
+                const groups         =
+                  resultFilter === 'failed'
+                    ? allGroups.filter(g =>
+                        g.overall
+                          ? g.overall.passed === false
+                          : g.subItems.some(s => !s.summary.passed)
                       )
-                    })}
-                  </tbody>
-                </table>
-              </div>
+                  : resultFilter === 'passed'
+                    ? allGroups.filter(g =>
+                        g.overall
+                          ? g.overall.passed === true
+                          : g.subItems.length > 0 && g.subItems.every(s => s.summary.passed === true)
+                      )
+                  : allGroups
+                if (groups.length === 0) return null
+                const secCollapsed   = collapsedSections.has(section.category)
+                const secFailed      = groups.filter(g =>
+                  g.overall ? g.overall.passed === false : g.subItems.some(s => !s.summary.passed)
+                ).length
+                const secIssues      = groups.reduce(
+                  (a, g) => a + g.orphanIssues.length + g.subItems.reduce((b, s) => b + s.issues.length, 0), 0
+                )
 
-              <div className="px-6 py-3 border-t border-gray-100 bg-gray-50/40 flex items-center gap-5 text-[11px] text-gray-400">
-                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-green-500" />PASS</span>
-                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-red-500" />FAIL</span>
-                <span className="ml-1">
-                  {result.summary.total} issues · <strong className="text-gray-600">{result.summary.total - result.summary.ERROR}</strong> passed · <strong className="text-red-500">{result.summary.ERROR}</strong> failed
-                </span>
-              </div>
+                return (
+                  <div key={section.category} className="bg-white rounded-2xl border border-gray-200/70 overflow-hidden shadow-sm">
+
+                    {/* Category header */}
+                    <button onClick={() => toggleSection(section.category)}
+                      className="w-full px-6 py-3.5 flex items-center gap-3 hover:bg-gray-50/60 transition-colors">
+                      <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${secFailed > 0 || secIssues > 0 ? 'bg-red-400' : 'bg-green-400'}`} />
+                      <span className="font-bold text-gray-900 text-sm flex-1 text-left tracking-tight">{section.title}</span>
+                      <span className="text-[11px] text-gray-400">
+                        {allGroups.length - secFailed}<span className="text-gray-300">/{allGroups.length}</span> checks pass
+                        {secIssues > 0 && <span className="ml-2 text-amber-500 font-semibold">· {secIssues} issue{secIssues > 1 ? 's' : ''}</span>}
+                      </span>
+                      <ChevronDown size={14} className={`text-gray-400 ml-2 transition-transform ${secCollapsed ? '' : 'rotate-180'}`} />
+                    </button>
+
+                    {!secCollapsed && (
+                      <div className="border-t border-gray-100 divide-y divide-gray-100">
+
+                        {/* Level 2 — Check group */}
+                        {groups.map(group => {
+                          const gKey        = `${section.category}::${group.key}`
+                          const gExpanded   = expandedGroups.has(gKey)
+                          const gPassed     = group.overall
+                            ? group.overall.passed
+                            : group.subItems.length > 0
+                              ? group.subItems.every(s => s.summary.passed === true)
+                              : undefined
+                          const subFailed   = group.subItems.filter(s => !s.summary.passed).length
+                          const issueCount  = group.orphanIssues.length + group.subItems.reduce((a, s) => a + s.issues.length, 0)
+                          const hasContent  = group.subItems.length > 0 || group.orphanIssues.length > 0 || (group.overall && !group.overall.passed)
+
+                          return (
+                            <div key={group.key} className="bg-gray-50/20">
+
+                              {/* Group header */}
+                              <button
+                                onClick={() => hasContent && toggleGroup(gKey)}
+                                className={`w-full pl-10 pr-5 py-2.5 flex items-center gap-2.5 transition-colors ${hasContent ? 'hover:bg-gray-100/60 cursor-pointer' : 'cursor-default'}`}
+                              >
+                                <div className={`flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center ${
+                                  gPassed === true  ? 'bg-green-100' :
+                                  gPassed === false ? 'bg-red-100'   : 'bg-gray-100'
+                                }`}>
+                                  {gPassed === true  && <CheckCircle size={11} className="text-green-600" />}
+                                  {gPassed === false && <XCircle     size={11} className="text-red-500" />}
+                                  {gPassed === undefined && <span className="w-1.5 h-1.5 rounded-full bg-gray-400" />}
+                                </div>
+
+                                <span className={`text-xs font-semibold flex-1 text-left ${
+                                  gPassed === true  ? 'text-green-800' :
+                                  gPassed === false ? 'text-red-800'   : 'text-gray-600'
+                                }`}>{group.displayName}</span>
+
+                                {group.subItems.length > 0 && (
+                                  <span className="text-[10px] text-gray-400">
+                                    {group.subItems.length - subFailed}/{group.subItems.length}
+                                  </span>
+                                )}
+                                {issueCount > 0 && (
+                                  <span className="text-[10px] text-amber-600 font-semibold">
+                                    {issueCount} issue{issueCount > 1 ? 's' : ''}
+                                  </span>
+                                )}
+                                <span className={`text-[10px] font-bold px-2 py-0.5 rounded tracking-wide ${
+                                  gPassed === true  ? 'bg-green-100 text-green-700 border border-green-200' :
+                                  gPassed === false ? 'bg-red-100 text-red-700 border border-red-200'       :
+                                                      'bg-gray-100 text-gray-400 border border-gray-200'
+                                }`}>
+                                  {gPassed === true ? 'PASS' : gPassed === false ? 'FAIL' : 'N/A'}
+                                </span>
+                                {hasContent && (
+                                  <ChevronDown size={12} className={`text-gray-400 ml-1 flex-shrink-0 transition-transform ${gExpanded ? 'rotate-180' : ''}`} />
+                                )}
+                              </button>
+
+                              {/* Level 3 — Sub-items + issues */}
+                              {gExpanded && hasContent && (
+                                <div className="pl-16 pr-5 pb-2 space-y-0.5">
+
+                                  {group.subItems.map(sub => {
+                                    const label = sub.summary.check_name?.includes(' – ')
+                                      ? sub.summary.check_name.split(' – ').slice(1).join(' – ')
+                                      : sub.summary.check_name ?? ''
+                                    return (
+                                      <div key={sub.summary.id}>
+                                        <div className={`flex items-start gap-2 py-1.5 rounded-lg px-2 ${sub.summary.passed ? '' : 'bg-red-50/50'}`}>
+                                          <div className={`mt-0.5 flex-shrink-0 w-3.5 h-3.5 rounded-full flex items-center justify-center ${sub.summary.passed ? 'bg-green-100' : 'bg-red-100'}`}>
+                                            {sub.summary.passed
+                                              ? <CheckCircle size={9} className="text-green-600" />
+                                              : <XCircle    size={9} className="text-red-500" />}
+                                          </div>
+                                          <span className="text-[11px] font-medium text-gray-600 w-28 flex-shrink-0 truncate" title={label}>{label}</span>
+                                          <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded flex-shrink-0 ${
+                                            sub.summary.passed ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
+                                          }`}>{sub.summary.passed ? 'PASS' : 'FAIL'}</span>
+                                          <span className={`text-[11px] leading-relaxed ml-1 ${sub.summary.passed ? 'text-gray-400' : 'text-red-700'}`}>
+                                            {sub.summary.description.replace(/^(PASS|FAIL)\s*—\s*/, '')}
+                                          </span>
+                                        </div>
+                                        {sub.issues.map(issue => {
+                                          const { cls, label: lbl } = severityBadge(issue.severity)
+                                          return (
+                                            <div key={issue.id} className="ml-5 flex items-start gap-2 py-1 px-2 bg-amber-50/40 rounded mt-0.5">
+                                              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded flex-shrink-0 ${cls}`}>{lbl}</span>
+                                              <span className="text-[11px] text-gray-600 leading-relaxed">{issue.description}</span>
+                                              <span className="ml-auto text-[10px] text-gray-300 flex-shrink-0">{issue.location}</span>
+                                            </div>
+                                          )
+                                        })}
+                                      </div>
+                                    )
+                                  })}
+
+                                  {group.orphanIssues.map(issue => {
+                                    const { cls, label: lbl } = severityBadge(issue.severity)
+                                    return (
+                                      <div key={issue.id} className="flex items-start gap-2 py-1 px-2 bg-amber-50/40 rounded">
+                                        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded flex-shrink-0 ${cls}`}>{lbl}</span>
+                                        <span className="text-[11px] text-gray-600 leading-relaxed">{issue.description}</span>
+                                        <span className="ml-auto text-[10px] text-gray-300 flex-shrink-0">{issue.location}</span>
+                                      </div>
+                                    )
+                                  })}
+
+                                  {group.subItems.length === 0 && group.overall && (
+                                    <div className={`text-[11px] leading-relaxed py-1 px-2 rounded ${group.overall.passed ? 'text-green-700' : 'text-red-700'}`}>
+                                      {group.overall.description.replace(/^(PASS|FAIL|N\/A)\s*—\s*/, '')}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
             </div>
           )}
         </div>
