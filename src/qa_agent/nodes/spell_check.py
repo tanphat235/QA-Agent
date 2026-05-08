@@ -1,204 +1,187 @@
-import base64
+import logging
 from pydantic import BaseModel, Field
 from langchain_anthropic import ChatAnthropic
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.outputs import LLMResult
 
 from qa_agent.state import GraphState, Issue
 
-_SYSTEM = """\
-You are a senior structural rebar detailing QA reviewer performing a visual and textual inspection of a PDF drawing.
-The drawing uses German terminology: "Schnitt X-X" = section view, "Maßstab" or "M 1:XX" = scale.
+logger = logging.getLogger(__name__)
 
-══════════════════════════════════════════════
-STEP 0 — PREPARATION (do before any check)
-══════════════════════════════════════════════
-Scan the entire PDF and list every section view title you find:
-  • "Schnitt X-X" patterns (e.g., Schnitt 6-6, Schnitt 7-7, …)
-  • Any "Ansicht", "Detail", or view with a scale label
-You will use this list to drive checks 2 and 3.
-
-══════════════════════════════════════════════
-CHECKS — perform all 6, output items as specified
-══════════════════════════════════════════════
-
-CHECK 1 — Spelling Check (drawing-wide)
-Inspect all visible text in the drawing: titles, labels, notes, callouts, title block.
-  • Flag clear spelling mistakes in German or English words.
-  • Do NOT flag accepted engineering abbreviations (e.g. "Ø", "typ.", "N.T.S.", "Reinf.", "Bew.").
-  • Do NOT flag capitalization style unless it creates genuine ambiguity.
-Output:
-  • ONE individual issue item per spelling mistake found.
-  • ONE overall summary:
-      check_name = "Spelling Check"
-      passed = true if no mistakes; false if any found
-      description = "PASS — all visible text inspected, no spelling errors." OR
-                    "FAIL — <N> spelling error(s) found."
-
-CHECK 2 — Section Name Consistency (per Schnitt)
-For EACH identified Schnitt, verify that the section title matches the section callout symbol that
-points to it in the plan or overview view (e.g., callout "6-6" must match title "Schnitt 6-6").
-For EACH Schnitt, output:
-  • ONE sub-summary item:
-      check_name = "Section Name – <Schnitt name>"
-      passed = true (title matches callout) | false (mismatch found) | true (callout not visible — cannot assess)
-      description = "PASS — <Schnitt>: title matches callout." OR
-                    "FAIL — <Schnitt>: callout reads '<X>' but title reads '<Y>'." OR
-                    "N/A — <Schnitt>: corresponding callout not visible in drawing."
-  • ONE individual issue item for each mismatch found.
-After all Schnitts, output ONE overall summary:
-    check_name = "Section Name"
-    passed = true only if ALL assessable Schnitts passed
-    description = "PASS — all <N> Schnitts checked, names consistent." OR
-                  "FAIL — <N> Schnitt name mismatch(es) found."
-
-CHECK 3 — Section Scale Consistency (per Schnitt)
-For EACH identified Schnitt that shows a scale label (e.g., "M 1:50"), compare it against:
-  a) the title block scale, and
-  b) any adjacent scale reference on the same sheet.
-For EACH Schnitt with a visible scale, output:
-  • ONE sub-summary item:
-      check_name = "Section Scale – <Schnitt name>"
-      passed = true (scale consistent) | false (mismatch) | true (no scale shown — N/A)
-      description = "PASS — <Schnitt>: scale M 1:XX consistent." OR
-                    "FAIL — <Schnitt>: section shows M 1:XX but title block/reference shows M 1:YY." OR
-                    "N/A — <Schnitt>: no scale label shown."
-  • ONE individual issue item for each mismatch found.
-After all Schnitts, output ONE overall summary:
-    check_name = "Section Scale"
-    passed = true only if all assessable Schnitts passed
-    description = "PASS — all visible Schnitt scales are consistent." OR
-                  "FAIL — <N> scale inconsistency/inconsistencies found."
-
-CHECK 4 — Title Block Completeness (drawing-wide)
-Check the title block for these required fields:
-  drawing title, drawing number, revision, scale, project name, member name, date, engineer/author.
-Flag any field that is clearly missing or left blank when it should be filled.
-Also flag conflicting information (e.g. two different revision numbers in the same title block).
-Output:
-  • ONE individual issue item per missing or conflicting field.
-  • ONE overall summary:
-      check_name = "Title Block Completeness"
-      passed = true if all required fields are present and consistent; false otherwise
-      description = "PASS — title block complete, all required fields present." OR
-                    "FAIL — <N> missing or conflicting title block field(s)."
-
-CHECK 5 — Overview / Key Plan Consistency (drawing-wide)
-Identify the overview or key plan view showing the position of structural members.
-Compare member names, labels, and section cut positions in the overview against those in the
-detailed Schnitt views.
-Output:
-  • ONE individual issue item per mismatch found.
-  • ONE overall summary:
-      check_name = "Overview / Key Plan Consistency"
-      passed = true if consistent or no overview present (N/A)
-      description = "PASS — …" OR "N/A — no overview / key plan visible." OR "FAIL — …"
-
-CHECK 6 — Connected Component Annotation (drawing-wide)
-Check whether connected structural elements (adjacent members, supports, interfaces) are
-properly annotated: label present, label correct, label unambiguous.
-Output:
-  • ONE individual issue item per missing or incorrect annotation.
-  • ONE overall summary:
-      check_name = "Connected Component Annotation"
-      passed = true if all connected elements are properly annotated; false otherwise
-      description = "PASS — all connected components annotated correctly." OR "FAIL — …"
-
-══════════════════════════════════════════════
-OUTPUT FORMAT
-══════════════════════════════════════════════
-
-SUB-SUMMARY or OVERALL SUMMARY items:
-  passed:      true or false  (required — this is what fills the pass/fail report)
-  check_name:  exactly as specified above
-  severity:    "info" if passed=true; "error" or "warning" if passed=false
-  description: "PASS — …" / "FAIL — …" / "N/A — …"
-  page:        1
-  location:    relevant area (e.g. "Schnitt 7-7" or "title block" or "entire drawing")
-  confidence:  1.0
-
-INDIVIDUAL ISSUE items:
-  passed:      omit (null)
-  check_name:  omit
-  severity:    "error" or "warning"
-  description: concise, quoting the specific text, Schnitt name, or field name
-  page:        page where the issue appears
-  location:    specific visual location
-  confidence:  0.65–1.0  (omit item if below 0.65)
-
-SEVERITY RULES:
-  error:   clear issue causing construction, fabrication, or interpretation mistakes.
-  warning: inconsistency, ambiguity, or missing information that should be reviewed.
-  info:    used only on PASS / N/A summary items.
-
-Do not include any explanations outside the structured output.\
+# Must be byte-for-byte identical across all nodes so Anthropic can share the cached PDF prefix.
+_COMMON_SYSTEM = """\
+You are a senior structural rebar detailing QA reviewer performing a visual and technical inspection of a PDF structural drawing.
+German terminology: "Schnitt X-X" = section view, "Pos" = bar position/mark, "Gesamt" = total, "Stahl" = steel, \
+"Maßstab" / "M 1:XX" = scale, "Ansicht" = elevation, "Detail" = detail view.\
 """
+
+_TASK = """\
+Inspect visible text and annotations in this structural drawing.
+Report ONLY issues you can directly observe in the PDF.
+
+CHECK 1 — Spelling Errors (spelling)
+Flag clear spelling mistakes in German or English words in titles, labels, notes, callouts, or title block.
+Do NOT flag: accepted engineering abbreviations (Ø, typ., N.T.S., Reinf., Bew.), capitalization style.
+
+CHECK 2 — Section Name vs Callout Mismatch (section_name)
+For each "Schnitt X-X" title visible in the drawing, verify it matches the corresponding callout symbol.
+Flag only where BOTH the title and its callout are visible AND they clearly differ.
+Do NOT flag if only one side is visible.
+
+CHECK 3 — Section Scale Inconsistency (section_scale)
+Flag where a Schnitt shows a scale label (M 1:XX) that clearly differs from the title block scale
+or a directly adjacent reference scale.
+Only flag where both scales are simultaneously visible and unambiguously different.
+
+CHECK 4 — Title Block Missing Fields (title_block)
+Check the title block for these required fields:
+  drawing title, drawing number, revision, scale, project name, date, engineer/author.
+Flag any field that is clearly absent or left blank when it should be filled.
+
+CHECK 5 — Overview / Key Plan Label Mismatch (overview_consistency)
+If an overview or key plan view is present: flag member labels or section cut designations that
+clearly differ from labels used in the corresponding Schnitt views.
+Do NOT flag if no overview/key plan is visible on the sheet.
+
+═══════════════════════════════════
+OUTPUT FORMAT — one item per finding
+═══════════════════════════════════
+  check:       "spelling" | "section_name" | "section_scale" | "title_block" | "overview_consistency"
+  severity:    "error" for clear mistake; "warning" for ambiguous or minor
+  description: concise — quote the specific text, field, or label involved
+  page:        1
+  location:    specific location (e.g. "Schnitt 7-7 title" or "title block revision field")
+  confidence:  0.65–1.0 — omit the item entirely if confidence is below 0.65
+
+RULES:
+  • Only report issues directly visible and unambiguous.
+  • Do NOT flag uncertain or marginally readable text.
+  • If no issues are found for all checks, return an empty list — that is correct.\
+"""
+
+# Python generates pass/fail summaries — LLM never needs to produce them.
+_CHECK_META: dict[str, tuple[str, str]] = {
+    "spelling": (
+        "Spelling Check",
+        "PASS — no spelling errors found in drawing text.",
+    ),
+    "section_name": (
+        "Section Name Consistency",
+        "PASS — all section titles match their callout symbols.",
+    ),
+    "section_scale": (
+        "Section Scale Consistency",
+        "PASS — all section scales consistent with title block.",
+    ),
+    "title_block": (
+        "Title Block Completeness",
+        "PASS — all required title block fields present.",
+    ),
+    "overview_consistency": (
+        "Overview / Key Plan Consistency",
+        "PASS — overview labels consistent with section views.",
+    ),
+}
+
+
+class _UsageCallback(BaseCallbackHandler):
+    def __init__(self, label: str) -> None:
+        self.label = label
+
+    def on_llm_end(self, response: LLMResult, **kwargs) -> None:
+        try:
+            msg = response.generations[0][0].message  # type: ignore[attr-defined]
+            u = getattr(msg, "response_metadata", {}).get("usage", {})
+            if not u:
+                u = getattr(msg, "usage_metadata", {}) or {}
+            print(
+                f"[usage][{self.label}] input={u.get('input_tokens', 0)}"
+                f"  cache_create={u.get('cache_creation_input_tokens', 0)}"
+                f"  cache_read={u.get('cache_read_input_tokens', 0)}"
+                f"  output={u.get('output_tokens', 0)}"
+            )
+        except Exception as exc:
+            print(f"[usage][{self.label}] could not read usage: {exc}")
 
 
 class _SpellIssue(BaseModel):
-    severity: str = Field(description="error, warning, or info")
-    description: str = Field(description="PASS/FAIL/N/A summary text or concise issue description")
-    page: int = Field(description="1-indexed page number")
-    location: str = Field(description="Visual location, e.g. 'top-right title block' or 'Schnitt 7-7'")
-    confidence: float = Field(description="Confidence score 0.0–1.0")
-    passed: bool | None = Field(default=None, description="True=PASS, False=FAIL — set only on summary items; omit on individual issues")
-    check_name: str | None = Field(default=None, description="Check area name — set only on summary items")
+    check: str = Field(description="spelling | section_name | section_scale | title_block | overview_consistency")
+    severity: str = Field(description="error | warning")
+    description: str
+    page: int
+    location: str
+    confidence: float = Field(description="0.65–1.0")
 
 
 class _SpellResult(BaseModel):
-    issues: list[_SpellIssue] = Field(default_factory=list)
+    issues: list[_SpellIssue]  # required — no default so missing field raises ValidationError
 
 
 def spell_check(state: GraphState) -> dict:
-    with open(state["pdf_path"], "rb") as f:
-        pdf_data = base64.standard_b64encode(f.read()).decode("utf-8")
+    pdf_data: str = state["pdf_data"]  # type: ignore[assignment]
 
     llm = ChatAnthropic(  # type: ignore[call-arg]
         model="claude-sonnet-4-5",  # type: ignore[call-arg]
         temperature=0,
-        max_tokens=8192,  # type: ignore[call-arg]
+        max_tokens=4096,  # type: ignore[call-arg]
     ).with_structured_output(_SpellResult).with_retry(stop_after_attempt=2)
 
-    result: _SpellResult = llm.invoke([
-        SystemMessage(content=_SYSTEM),
-        HumanMessage(content=[
-            {
-                "type": "document",
-                "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data},
-            },
-            {
-                "type": "text",
-                "text": (
-                    "Review the full drawing PDF.\n"
-                    "Step 0: List every Schnitt X-X label you find.\n"
-                    "Then perform all 6 checks:\n"
-                    "  Check 1: individual spelling issues + one overall summary.\n"
-                    "  Check 2: for EACH Schnitt output one sub-summary (check_name='Section Name – Schnitt X-X', "
-                    "passed=true/false) plus individual issues, then one overall summary.\n"
-                    "  Check 3: for EACH Schnitt with a visible scale output one sub-summary "
-                    "(check_name='Section Scale – Schnitt X-X', passed=true/false) plus individual issues, "
-                    "then one overall summary.\n"
-                    "  Checks 4–6: individual issues + one overall summary each.\n"
-                    "Do not skip any check or any Schnitt."
-                ),
-            },
-        ]),
-    ])
+    result: _SpellResult = llm.invoke(  # type: ignore[assignment]
+        [
+            SystemMessage(content=_COMMON_SYSTEM),
+            HumanMessage(content=[
+                {
+                    "type": "document",
+                    "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data},
+                    "cache_control": {"type": "ephemeral"},
+                },
+                {
+                    "type": "text",
+                    "text": _TASK,
+                },
+            ]),
+        ],
+        config={"callbacks": [_UsageCallback("spell_check")]},
+    )
+    print(f"[usage][spell_check] raw items from LLM: {len(result.issues)}")
+
+    # Group LLM findings by check category, filter low-confidence
+    by_check: dict[str, list[_SpellIssue]] = {k: [] for k in _CHECK_META}
+    for item in result.issues:
+        if item.confidence >= 0.60 and item.check in by_check:
+            by_check[item.check].append(item)
 
     issues: list[Issue] = []
-    for item in result.issues:
-        if item.confidence < 0.60:
-            continue
-        entry: Issue = {
+
+    # Python always generates a guaranteed pass/fail summary for every check
+    for check_key, (check_name, pass_desc) in _CHECK_META.items():
+        found = by_check[check_key]
+        passed = len(found) == 0
+        if passed:
+            summary_desc = pass_desc
+        elif len(found) == 1:
+            summary_desc = f"FAIL — {found[0].description}"
+        else:
+            summary_desc = f"FAIL — {len(found)} issue(s) found."
+        issues.append({
             "category": "spell",
-            "severity": item.severity,
-            "description": item.description,
-            "page": item.page,
-            "location": item.location,
-            "confidence": item.confidence,
-        }
-        if item.passed is not None:
-            entry["passed"] = item.passed
-        if item.check_name:
-            entry["check_name"] = item.check_name
-        issues.append(entry)
+            "check_name": check_name,
+            "passed": passed,
+            "severity": "info" if passed else "error",
+            "description": summary_desc,
+            "page": 1,
+            "location": "drawing",
+            "confidence": 1.0,
+        })
+        for item in found:
+            issues.append({
+                "category": "spell",
+                "severity": item.severity,
+                "description": item.description,
+                "page": item.page,
+                "location": item.location,
+                "confidence": item.confidence,
+            })
+
     return {"spell_issues": issues}

@@ -1,210 +1,185 @@
-import base64
+import logging
 from pydantic import BaseModel, Field
 from langchain_anthropic import ChatAnthropic
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.outputs import LLMResult
 
 from qa_agent.state import GraphState, Issue
 
-_SYSTEM = """\
-You are a senior structural rebar detailing QA reviewer specialized in Eurocode 2 reinforcement detailing.
-You are performing a visual and technical inspection of a PDF drawing.
-German terminology: "Schnitt X-X" = section, "Pos" = bar position/mark, "Gesamt" = total, "Stahl" = steel.
+logger = logging.getLogger(__name__)
 
-══════════════════════════════════════════════
-STEP 0 — PREPARATION (do before any check)
-══════════════════════════════════════════════
-  a) Scan the bar schedule / Bending Shapes table. List every Pos number found.
-  b) Scan the drawing. List every Schnitt X-X label found.
-You will use these two lists to drive the checks below.
-
-══════════════════════════════════════════════
-CHECKS — perform all 7, output items as specified
-══════════════════════════════════════════════
-
-CHECK 1 — Bending Angle Compliance (Eurocode 2) — per Pos
-For EACH Pos in the bar schedule, inspect its bending shape diagram and verify against EC2 §8.3:
-  • Stirrup / closed link hooks: minimum 135° (90° only if concrete prevents opening).
-  • Standard bend: minimum 90°.
-  • Mandrel diameter: ≥ 4Ø for bar Ø ≤ 16 mm; ≥ 7Ø for bar Ø > 16 mm.
-  • Straight extension past last bend: ≥ 5Ø; for stirrups ≥ max(10Ø, 70 mm).
-For EACH Pos, output:
-  • ONE sub-summary item:
-      check_name = "Bending Angle (EC2) – Pos <X>"
-      passed = true (compliant or cannot assess — no shape drawn) | false (non-compliant angle/extension)
-      description = "PASS — Pos <X>: bending shape complies with EC2." OR
-                    "FAIL — Pos <X>: <issue, e.g. hook angle 90° instead of min 135°>."
-  • ONE individual issue item per non-compliant angle or extension found.
-After all Pos, output ONE overall summary:
-    check_name = "Bending Angle (EC2)"
-    passed = true only if ALL Pos passed
-    description = "PASS — all <N> Pos checked, bending shapes comply." OR
-                  "FAIL — <N> of <total> Pos have non-compliant bending angles."
-
-CHECK 2 — Total Mass Existence
-Check whether the bar schedule contains a total mass / total weight row or cell
-(look for "Gesamt", "Total", "∑ kg", or a summed row at the bottom of the schedule).
-Output ONE overall summary only:
-    check_name = "Total Mass Existence"
-    passed = true if a total mass figure is found; false if none
-    description = "PASS — total mass row found: <value> kg." OR
-                  "FAIL — no total mass row found in the bar schedule."
-
-CHECK 3 — Total Mass Arithmetic — per Pos
-For EACH Pos where diameter, quantity, length, and unit mass are all visible, calculate:
-  expected total = quantity × length (m) × unit_mass (kg/m)
-Compare to the value shown. Flag Pos where shown value deviates > 5%.
-Also verify the grand total equals the sum of all Pos totals (if grand total is visible).
-For EACH Pos that has all required values visible, output:
-  • ONE sub-summary item:
-      check_name = "Mass Arithmetic – Pos <X>"
-      passed = true (within 5%) | false (deviation > 5%)
-      description = "PASS — Pos <X>: <qty>×<len>m×<unit>kg/m = <expected>kg, shown <shown>kg, OK." OR
-                    "FAIL — Pos <X>: expected <expected>kg but schedule shows <shown>kg (deviation <X>%)."
-  • ONE individual issue item for each Pos that fails.
-After all Pos, output ONE overall summary:
-    check_name = "Total Mass Arithmetic"
-    passed = true only if all visible Pos and grand total are consistent
-
-CHECK 4 — Abnormal Mass Detection
-Flag any Pos whose total mass exceeds 3× the average total mass of all Pos in the schedule,
-or any total mass value that appears physically unrealistic for the member type (e.g. > 5 000 kg
-for a single-member schedule).
-Output:
-  • ONE individual issue item per flagged Pos.
-  • ONE overall summary:
-      check_name = "Abnormal Mass Detection"
-      passed = true if all values are within normal range; false if any anomaly found
-
-CHECK 5 — Pos Schema Coverage in Schnitt Views — per Pos
-For EACH Pos in the bar schedule, verify that its bending shape, schematic, or placement callout
-appears in AT LEAST ONE Schnitt view in the drawing.
-A Pos is "covered" if its Pos number, bar mark, or an identical bending shape is clearly visible
-inside or directly adjacent to a Schnitt view.
-For EACH Pos, output:
-  • ONE sub-summary item:
-      check_name = "Schema Coverage – Pos <X>"
-      passed = true (covered in ≥1 Schnitt) | false (not found in any Schnitt)
-      description = "PASS — Pos <X> found in <Schnitt name>." OR
-                    "FAIL — Pos <X> has no corresponding schema in any Schnitt view."
-  • ONE individual issue item for each Pos that is not covered.
-After all Pos, output ONE overall summary:
-    check_name = "Schema Coverage"
-    passed = true only if ALL Pos are covered
-    description = "PASS — all <N> Pos have schema coverage in Schnitt views." OR
-                  "FAIL — <N> Pos missing from all Schnitt views: Pos <list>."
-
-CHECK 6 — Mesh Reinforcement Schedule Presence
-If mesh reinforcement is shown or referenced: check whether a mesh schedule or usage table is present.
-Output ONE overall summary only:
-    check_name = "Mesh Schedule Presence"
-    passed = true (schedule found) | true (N/A — no mesh) | false (mesh present, no schedule)
-    description = "PASS — mesh schedule found." OR "N/A — no mesh reinforcement present." OR
-                  "FAIL — mesh reinforcement visible but no schedule found."
-
-CHECK 7 — Mesh Utilisation Ratio
-If a mesh schedule is visible: check whether the utilisation ratio is shown and ≥ 85%.
-If no mesh schedule: mark N/A.
-Output ONE overall summary only:
-    check_name = "Mesh Utilisation Ratio"
-    passed = true (ratio ≥ 85% or N/A) | false (ratio < 85% or missing)
-    description = "PASS — utilisation <X>% ≥ 85%." OR "N/A — no mesh schedule." OR
-                  "FAIL — utilisation <X>% below 85%." OR "FAIL — utilisation ratio not shown."
-
-══════════════════════════════════════════════
-OUTPUT FORMAT
-══════════════════════════════════════════════
-
-SUB-SUMMARY or OVERALL SUMMARY items:
-  passed:      true or false  (required — this is what fills the pass/fail report)
-  check_name:  exactly as specified above
-  severity:    "info" if passed=true; "error" or "warning" if passed=false
-  description: "PASS — …" / "FAIL — …" / "N/A — …"
-  page:        1
-  location:    relevant area (e.g. "bar schedule" or "Schnitt 7-7")
-  confidence:  1.0
-
-INDIVIDUAL ISSUE items:
-  passed:      omit (null)
-  check_name:  omit
-  severity:    "error" or "warning"
-  description: concise, quoting the Pos number, Schnitt, or specific value
-  page:        page where the issue appears
-  location:    specific visual location
-  confidence:  0.65–1.0  (omit item if below 0.65)
-
-SEVERITY RULES:
-  error:   non-compliant angle, arithmetic mismatch, missing total, Pos without schema.
-  warning: borderline value, ambiguity, or information needing review.
-  info:    used only on PASS / N/A summary items.
-
-Do not include any explanations outside the structured output.\
+# Must be byte-for-byte identical across all nodes so Anthropic can share the cached PDF prefix.
+_COMMON_SYSTEM = """\
+You are a senior structural rebar detailing QA reviewer performing a visual and technical inspection of a PDF structural drawing.
+German terminology: "Schnitt X-X" = section view, "Pos" = bar position/mark, "Gesamt" = total, "Stahl" = steel, \
+"Maßstab" / "M 1:XX" = scale, "Ansicht" = elevation, "Detail" = detail view.\
 """
+
+_TASK = """\
+Review the bar schedule and section views in this structural drawing.
+Report ONLY issues you can directly observe from clearly visible values in the PDF.
+
+CHECK 1 — Bending Angle / Hook Compliance (bending_angle)
+Inspect stirrup and hook bending shapes where angle and extension are clearly drawn and labeled.
+Flag ONLY if:
+  • A stirrup hook is clearly shown at ≤ 90° (EC2 §8.3 requires ≥ 135° unless concrete prevents opening)
+  • A straight extension past the last bend is clearly shorter than 5Ø (stirrups: max(10Ø, 70 mm))
+  • A mandrel diameter is explicitly labeled and clearly below EC2 minimum (4Ø for Ø ≤ 16 mm; 7Ø for Ø > 16 mm)
+Do NOT flag if angle or extension value is not explicitly shown in the diagram.
+
+CHECK 2 — Bar Schedule Mass Arithmetic (mass_arithmetic)
+For each Pos where ALL four values are clearly visible in the schedule:
+  quantity (n), bar length (m), unit mass (kg/m), shown total mass (kg)
+Calculate: expected = n × length × unit_mass
+Flag if |shown − expected| / expected > 5%.
+Do NOT flag if any of the four required values is missing or unclear.
+
+CHECK 3 — Abnormal Mass Values (abnormal_mass)
+Flag any Pos whose shown total mass clearly exceeds 3× the average total of all visible Pos rows,
+or exceeds 5 000 kg for a single Pos in a standard member schedule.
+Do NOT flag without a clear comparison basis from visible data.
+
+CHECK 4 — Bar Mark Coverage (missing_pos)
+Flag any Pos number listed in the bar schedule that does not appear anywhere in the section views,
+detail drawings, or bar mark callouts visible on the sheet.
+Do NOT flag if the Pos number IS visible somewhere in the drawing.
+
+═══════════════════════════════════
+OUTPUT FORMAT — one item per finding
+═══════════════════════════════════
+  check:       "bending_angle" | "mass_arithmetic" | "abnormal_mass" | "missing_pos"
+  severity:    "error" for clear non-compliance; "warning" for borderline or ambiguous
+  description: concise — quote Pos number, dimension, or computed vs shown value
+  page:        1
+  location:    specific location (e.g. "bar schedule row Pos 12" or "Schnitt 3-3")
+  confidence:  0.65–1.0 — omit the item entirely if confidence is below 0.65
+
+RULES:
+  • Only report what is directly visible and unambiguous in the drawing.
+  • Do NOT infer or estimate values not shown.
+  • Do NOT report a check if required values are not visible.
+  • If no issues are found for all checks, return an empty list — that is correct.\
+"""
+
+# Python generates pass/fail summaries — LLM never needs to produce them.
+_CHECK_META: dict[str, tuple[str, str]] = {
+    "bending_angle": (
+        "Bending Angle (EC2)",
+        "PASS — all visible bending shapes comply with EC2 §8.3.",
+    ),
+    "mass_arithmetic": (
+        "Total Mass Arithmetic",
+        "PASS — bar schedule mass arithmetic verified correct.",
+    ),
+    "abnormal_mass": (
+        "Abnormal Mass Detection",
+        "PASS — no abnormal mass values detected.",
+    ),
+    "missing_pos": (
+        "Pos Schema Coverage",
+        "PASS — all bar positions visible in at least one section view.",
+    ),
+}
+
+
+class _UsageCallback(BaseCallbackHandler):
+    def __init__(self, label: str) -> None:
+        self.label = label
+
+    def on_llm_end(self, response: LLMResult, **kwargs) -> None:
+        try:
+            msg = response.generations[0][0].message  # type: ignore[attr-defined]
+            u = getattr(msg, "response_metadata", {}).get("usage", {})
+            if not u:
+                u = getattr(msg, "usage_metadata", {}) or {}
+            print(
+                f"[usage][{self.label}] input={u.get('input_tokens', 0)}"
+                f"  cache_create={u.get('cache_creation_input_tokens', 0)}"
+                f"  cache_read={u.get('cache_read_input_tokens', 0)}"
+                f"  output={u.get('output_tokens', 0)}"
+            )
+        except Exception as exc:
+            print(f"[usage][{self.label}] could not read usage: {exc}")
 
 
 class _BendIssue(BaseModel):
-    severity: str = Field(description="error, warning, or info")
-    description: str = Field(description="PASS/FAIL/N/A summary text or concise issue description")
-    page: int = Field(description="1-indexed page number")
-    location: str = Field(description="Visual location, e.g. 'bar schedule row 4' or 'Schnitt 7-7'")
-    confidence: float = Field(description="Confidence score 0.0–1.0")
-    passed: bool | None = Field(default=None, description="True=PASS, False=FAIL — set only on summary items; omit on individual issues")
-    check_name: str | None = Field(default=None, description="Check area name — set only on summary items")
+    check: str = Field(description="bending_angle | mass_arithmetic | abnormal_mass | missing_pos")
+    severity: str = Field(description="error | warning")
+    description: str
+    page: int
+    location: str
+    confidence: float = Field(description="0.65–1.0")
 
 
 class _BendResult(BaseModel):
-    issues: list[_BendIssue] = Field(default_factory=list)
+    issues: list[_BendIssue]  # required — no default so missing field raises ValidationError
 
 
 def bend_check(state: GraphState) -> dict:
-    with open(state["pdf_path"], "rb") as f:
-        pdf_data = base64.standard_b64encode(f.read()).decode("utf-8")
+    pdf_data: str = state["pdf_data"]  # type: ignore[assignment]
 
     llm = ChatAnthropic(  # type: ignore[call-arg]
         model="claude-sonnet-4-5",  # type: ignore[call-arg]
         temperature=0,
-        max_tokens=8192,  # type: ignore[call-arg]
+        max_tokens=4096,  # type: ignore[call-arg]
     ).with_structured_output(_BendResult).with_retry(stop_after_attempt=2)
 
-    result: _BendResult = llm.invoke([
-        SystemMessage(content=_SYSTEM),
-        HumanMessage(content=[
-            {
-                "type": "document",
-                "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data},
-            },
-            {
-                "type": "text",
-                "text": (
-                    "Review the full drawing PDF.\n"
-                    "Step 0: List every Pos number from the bar schedule and every Schnitt label.\n"
-                    "Then perform all 7 checks:\n"
-                    "  Check 1: for EACH Pos output one sub-summary (check_name='Bending Angle – Pos X', passed=true/false) plus individual issues, then one overall summary.\n"
-                    "  Check 2: one overall summary only.\n"
-                    "  Check 3: for EACH Pos with visible values output one sub-summary (check_name='Mass Arithmetic – Pos X') plus individual issues, then one overall summary.\n"
-                    "  Check 4: individual issues + one overall summary.\n"
-                    "  Check 5: for EACH Pos output one sub-summary (check_name='Schema Coverage – Pos X', passed=true/false), then one overall summary.\n"
-                    "  Checks 6–7: one overall summary each.\n"
-                    "Do not skip any check or any Pos."
-                ),
-            },
-        ]),
-    ])
+    result: _BendResult = llm.invoke(  # type: ignore[assignment]
+        [
+            SystemMessage(content=_COMMON_SYSTEM),
+            HumanMessage(content=[
+                {
+                    "type": "document",
+                    "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data},
+                    "cache_control": {"type": "ephemeral"},
+                },
+                {
+                    "type": "text",
+                    "text": _TASK,
+                },
+            ]),
+        ],
+        config={"callbacks": [_UsageCallback("bend_check")]},
+    )
+    print(f"[usage][bend_check] raw items from LLM: {len(result.issues)}")
+
+    # Group LLM findings by check category, filter low-confidence
+    by_check: dict[str, list[_BendIssue]] = {k: [] for k in _CHECK_META}
+    for item in result.issues:
+        if item.confidence >= 0.60 and item.check in by_check:
+            by_check[item.check].append(item)
 
     issues: list[Issue] = []
-    for item in result.issues:
-        if item.confidence < 0.60:
-            continue
-        entry: Issue = {
+
+    # Python always generates a guaranteed pass/fail summary for every check
+    for check_key, (check_name, pass_desc) in _CHECK_META.items():
+        found = by_check[check_key]
+        passed = len(found) == 0
+        if passed:
+            summary_desc = pass_desc
+        elif len(found) == 1:
+            summary_desc = f"FAIL — {found[0].description}"
+        else:
+            summary_desc = f"FAIL — {len(found)} issue(s) found."
+        issues.append({
             "category": "bend",
-            "severity": item.severity,
-            "description": item.description,
-            "page": item.page,
-            "location": item.location,
-            "confidence": item.confidence,
-        }
-        if item.passed is not None:
-            entry["passed"] = item.passed
-        if item.check_name:
-            entry["check_name"] = item.check_name
-        issues.append(entry)
+            "check_name": check_name,
+            "passed": passed,
+            "severity": "info" if passed else "error",
+            "description": summary_desc,
+            "page": 1,
+            "location": "drawing",
+            "confidence": 1.0,
+        })
+        for item in found:
+            issues.append({
+                "category": "bend",
+                "severity": item.severity,
+                "description": item.description,
+                "page": item.page,
+                "location": item.location,
+                "confidence": item.confidence,
+            })
+
     return {"bend_issues": issues}

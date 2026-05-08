@@ -1,209 +1,185 @@
-import base64
+import logging
 from pydantic import BaseModel, Field
 from langchain_anthropic import ChatAnthropic
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.outputs import LLMResult
 
 from qa_agent.state import GraphState, Issue
 
-_SYSTEM = """\
-You are a senior structural rebar detailing QA reviewer performing a visual and technical inspection of a PDF drawing.
-The drawing uses German terminology: "Schnitt X-X" = section view, "Ansicht" = elevation, "Detail" = detail view.
+logger = logging.getLogger(__name__)
 
-══════════════════════════════════════════════
-STEP 0 — PREPARATION (do before any check)
-══════════════════════════════════════════════
-Scan the entire PDF and list every section view title you find:
-  • "Schnitt X-X" patterns (e.g., Schnitt 6-6, Schnitt 7-7, …)
-  • Any "Ansicht", "Detail", or view with a section cut marker
-You will use this list to drive checks 1 and 2.
-
-══════════════════════════════════════════════
-CHECKS — perform all 6, output items as specified
-══════════════════════════════════════════════
-
-CHECK 1 — Rebar Label Completeness (per Schnitt)
-Go through EACH identified Schnitt one by one:
-  a) Enumerate every distinct reinforcement element visible in that Schnitt:
-       • Bars shown as solid circles or ovals (end-on cross-section view)
-       • Bars shown as rectangles or lines (longitudinal view)
-       • Stirrups, links, U-bars shown as outlines
-       • Any visible bar group or layer
-  b) LABELING RULES — a bar or group is considered labeled ONLY if:
-       • A number (e.g. "22", "Ø22", "d=22") is placed directly next to or connected by
-         a leader line to THAT SPECIFIC bar or circle/oval.
-       • A Pos number (from the bar schedule) is written inside or directly adjacent to it.
-       • A shared callout with a bracket or range arrow explicitly covers the whole group.
-     A number appearing near one circle does NOT label other circles at different positions.
-     A number that labels a bar in the PLAN VIEW does NOT label the same bar in the SCHNITT.
-     A "typical" note exempts bars ONLY if it is placed visibly inside or immediately
-     next to that specific Schnitt — not elsewhere on the sheet.
-  c) WHAT TO FLAG:
-       • Any circle/oval (bar cross-section) with no number or leader line adjacent to it.
-       • Any bar group or layer with no callout, diameter, or Pos reference.
-       • Stirrups visible but with no hook dimension or Pos reference shown.
-  d) For EACH Schnitt, output:
-     • ONE sub-summary item:
-         check_name = "Rebar Labels – <Schnitt name>"
-         passed = true ONLY if EVERY circle, bar, and group has an explicit label
-         passed = false if ANY element is unlabeled
-         description = "PASS — all bars and bar groups labeled in <Schnitt>." OR
-                       "FAIL — <N> unlabeled element(s) in <Schnitt> (describe which)."
-     • ONE individual issue item per unlabeled element found.
-  e) After all Schnitts, output ONE overall summary:
-         check_name = "Rebar Labels"
-         passed = true only if ALL Schnitts passed; false otherwise
-         description = "PASS — all <N> Schnitts fully labeled." OR
-                       "FAIL — <N> of <total> Schnitts have unlabeled bars."
-
-CHECK 2 — Rebar Dimension Completeness (per Schnitt)
-Go through EACH identified Schnitt one by one:
-  a) For each bar group in that Schnitt, check that the dimensions needed to interpret its
-     position are present: concrete cover, bar spacing, lap/splice length, embedment, extension,
-     or offset from member edge.
-  b) A dimension is only "covered" by a schedule or note if that note unambiguously names
-     that exact bar group in that exact Schnitt.
-  c) For EACH Schnitt, output:
-     • ONE sub-summary item:
-         check_name = "Rebar Dims – <Schnitt name>"
-         passed = true | false
-         description = "PASS — all required dimensions present in <Schnitt>" OR
-                       "FAIL — <N> missing dimension(s) in <Schnitt>"
-     • ONE individual issue item per missing dimension found.
-  d) After all Schnitts, output ONE overall summary:
-         check_name = "Rebar Dims"
-         passed = true only if ALL Schnitts passed
-         description = "PASS — all <N> Schnitts checked, dimensions complete." OR
-                       "FAIL — <N> of <total> Schnitts have missing dimensions."
-
-CHECK 3 — Cross-View Consistency
-Compare bar marks, diameters, and spacing for the same reinforcement across different Schnitts.
-Report only clear mismatches where both references are simultaneously visible.
-Output:
-  • ONE individual issue item per mismatch found.
-  • ONE overall summary:
-      check_name = "Cross-View Consistency"
-      passed = true if no mismatches; false otherwise
-
-CHECK 4 — Mesh Reinforcement Label Check
-If mesh reinforcement is visible: check each mesh area for label, mesh type, spacing, orientation.
-If no mesh is visible: mark as N/A.
-Output:
-  • ONE individual issue item per unlabeled mesh area.
-  • ONE overall summary:
-      check_name = "Mesh Label Check"
-      passed = true (all labeled) | true (N/A — no mesh) | false (missing labels)
-      description: "PASS — …" OR "N/A — no mesh reinforcement visible." OR "FAIL — …"
-
-CHECK 5 — Mesh Reinforcement Dimension / Extent Check
-If mesh reinforcement is visible: check lap, edge distance, and extent dimensioning.
-If no mesh is visible: mark as N/A.
-Output:
-  • ONE individual issue item per missing mesh dimension.
-  • ONE overall summary:
-      check_name = "Mesh Dimension Check"
-      description: "PASS — …" OR "N/A — no mesh reinforcement visible." OR "FAIL — …"
-
-CHECK 6 — Starter Bars / Lap Splice Dimension Check
-Check starter bars, dowel bars, and lap splice zones across all Schnitts for:
-lap length, projection, embedment, spacing, bar mark, relation to member face.
-Output:
-  • ONE individual issue item per missing starter bar label or dimension.
-  • ONE overall summary:
-      check_name = "Starter Bars & Lap Splices"
-      passed = true | false
-
-══════════════════════════════════════════════
-OUTPUT FORMAT
-══════════════════════════════════════════════
-
-SUB-SUMMARY or OVERALL SUMMARY items:
-  passed:      true or false  (required — this is what fills the report)
-  check_name:  exactly as specified above
-  severity:    "info" if passed=true; "error" or "warning" if passed=false
-  description: "PASS — …" / "FAIL — …" / "N/A — …"
-  page:        1
-  location:    relevant area (e.g. "Schnitt 7-7" or "entire drawing")
-  confidence:  1.0
-
-INDIVIDUAL ISSUE items:
-  passed:      omit (null) — detail items only, not summary items
-  check_name:  omit
-  severity:    "error" or "warning"
-  description: concise, naming the specific Schnitt and bar group
-  page:        page where the issue appears
-  location:    specific visual location (e.g. "Schnitt 7-7, left column mid-height")
-  confidence:  0.65–1.0  (omit item if below 0.65)
-
-SEVERITY RULES:
-  error:   missing label or dimension that would cause fabrication or placement mistakes.
-  warning: ambiguous or borderline annotation needing review.
-  info:    used only on PASS / N/A summary items.
-
-Do not include any explanations outside the structured output.\
+# Must be byte-for-byte identical across all nodes so Anthropic can share the cached PDF prefix.
+_COMMON_SYSTEM = """\
+You are a senior structural rebar detailing QA reviewer performing a visual and technical inspection of a PDF structural drawing.
+German terminology: "Schnitt X-X" = section view, "Pos" = bar position/mark, "Gesamt" = total, "Stahl" = steel, \
+"Maßstab" / "M 1:XX" = scale, "Ansicht" = elevation, "Detail" = detail view.\
 """
+
+_TASK = """\
+Inspect reinforcement labels and dimensions in the section views of this structural drawing.
+Report ONLY issues you can directly observe from visible annotations in the PDF.
+
+CHECK 1 — Unlabeled Reinforcement (rebar_label)
+For each section view (Schnitt), flag any reinforcement element with no explicit label:
+  • Bar shown as solid circle/oval with no Ø or Pos number directly adjacent or connected by a leader line
+  • Bar group or layer with no shared callout explicitly covering that group
+  • Stirrup outline with no Pos reference or hook dimension shown
+Do NOT flag if a label is present but simply located nearby with a clear leader line.
+Do NOT flag if the drawing uses a consistent "typical" note that visibly covers that view.
+
+CHECK 2 — Missing Rebar Dimensions (rebar_dims)
+For each section view, flag where a bar group's positional information is clearly incomplete:
+  • No concrete cover dimension and no standard cover note that covers this specific bar
+  • No bar spacing dimension where bars are at regular spacing with no value shown
+  • No lap/splice length where a lap zone is clearly visible but undimensioned
+Do NOT flag if a general note or schedule entry unambiguously applies to the specific bar.
+
+CHECK 3 — Cross-View Inconsistency (cross_view)
+Flag where the same bar mark or Pos number appears in two different section views with
+clearly different diameters, spacing, or quantities that cannot be explained by the view type.
+Only flag where BOTH references are simultaneously visible and unambiguously different.
+
+CHECK 4 — Starter Bar / Lap Splice Issues (starter_bars)
+Flag starter bars, dowels, or lap splice zones that are clearly visible but missing:
+  • A bar mark or Pos number
+  • A lap length or projection dimension
+Do NOT flag where the dimension or mark is present but difficult to read.
+
+═══════════════════════════════════
+OUTPUT FORMAT — one item per finding
+═══════════════════════════════════
+  check:       "rebar_label" | "rebar_dims" | "cross_view" | "starter_bars"
+  severity:    "error" for missing label/dimension causing fabrication risk; "warning" for ambiguous
+  description: concise — name the specific Schnitt and element
+  page:        1
+  location:    specific location (e.g. "Schnitt 6-6, top-right corner" or "wall base lap zone")
+  confidence:  0.65–1.0 — omit the item entirely if confidence is below 0.65
+
+RULES:
+  • Only report issues directly visible and unambiguous.
+  • A faint but legible label is still a label — do not flag it.
+  • If no issues are found for all checks, return an empty list — that is correct.\
+"""
+
+# Python generates pass/fail summaries — LLM never needs to produce them.
+_CHECK_META: dict[str, tuple[str, str]] = {
+    "rebar_label": (
+        "Rebar Label Completeness",
+        "PASS — all reinforcement elements labeled in section views.",
+    ),
+    "rebar_dims": (
+        "Rebar Dimension Completeness",
+        "PASS — all required dimensions present in section views.",
+    ),
+    "cross_view": (
+        "Cross-View Consistency",
+        "PASS — no cross-view inconsistencies found.",
+    ),
+    "starter_bars": (
+        "Starter Bars & Lap Splices",
+        "PASS — all starter bars and lap splices properly marked.",
+    ),
+}
+
+
+class _UsageCallback(BaseCallbackHandler):
+    def __init__(self, label: str) -> None:
+        self.label = label
+
+    def on_llm_end(self, response: LLMResult, **kwargs) -> None:
+        try:
+            msg = response.generations[0][0].message  # type: ignore[attr-defined]
+            u = getattr(msg, "response_metadata", {}).get("usage", {})
+            if not u:
+                u = getattr(msg, "usage_metadata", {}) or {}
+            print(
+                f"[usage][{self.label}] input={u.get('input_tokens', 0)}"
+                f"  cache_create={u.get('cache_creation_input_tokens', 0)}"
+                f"  cache_read={u.get('cache_read_input_tokens', 0)}"
+                f"  output={u.get('output_tokens', 0)}"
+            )
+        except Exception as exc:
+            print(f"[usage][{self.label}] could not read usage: {exc}")
 
 
 class _RebarIssue(BaseModel):
-    severity: str = Field(description="error, warning, or info")
-    description: str = Field(description="PASS/FAIL/N/A summary text or concise issue description")
-    page: int = Field(description="1-indexed page number")
-    location: str = Field(description="Visual location, e.g. 'Schnitt 7-7 left column mid-height'")
-    confidence: float = Field(description="Confidence score 0.0–1.0")
-    passed: bool | None = Field(default=None, description="True=PASS, False=FAIL — set only on summary items; omit on individual issues")
-    check_name: str | None = Field(default=None, description="Check area name — set only on summary items")
+    check: str = Field(description="rebar_label | rebar_dims | cross_view | starter_bars")
+    severity: str = Field(description="error | warning")
+    description: str
+    page: int
+    location: str
+    confidence: float = Field(description="0.65–1.0")
 
 
 class _RebarResult(BaseModel):
-    issues: list[_RebarIssue] = Field(default_factory=list)
+    issues: list[_RebarIssue]  # required — no default so missing field raises ValidationError
 
 
 def rebar_check(state: GraphState) -> dict:
-    with open(state["pdf_path"], "rb") as f:
-        pdf_data = base64.standard_b64encode(f.read()).decode("utf-8")
+    pdf_data: str = state["pdf_data"]  # type: ignore[assignment]
 
     llm = ChatAnthropic(  # type: ignore[call-arg]
         model="claude-sonnet-4-5",  # type: ignore[call-arg]
         temperature=0,
-        max_tokens=8192,  # type: ignore[call-arg]
+        max_tokens=4096,  # type: ignore[call-arg]
     ).with_structured_output(_RebarResult).with_retry(stop_after_attempt=2)
 
-    result: _RebarResult = llm.invoke([
-        SystemMessage(content=_SYSTEM),
-        HumanMessage(content=[
-            {
-                "type": "document",
-                "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data},
-            },
-            {
-                "type": "text",
-                "text": (
-                    "Review the full drawing PDF.\n"
-                    "Step 0: List every Schnitt X-X (and any Ansicht/Detail) you find.\n"
-                    "Then perform all 6 checks. For checks 1 and 2, process EACH Schnitt individually "
-                    "and output one sub-summary item per Schnitt (check_name = 'Rebar Labels – Schnitt X-X' "
-                    "or 'Rebar Dims – Schnitt X-X') with passed=true/false, then one overall summary. "
-                    "For checks 3–6, output individual issue items plus one overall summary. "
-                    "Do not skip any check or any Schnitt."
-                ),
-            },
-        ]),
-    ])
+    result: _RebarResult = llm.invoke(  # type: ignore[assignment]
+        [
+            SystemMessage(content=_COMMON_SYSTEM),
+            HumanMessage(content=[
+                {
+                    "type": "document",
+                    "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data},
+                    "cache_control": {"type": "ephemeral"},
+                },
+                {
+                    "type": "text",
+                    "text": _TASK,
+                },
+            ]),
+        ],
+        config={"callbacks": [_UsageCallback("rebar_check")]},
+    )
+    print(f"[usage][rebar_check] raw items from LLM: {len(result.issues)}")
+
+    # Group LLM findings by check category, filter low-confidence
+    by_check: dict[str, list[_RebarIssue]] = {k: [] for k in _CHECK_META}
+    for item in result.issues:
+        if item.confidence >= 0.60 and item.check in by_check:
+            by_check[item.check].append(item)
 
     issues: list[Issue] = []
-    for item in result.issues:
-        if item.confidence < 0.60:
-            continue
-        entry: Issue = {
+
+    # Python always generates a guaranteed pass/fail summary for every check
+    for check_key, (check_name, pass_desc) in _CHECK_META.items():
+        found = by_check[check_key]
+        passed = len(found) == 0
+        if passed:
+            summary_desc = pass_desc
+        elif len(found) == 1:
+            summary_desc = f"FAIL — {found[0].description}"
+        else:
+            summary_desc = f"FAIL — {len(found)} issue(s) found."
+        issues.append({
             "category": "rebar",
-            "severity": item.severity,
-            "description": item.description,
-            "page": item.page,
-            "location": item.location,
-            "confidence": item.confidence,
-        }
-        if item.passed is not None:
-            entry["passed"] = item.passed
-        if item.check_name:
-            entry["check_name"] = item.check_name
-        issues.append(entry)
+            "check_name": check_name,
+            "passed": passed,
+            "severity": "info" if passed else "error",
+            "description": summary_desc,
+            "page": 1,
+            "location": "drawing",
+            "confidence": 1.0,
+        })
+        for item in found:
+            issues.append({
+                "category": "rebar",
+                "severity": item.severity,
+                "description": item.description,
+                "page": item.page,
+                "location": item.location,
+                "confidence": item.confidence,
+            })
+
     return {"rebar_issues": issues}
