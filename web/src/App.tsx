@@ -460,10 +460,14 @@ export default function App() {
             node?: string
             message?: string
             data?: AnalysisResult
+            thread_id?: string
+            studio_url?: string
           }
 
           if (payload.type === 'ack') {
             /* backend received file; optional UX hook */
+          } else if (payload.type === 'run_started') {
+            /* thread created on LangGraph API — visible in LangSmith Studio */
           } else if (payload.type === 'progress') {
             setActiveNode(payload.node ?? null)
             setDoneNodes((prev) => [...prev, payload.node ?? ''])
@@ -509,10 +513,18 @@ export default function App() {
     (doneNodes.filter(k => visibleNodes.some(n => n.key === k)).length / visibleNodes.length) * 100
   )
 
-  // Stats — traverse the actual tree to count correctly
-  const allResultIssues   = result?.sections.flatMap(s => s.issues) ?? []
-  const totalChecksPassed = allResultIssues.filter(i => i.passed === true).length
-  const totalChecksFailed = allResultIssues.filter(i => i.passed === false).length
+  // Stats — count at sub-item level: each Schnitt/Pos counts as 1;
+  // groups with no sub-items (just an overall) count as 1.
+  const _countChecks = (wantPassed: boolean) =>
+    (result?.sections ?? []).flatMap(section =>
+      buildCheckGroups(section.issues).flatMap(group => {
+        if (group.subItems.length > 0)
+          return group.subItems.filter(sub => sub.summary.passed === wantPassed)
+        return group.overall?.passed === wantPassed ? [group.overall] : []
+      })
+    ).length
+  const totalChecksPassed = _countChecks(true)
+  const totalChecksFailed = _countChecks(false)
   // Individual issue items: no check_name, no passed — exactly what appears in the flat list
   const allIndividualIssues = (result?.sections ?? []).flatMap(section =>
     buildCheckGroups(section.issues).flatMap(group => [
@@ -815,7 +827,7 @@ export default function App() {
                             disabled={enabledChecks.length === 0}
                             title={enabledChecks.length === 0 ? 'Select at least one check' : undefined}
                             className="ml-1 px-3 py-1.5 bg-blue-600 text-white text-[11px] font-bold rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors tracking-wide shadow-sm">
-                            Start Check
+                            Analyze
                           </button>
                         </>
                       )}

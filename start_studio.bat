@@ -1,6 +1,10 @@
 @echo off
-title Drawing Analyzer - LangGraph Studio
-echo Starting LangGraph Studio...
-echo Open https://smith.langchain.com/studio to view the graph
+title LangGraph API Server (port 2024)
+echo Starting LangGraph API Server on http://127.0.0.1:2024 ...
+echo Studio UI: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
+echo.
+echo [!] Start this BEFORE start_backend.bat
+echo.
 "C:\Users\phat.phamt\AppData\Roaming\Python\Python313\Scripts\poetry.exe" run langgraph dev
 pause
+    
