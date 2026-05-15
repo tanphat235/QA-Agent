@@ -6,6 +6,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.outputs import LLMResult
 
 from qa_agent.state import GraphState, Issue
+from qa_agent.rag.retriever import get_node_context
 
 logger = logging.getLogger(__name__)
 
@@ -181,7 +182,7 @@ def spell_check(state: GraphState) -> dict:
                 },
                 {
                     "type": "text",
-                    "text": _TASK,
+                    "text": _TASK + get_node_context("spell"),
                 },
             ]),
         ],
