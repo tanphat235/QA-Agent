@@ -11,74 +11,82 @@ logger = logging.getLogger(__name__)
 
 # Must be byte-for-byte identical across all nodes so Anthropic can share the cached PDF prefix.
 _COMMON_SYSTEM = """\
-You are a senior structural rebar detailing QA reviewer performing a visual and technical inspection of a PDF structural drawing.
-German terminology: "Schnitt X-X" = section view, "Pos" = bar position/mark, "Gesamt" = total, "Stahl" = steel, \
-"Maßstab" / "M 1:XX" = scale, "Ansicht" = elevation, "Detail" = detail view.\
+You are a senior structural QA reviewer for precast concrete wall drawings. Inspect the PDF drawing visually and technically.
+German terminology:
+  Schnitt X-X = section/cross-section | Ansicht = elevation/formwork view | Wandansicht = wall elevation
+  Bewehrung = reinforcement/rebar | Stabliste = bar list/rebar schedule | Mattenstahlliste = mesh rebar list
+  Einbauteilliste = embedded parts list | Montageteilliste = assembly parts list (per element)
+  Pos = bar position/mark | Gesamt = total | Stahl = steel | Maßstab / M 1:XX = scale
+  Draufsicht = top/plan view | Matten-Schneideskizze = mesh cut sketch | Detail = detail view\
 """
 
 _TASK = """\
-Inspect reinforcement labels and dimensions in the section views of this structural drawing.
-Report ONLY issues you can directly observe from visible annotations in the PDF.
+Inspect reinforcement elements, spacers, pin bars, and clamps in this precast wall structural drawing.
+Report ONLY issues you can directly observe from visible annotations and dimensions in the PDF.
 
-CHECK 1 — Unlabeled Reinforcement (rebar_label)
-For each section view (Schnitt), flag any reinforcement element with no explicit label:
-  • Bar shown as solid circle/oval with no Ø or Pos number directly adjacent or connected by a leader line
-  • Bar group or layer with no shared callout explicitly covering that group
-  • Stirrup outline with no Pos reference or hook dimension shown
-Do NOT flag if a label is present but simply located nearby with a clear leader line.
-Do NOT flag if the drawing uses a consistent "typical" note that visibly covers that view.
+CHECK 1 — Spacer / Clamp Label Suffix (spacer_label)
+Identify all spacer (Abstandhalter) and clamp reinforcement elements in the drawing.
+Flag any spacer or clamp whose label does NOT end with the suffix "-M.E.".
+Correct examples: "Ø8-M.E.", "Pos 5-M.E.".
+Do NOT flag rebar elements that are not spacers or clamps.
 
-CHECK 2 — Missing Rebar Dimensions (rebar_dims)
-For each section view, flag where a bar group's positional information is clearly incomplete:
-  • No concrete cover dimension and no standard cover note that covers this specific bar
-  • No bar spacing dimension where bars are at regular spacing with no value shown
-  • No lap/splice length where a lap zone is clearly visible but undimensioned
-Do NOT flag if a general note or schedule entry unambiguously applies to the specific bar.
+CHECK 2 — Vertical Pin Width (pin_width_vertical)
+For each vertical pin (vertical stirrup) visible in the section views, verify its width using:
+  Required width = wall_width – 2 × Cv
+  where wall_width = total wall thickness (from title block or dimension), Cv = concrete cover from the detail view.
+Flag if the labeled pin width clearly differs from the required calculated value.
+Do NOT flag if wall_width, Cv, or the labeled pin dimension is not explicitly shown.
 
-CHECK 3 — Cross-View Inconsistency (cross_view)
-Flag where the same bar mark or Pos number appears in two different section views with
-clearly different diameters, spacing, or quantities that cannot be explained by the view type.
-Only flag where BOTH references are simultaneously visible and unambiguously different.
+CHECK 3 — Horizontal Pin Width (pin_width_horizontal)
+For each horizontal pin in the section views, verify its width using:
+  Required width = wall_width – 2 × Cv – 2 × Ø_layer1   (round down to nearest mm)
+  where Ø_layer1 = diameter of the outermost rebar layer (read from the side section label,
+  e.g. position 12 → Ø12 → 1.2 cm).
+  Example: wall_width=30, Cv=2.5, Ø_layer1=1.2 → 30 – 5.0 – 2.4 = 22.6 → 22 cm
+Flag if the labeled horizontal pin width clearly differs from the calculated value.
+Do NOT flag if any required dimension is not explicitly shown.
 
-CHECK 4 — Starter Bar / Lap Splice Issues (starter_bars)
-Flag starter bars, dowels, or lap splice zones that are clearly visible but missing:
-  • A bar mark or Pos number
-  • A lap length or projection dimension
-Do NOT flag where the dimension or mark is present but difficult to read.
+CHECK 4 — Spacer / Clamp Width (spacer_width)
+For each spacer or clamp element, verify its width using:
+  Required width = wall_width – 2 × Cv + 2 × Ø_spacer   (round up to nearest mm)
+  where Ø_spacer = physical diameter of the spacer/clamp wire or element.
+  Example: wall_width=30, Cv=2.5, Ø_spacer=0.8 → 30 – 5.0 + 1.6 = 26.6 → 27 cm
+Flag if the labeled spacer/clamp width clearly differs from the calculated value.
+Do NOT flag if any required dimension is not explicitly shown.
 
 ═══════════════════════════════════
 OUTPUT FORMAT — one item per finding
 ═══════════════════════════════════
-  check:       "rebar_label" | "rebar_dims" | "cross_view" | "starter_bars"
-  severity:    "error" for missing label/dimension causing fabrication risk; "warning" for ambiguous
-  description: concise — name the specific Schnitt and element
+  check:       "spacer_label" | "pin_width_vertical" | "pin_width_horizontal" | "spacer_width"
+  severity:    "error" for missing/wrong label or incorrect dimension causing fabrication risk; "warning" for ambiguous
+  description: concise — quote label text, or state: formula, calculated value, and declared value
   page:        1
-  location:    specific location (e.g. "Schnitt 6-6, top-right corner" or "wall base lap zone")
+  location:    specific location (e.g. "Schnitt 6-6, bottom spacer" or "wall side section, horizontal pin Pos 14")
   confidence:  0.65–1.0 — omit the item entirely if confidence is below 0.65
 
 RULES:
   • Only report issues directly visible and unambiguous.
-  • A faint but legible label is still a label — do not flag it.
+  • When flagging a dimension issue, state the formula and both values in the description.
   • If no issues are found for all checks, return an empty list — that is correct.\
 """
 
 # Python generates pass/fail summaries — LLM never needs to produce them.
 _CHECK_META: dict[str, tuple[str, str]] = {
-    "rebar_label": (
-        "Rebar Label Completeness",
-        "PASS — all reinforcement elements labeled in section views.",
+    "spacer_label": (
+        "Spacer / Clamp Label Suffix",
+        'PASS — all spacer and clamp labels include the "-M.E." suffix.',
     ),
-    "rebar_dims": (
-        "Rebar Dimension Completeness",
-        "PASS — all required dimensions present in section views.",
+    "pin_width_vertical": (
+        "Vertical Pin Width",
+        "PASS — all vertical pin widths match wall_width – 2×Cv.",
     ),
-    "cross_view": (
-        "Cross-View Consistency",
-        "PASS — no cross-view inconsistencies found.",
+    "pin_width_horizontal": (
+        "Horizontal Pin Width",
+        "PASS — all horizontal pin widths match wall_width – 2×Cv – 2×Ø_layer1.",
     ),
-    "starter_bars": (
-        "Starter Bars & Lap Splices",
-        "PASS — all starter bars and lap splices properly marked.",
+    "spacer_width": (
+        "Spacer / Clamp Width",
+        "PASS — all spacer/clamp widths match wall_width – 2×Cv + 2×Ø_spacer.",
     ),
 }
 
@@ -104,7 +112,7 @@ class _UsageCallback(BaseCallbackHandler):
 
 
 class _RebarIssue(BaseModel):
-    check: str = Field(description="rebar_label | rebar_dims | cross_view | starter_bars")
+    check: str = Field(description="spacer_label | pin_width_vertical | pin_width_horizontal | spacer_width")
     severity: str = Field(description="error | warning")
     description: str
     page: int

@@ -11,47 +11,74 @@ logger = logging.getLogger(__name__)
 
 # Must be byte-for-byte identical across all nodes so Anthropic can share the cached PDF prefix.
 _COMMON_SYSTEM = """\
-You are a senior structural rebar detailing QA reviewer performing a visual and technical inspection of a PDF structural drawing.
-German terminology: "Schnitt X-X" = section view, "Pos" = bar position/mark, "Gesamt" = total, "Stahl" = steel, \
-"Maßstab" / "M 1:XX" = scale, "Ansicht" = elevation, "Detail" = detail view.\
+You are a senior structural QA reviewer for precast concrete wall drawings. Inspect the PDF drawing visually and technically.
+German terminology:
+  Schnitt X-X = section/cross-section | Ansicht = elevation/formwork view | Wandansicht = wall elevation
+  Bewehrung = reinforcement/rebar | Stabliste = bar list/rebar schedule | Mattenstahlliste = mesh rebar list
+  Einbauteilliste = embedded parts list | Montageteilliste = assembly parts list (per element)
+  Pos = bar position/mark | Gesamt = total | Stahl = steel | Maßstab / M 1:XX = scale
+  Draufsicht = top/plan view | Matten-Schneideskizze = mesh cut sketch | Detail = detail view\
 """
 
 _TASK = """\
-Inspect visible text and annotations in this structural drawing.
+Inspect visible text, annotations, views, and tables in this precast wall structural drawing.
 Report ONLY issues you can directly observe in the PDF.
 
 CHECK 1 — Spelling Errors (spelling)
 Flag clear spelling mistakes in German or English words in titles, labels, notes, callouts, or title block.
-Do NOT flag: accepted engineering abbreviations (Ø, typ., N.T.S., Reinf., Bew.), capitalization style.
+Do NOT flag: accepted engineering abbreviations (Ø, typ., M.E., Reinf., Bew., pos.), capitalization style.
 
-CHECK 2 — Section Name vs Callout Mismatch (section_name)
-For each "Schnitt X-X" title visible in the drawing, verify it matches the corresponding callout symbol.
-Flag only where BOTH the title and its callout are visible AND they clearly differ.
-Do NOT flag if only one side is visible.
+CHECK 2 — Section Name Completeness (section_name)
+Identify all section cut designations called out in the Ansicht or Bewehrung (e.g. "1-1", "2-2", "3-3").
+Verify that a corresponding "Schnitt X-X" view is present on the sheet for every designated cut.
+Flag any cut designation whose Schnitt view is absent from the sheet.
+Do NOT flag if the Schnitt view exists but is located elsewhere on the sheet.
 
-CHECK 3 — Section Scale Inconsistency (section_scale)
-Flag where a Schnitt shows a scale label (M 1:XX) that clearly differs from the title block scale
-or a directly adjacent reference scale.
+CHECK 3 — Component Name vs Title Block (component_name)
+Verify the component/element name on the Wandansicht matches the drawing name in the title block.
+Flag only where BOTH are visible and they clearly differ.
+Do NOT flag if only one is visible.
+
+CHECK 4 — Scale Consistency (section_scale)
+Compare every explicit scale label (M 1:XX) on views or sections against the title block scale.
+Flag any view whose labeled scale clearly differs from the title block value.
 Only flag where both scales are simultaneously visible and unambiguously different.
 
-CHECK 4 — Title Block Missing Fields (title_block)
-Check the title block for these required fields:
-  drawing title, drawing number, revision, scale, project name, date, engineer/author.
-Flag any field that is clearly absent or left blank when it should be filled.
+CHECK 5 — Formwork Grid Lines vs Wandansicht (grid_lines)
+Check that grid lines (axis labels / column lines) in the wall formwork Schnitt views match those in the Wandansicht.
+Flag any grid line present in the Schnitt but absent from the Wandansicht, or vice versa.
+Do NOT flag if no Wandansicht is visible on the sheet.
 
-CHECK 5 — Overview / Key Plan Label Mismatch (overview_consistency)
-If an overview or key plan view is present: flag member labels or section cut designations that
-clearly differ from labels used in the corresponding Schnitt views.
-Do NOT flag if no overview/key plan is visible on the sheet.
+CHECK 6 — Parts Lists Present (parts_lists)
+Verify the sheet contains both:
+  • Einbauteilliste (embedded parts list)
+  • Montageteilliste (assembly/mounting parts list)
+Flag each table that is clearly absent.
+
+CHECK 7 — Parts Quantities Consistent (parts_quantities)
+For each built-in part and mounting part shown in the Schnitt and Ansicht:
+Compare the count visible in the drawing views against the quantity in the Einbauteilliste / Montageteilliste.
+Flag any part whose visible count clearly differs from its scheduled quantity.
+Do NOT flag if the part cannot be identified in both the view and the schedule simultaneously.
+
+CHECK 8 — Built-in Part Labels (parts_labels)
+Count all built-in parts visible in the section and elevation views.
+Verify each part has an explicit label (position number or designation) shown directly adjacent or via leader line.
+Flag any built-in part shown without a label.
+
+CHECK 9 — 3D View Present and Consistent (3d_view)
+Verify the sheet includes a 3D view (isometric or perspective) of the wall element.
+If present, check the 3D view is consistent with the Ansicht (same openings, cutouts, and part positions).
+Flag if: the 3D view is absent, or if it clearly contradicts the Ansicht.
 
 ═══════════════════════════════════
 OUTPUT FORMAT — one item per finding
 ═══════════════════════════════════
-  check:       "spelling" | "section_name" | "section_scale" | "title_block" | "overview_consistency"
-  severity:    "error" for clear mistake; "warning" for ambiguous or minor
-  description: concise — quote the specific text, field, or label involved
+  check:       "spelling" | "section_name" | "component_name" | "section_scale" | "grid_lines" | "parts_lists" | "parts_quantities" | "parts_labels" | "3d_view"
+  severity:    "error" for clear non-compliance; "warning" for ambiguous or minor
+  description: concise — quote the specific text, field, label, or count involved
   page:        1
-  location:    specific location (e.g. "Schnitt 7-7 title" or "title block revision field")
+  location:    specific location (e.g. "Wandansicht element label" or "title block drawing name field")
   confidence:  0.65–1.0 — omit the item entirely if confidence is below 0.65
 
 RULES:
@@ -67,20 +94,36 @@ _CHECK_META: dict[str, tuple[str, str]] = {
         "PASS — no spelling errors found in drawing text.",
     ),
     "section_name": (
-        "Section Name Consistency",
-        "PASS — all section titles match their callout symbols.",
+        "Section Name Completeness",
+        "PASS — all section cuts in Ansicht/Bewehrung have a corresponding Schnitt view.",
+    ),
+    "component_name": (
+        "Component Name vs Title Block",
+        "PASS — Wandansicht component name matches title block.",
     ),
     "section_scale": (
-        "Section Scale Consistency",
-        "PASS — all section scales consistent with title block.",
+        "Scale Consistency",
+        "PASS — all view scales consistent with title block.",
     ),
-    "title_block": (
-        "Title Block Completeness",
-        "PASS — all required title block fields present.",
+    "grid_lines": (
+        "Formwork Grid Lines Consistency",
+        "PASS — grid lines in Schnitt views match Wandansicht.",
     ),
-    "overview_consistency": (
-        "Overview / Key Plan Consistency",
-        "PASS — overview labels consistent with section views.",
+    "parts_lists": (
+        "Parts Lists Present",
+        "PASS — Einbauteilliste and Montageteilliste both present.",
+    ),
+    "parts_quantities": (
+        "Parts Quantities Consistent",
+        "PASS — built-in and mounting part counts match schedules.",
+    ),
+    "parts_labels": (
+        "Built-in Part Labels",
+        "PASS — all built-in parts are labeled in section/elevation views.",
+    ),
+    "3d_view": (
+        "3D View Present and Consistent",
+        "PASS — 3D view present and consistent with Ansicht.",
     ),
 }
 
@@ -106,7 +149,7 @@ class _UsageCallback(BaseCallbackHandler):
 
 
 class _SpellIssue(BaseModel):
-    check: str = Field(description="spelling | section_name | section_scale | title_block | overview_consistency")
+    check: str = Field(description="spelling | section_name | component_name | section_scale | grid_lines | parts_lists | parts_quantities | parts_labels | 3d_view")
     severity: str = Field(description="error | warning")
     description: str
     page: int
