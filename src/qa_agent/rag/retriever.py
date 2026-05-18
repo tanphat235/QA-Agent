@@ -16,6 +16,10 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 _CACHE_PATH = Path(__file__).parent / "data" / "knowledge_cache.json"
+_MISTAKES_PATH = (
+    Path(__file__).parent.parent.parent.parent
+    / "QA AI Drawing" / "QA Knowledge" / "qa_ai_common_mistakes.txt"
+)
 
 
 @lru_cache(maxsize=1)
@@ -32,6 +36,17 @@ def _load_cache() -> dict:
         data = json.load(f)
     logger.info("RAG cache loaded: %d sample drawing(s).", len(data.get("sample_references", [])))
     return data
+
+
+@lru_cache(maxsize=1)
+def _load_mistakes() -> str:
+    """Load the common-mistakes reference file once."""
+    if not _MISTAKES_PATH.exists():
+        logger.warning("Common-mistakes file not found at %s", _MISTAKES_PATH)
+        return ""
+    text = _MISTAKES_PATH.read_text(encoding="utf-8").strip()
+    logger.info("Common-mistakes file loaded (%d chars).", len(text))
+    return text
 
 
 def get_node_context(domain: str) -> str:
@@ -62,6 +77,10 @@ def get_node_context(domain: str) -> str:
             "REFERENCE PATTERNS FROM APPROVED DRAWINGS:\n"
             + "\n\n".join(ref_blocks)
         )
+
+    mistakes = _load_mistakes()
+    if mistakes:
+        parts.append(mistakes)
 
     if not parts:
         return ""

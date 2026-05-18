@@ -16,6 +16,7 @@ def aggregate_results(state: GraphState) -> dict:
     for issue in all_issues:
         key = (
             issue.get("category", "unknown"),
+            issue.get("check_name", ""),   # prevents dedup of same-desc summaries across checks
             issue.get("page", 1),
             issue.get("description", "").strip().lower()[:80],
         )
@@ -24,11 +25,8 @@ def aggregate_results(state: GraphState) -> dict:
         seen.add(key)
         deduped.append(issue)
 
-    deduped.sort(key=lambda i: (
-        _SEVERITY_RANK.get(i.get("severity", "info"), 99),  # type: ignore[arg-type]
-        i.get("page", 1),
-        i.get("category", ""),
-    ))
+    # Do NOT sort the flat list — check summaries must stay adjacent to their
+    # individual findings so buildCheckGroups can associate them correctly.
 
     by_category: dict[str, list[Issue]] = {"spell": [], "bend": [], "rebar": []}
     for issue in deduped:

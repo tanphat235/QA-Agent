@@ -17,6 +17,7 @@ interface Issue {
   confidence: number
   passed?: boolean      // set only on check-summary items
   check_name?: string   // set only on check-summary items
+  not_found?: boolean   // set only when required drawing info was absent
 }
 interface Section {
   category: string
@@ -25,6 +26,7 @@ interface Section {
   issue_count: number
   checks_passed?: number
   checks_failed?: number
+  checks_not_found?: number
   issues: Issue[]
 }
 interface AnalysisResult {
@@ -124,9 +126,9 @@ function buildCheckGroups(sectionIssues: Issue[]): CheckGroup[] {
 
 // ── Helpers ──────────────────────────────────────────────────
 function severityBadge(s: string) {
-  if (s === 'ERROR')   return { cls: 'bg-red-100 text-red-700 border border-red-200',      label: 'FAIL' }
-  if (s === 'WARNING') return { cls: 'bg-amber-100 text-amber-700 border border-amber-200', label: 'WARN' }
-  return                       { cls: 'bg-green-100 text-green-700 border border-green-200', label: 'OK' }
+  if (s === 'ERROR' || s === 'WARNING')
+    return { cls: 'bg-red-100 text-red-700 border border-red-200', label: 'FAIL' }
+  return { cls: 'bg-green-100 text-green-700 border border-green-200', label: 'OK' }
 }
 
 // ── History storage ───────────────────────────────────────────
@@ -151,13 +153,8 @@ function historyStats(entry: HistoryEntry) {
   const all      = entry.result.sections.flatMap(s => s.issues)
   const passed   = all.filter(i => i.passed === true).length
   const failed   = all.filter(i => i.passed === false).length
-  const issues   = entry.result.sections.flatMap(s =>
-    buildCheckGroups(s.issues).flatMap(g => [
-      ...g.orphanIssues,
-      ...g.subItems.flatMap(sub => sub.issues),
-    ])
-  ).length
-  return { passed, failed, issues }
+  const notFound = all.filter(i => i.not_found === true).length
+  return { passed, failed, issues: notFound }
 }
 
 /** SSE handler sends AnalysisResult; some backends return JSON: { ok, filename, result: { spell: { issues }, ... } } */
@@ -222,8 +219,9 @@ function normalizeAnalyzeJsonToResult(body: unknown): AnalysisResult | null {
         confidence: typeof it.confidence === 'number'
           ? (it.confidence > 1 ? it.confidence / 100 : it.confidence)
           : 0.85,
-        ...(typeof it.passed === 'boolean'  ? { passed: it.passed }         : {}),
+        ...(typeof it.passed === 'boolean'    ? { passed: it.passed }         : {}),
         ...(typeof it.check_name === 'string' ? { check_name: it.check_name } : {}),
+        ...(it.not_found === true             ? { not_found: true }           : {}),
       })
     }
   }
@@ -243,6 +241,7 @@ function normalizeAnalyzeJsonToResult(body: unknown): AnalysisResult | null {
           : 0.85,
         ...(typeof it.passed === 'boolean'    ? { passed: it.passed }         : {}),
         ...(typeof it.check_name === 'string' ? { check_name: it.check_name } : {}),
+        ...(it.not_found === true             ? { not_found: true }           : {}),
       })
     }
   }
@@ -270,14 +269,15 @@ function normalizeAnalyzeJsonToResult(body: unknown): AnalysisResult | null {
     .filter(cat => (byCategory[cat]?.length ?? 0) > 0)
     .map(cat => {
       const catIssues = byCategory[cat]
-      const checkSums = catIssues.filter(i => i.passed !== undefined)
+      const checkSums = catIssues.filter(i => i.passed !== undefined || i.not_found === true)
       return {
         category: cat,
         title: _CAT_TITLES[cat] ?? cat,
         count: catIssues.length,
-        issue_count: catIssues.filter(i => i.passed === undefined).length,
-        checks_passed: checkSums.filter(i => i.passed === true).length,
-        checks_failed: checkSums.filter(i => i.passed === false).length,
+        issue_count: catIssues.filter(i => i.passed === undefined && !i.not_found).length,
+        checks_passed:     checkSums.filter(i => i.passed === true).length,
+        checks_failed:     checkSums.filter(i => i.passed === false).length,
+        checks_not_found:  checkSums.filter(i => i.not_found === true).length,
         issues: catIssues,
       }
     })
@@ -335,11 +335,12 @@ export default function App() {
       for (const group of buildCheckGroups(section.issues)) {
         const failed = group.overall
           ? group.overall.passed === false
-          : group.subItems.some(s => s.summary.passed === false)
+          : group.subItems.some(s => s.summary.passed === false && !s.summary.not_found)
+        const notFound = group.overall?.not_found === true
         const hasIssues =
           group.orphanIssues.length > 0 ||
           group.subItems.some(s => s.issues.length > 0)
-        if (failed || hasIssues) expandKeys.add(`${section.category}::${group.key}`)
+        if (failed || notFound || hasIssues) expandKeys.add(`${section.category}::${group.key}`)
       }
     }
     setExpandedGroups(expandKeys)
@@ -525,15 +526,13 @@ export default function App() {
     ).length
   const totalChecksPassed = _countChecks(true)
   const totalChecksFailed = _countChecks(false)
-  // Individual issue items: no check_name, no passed — exactly what appears in the flat list
-  const allIndividualIssues = (result?.sections ?? []).flatMap(section =>
-    buildCheckGroups(section.issues).flatMap(group => [
-      ...group.orphanIssues,
-      ...group.subItems.flatMap(sub => sub.issues),
-    ])
-  )
-  const totalErrors   = allIndividualIssues.filter(i => i.severity === 'ERROR').length
-  const totalWarnings = allIndividualIssues.filter(i => i.severity === 'WARNING').length
+  const totalNotFound = (result?.sections ?? []).flatMap(section =>
+    buildCheckGroups(section.issues).flatMap(group => {
+      if (group.subItems.length > 0)
+        return group.subItems.filter(sub => sub.summary.not_found === true)
+      return group.overall?.not_found === true ? [group.overall] : []
+    })
+  ).length
 
   // ── Render ─────────────────────────────────────────────────
   return (
@@ -681,7 +680,7 @@ export default function App() {
                               </span>
                               {issues > 0 && (
                                 <span className="flex items-center gap-1 text-amber-600">
-                                  <AlertTriangle size={11} /> <strong>{issues}</strong> issues
+                                  <AlertTriangle size={11} /> <strong>{issues}</strong> not found
                                 </span>
                               )}
                               <span className="text-gray-300 text-[10px]">{entry.result.pdf_pages} page(s)</span>
@@ -957,21 +956,21 @@ export default function App() {
                     {resultFilter === 'failed' && <span className="ml-0.5 text-[9px] font-black">✕</span>}
                   </button>
 
-                  {/* Issues — click to show flat issue list */}
+                  {/* Not Found — checks where required drawing info was absent */}
                   <button
                     onClick={() => toggleFilter('issues')}
-                    title={resultFilter === 'issues' ? 'Clear filter' : 'Show all individual issues'}
+                    title={resultFilter === 'issues' ? 'Clear filter' : 'Show only not-found checks'}
                     className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border transition-all ${
                       resultFilter === 'issues'
                         ? 'bg-amber-100 border-amber-300 text-amber-800 font-bold ring-2 ring-amber-300'
-                        : (totalWarnings + totalErrors) > 0
+                        : totalNotFound > 0
                           ? 'bg-amber-50 border-amber-200 text-amber-700 hover:ring-2 hover:ring-amber-200 cursor-pointer'
                           : 'bg-gray-50 border-gray-100 text-gray-400 cursor-default'
                     }`}
                   >
-                    <AlertTriangle size={12} className={(totalWarnings + totalErrors) > 0 ? 'text-amber-500' : 'text-gray-300'} />
-                    <strong>{totalWarnings + totalErrors}</strong>
-                    <span>issues</span>
+                    <AlertTriangle size={12} className={totalNotFound > 0 ? 'text-amber-500' : 'text-gray-300'} />
+                    <strong>{totalNotFound}</strong>
+                    <span>not found</span>
                     {resultFilter === 'issues' && <span className="ml-0.5 text-[9px] font-black">✕</span>}
                   </button>
 
@@ -979,7 +978,7 @@ export default function App() {
                     <span className="text-[10px] text-gray-400 italic">
                       {resultFilter === 'passed' ? 'Showing passed checks only'
                         : resultFilter === 'failed' ? 'Showing failed checks only'
-                        : 'Showing all issues'}
+                        : 'Showing not-found checks only'}
                     </span>
                   )}
                 </div>
@@ -990,64 +989,16 @@ export default function App() {
                 </button>
               </div>
 
-              {/* Flat issues view — when filter = 'issues' */}
-              {resultFilter === 'issues' && (() => {
-                const allIssues = result.sections.flatMap(section =>
-                  buildCheckGroups(section.issues).flatMap(group => [
-                    ...group.orphanIssues.map(i => ({ ...i, _section: section.title })),
-                    ...group.subItems.flatMap(sub =>
-                      sub.issues.map(i => ({ ...i, _section: section.title }))
-                    ),
-                  ])
-                )
-                return (
-                  <div className="bg-white rounded-2xl border border-amber-200 overflow-hidden shadow-sm">
-                    <div className="px-6 py-3 bg-amber-50 border-b border-amber-100 flex items-center gap-2">
-                      <AlertTriangle size={14} className="text-amber-500" />
-                      <span className="text-sm font-bold text-amber-800">
-                        All Issues · {allIssues.length} item{allIssues.length !== 1 ? 's' : ''}
-                      </span>
-                      <button onClick={() => setResultFilter(null)}
-                        className="ml-auto text-[10px] text-amber-600 hover:text-amber-800 font-bold flex items-center gap-1">
-                        <XCircle size={11} /> Close
-                      </button>
-                    </div>
-                    {allIssues.length === 0 ? (
-                      <div className="px-6 py-8 text-center text-sm text-gray-400">No individual issues found.</div>
-                    ) : (
-                      <div className="divide-y divide-gray-100">
-                        {allIssues.map((issue, idx) => {
-                          const { cls, label: lbl } = severityBadge(issue.severity)
-                          return (
-                            <div key={`${issue.id}-${idx}`} className="px-6 py-3 flex items-start gap-3 hover:bg-gray-50/50">
-                              <span className={`text-[10px] font-bold px-2 py-0.5 rounded flex-shrink-0 mt-0.5 ${cls}`}>{lbl}</span>
-                              <div className="flex-1 min-w-0">
-                                <p className="text-[12px] text-gray-700 leading-relaxed">{issue.description}</p>
-                                {issue.location && (
-                                  <p className="text-[10px] text-gray-400 mt-0.5">{issue.location}</p>
-                                )}
-                              </div>
-                              <span className="text-[10px] text-gray-300 flex-shrink-0 font-medium text-right">
-                                {issue._section}
-                              </span>
-                            </div>
-                          )
-                        })}
-                      </div>
-                    )}
-                  </div>
-                )
-              })()}
-
-              {/* Tree view — normal or filtered to failed-only */}
-              {resultFilter !== 'issues' && result.sections.map(section => {
+              {/* Tree view */}
+              {result.sections.map(section => {
                 const allGroups      = buildCheckGroups(section.issues)
                 const groups         =
                   resultFilter === 'failed'
                     ? allGroups.filter(g =>
-                        g.overall
+                        !g.overall?.not_found &&
+                        (g.overall
                           ? g.overall.passed === false
-                          : g.subItems.some(s => !s.summary.passed)
+                          : g.subItems.some(s => !s.summary.passed && !s.summary.not_found))
                       )
                   : resultFilter === 'passed'
                     ? allGroups.filter(g =>
@@ -1055,13 +1006,24 @@ export default function App() {
                           ? g.overall.passed === true
                           : g.subItems.some(s => s.summary.passed === true)
                       )
+                  : resultFilter === 'issues'
+                    ? allGroups.filter(g =>
+                        g.overall?.not_found === true ||
+                        (g.subItems.length > 0 && g.subItems.some(s => s.summary.not_found === true))
+                      )
                   : allGroups
                 if (groups.length === 0) return null
                 const secCollapsed   = collapsedSections.has(section.category)
-                const secFailed      = groups.filter(g =>
-                  g.overall ? g.overall.passed === false : g.subItems.some(s => !s.summary.passed)
+                // Stats always come from allGroups so filters don't change the numbers
+                const secFailed      = allGroups.filter(g =>
+                  !g.overall?.not_found &&
+                  (g.overall ? g.overall.passed === false : g.subItems.some(s => !s.summary.passed && !s.summary.not_found))
                 ).length
-                const secIssues      = groups.reduce(
+                const secNotFound    = allGroups.filter(g =>
+                  g.overall?.not_found === true ||
+                  (g.subItems.length > 0 && g.subItems.every(s => s.summary.not_found === true))
+                ).length
+                const secIssues      = allGroups.reduce(
                   (a, g) => a + g.orphanIssues.length + g.subItems.reduce((b, s) => b + s.issues.length, 0), 0
                 )
 
@@ -1071,10 +1033,14 @@ export default function App() {
                     {/* Category header */}
                     <button onClick={() => toggleSection(section.category)}
                       className="w-full px-6 py-3.5 flex items-center gap-3 hover:bg-gray-50/60 transition-colors">
-                      <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${secFailed > 0 || secIssues > 0 ? 'bg-red-400' : 'bg-green-400'}`} />
+                      <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${
+                        secFailed > 0 || secIssues > 0 ? 'bg-red-400' :
+                        secNotFound > 0 ? 'bg-amber-400' : 'bg-green-400'
+                      }`} />
                       <span className="font-bold text-gray-900 text-sm flex-1 text-left tracking-tight">{section.title}</span>
                       <span className="text-[11px] text-gray-400">
-                        {allGroups.length - secFailed}<span className="text-gray-300">/{allGroups.length}</span> checks pass
+                        {allGroups.length - secFailed - secNotFound}<span className="text-gray-300">/{allGroups.length - secNotFound}</span> checks pass
+                        {secNotFound > 0 && <span className="ml-2 text-amber-500 font-semibold">· {secNotFound} not found</span>}
                         {secIssues > 0 && <span className="ml-2 text-amber-500 font-semibold">· {secIssues} issue{secIssues > 1 ? 's' : ''}</span>}
                       </span>
                       <ChevronDown size={14} className={`text-gray-400 ml-2 transition-transform ${secCollapsed ? '' : 'rotate-180'}`} />
@@ -1087,14 +1053,18 @@ export default function App() {
                         {groups.map(group => {
                           const gKey        = `${section.category}::${group.key}`
                           const gExpanded   = expandedGroups.has(gKey)
-                          const gPassed     = group.overall
-                            ? group.overall.passed
-                            : group.subItems.length > 0
-                              ? group.subItems.every(s => s.summary.passed === true)
-                              : undefined
-                          const subFailed   = group.subItems.filter(s => !s.summary.passed).length
+                          const gNotFound   = group.overall?.not_found === true ||
+                            (group.subItems.length > 0 && group.subItems.every(s => s.summary.not_found === true))
+                          const gPassed     = gNotFound
+                            ? undefined
+                            : group.overall
+                              ? group.overall.passed
+                              : group.subItems.length > 0
+                                ? group.subItems.every(s => s.summary.passed === true)
+                                : undefined
+                          const subFailed   = group.subItems.filter(s => !s.summary.passed && !s.summary.not_found).length
                           const issueCount  = group.orphanIssues.length + group.subItems.reduce((a, s) => a + s.issues.length, 0)
-                          const hasContent  = group.subItems.length > 0 || group.orphanIssues.length > 0 || (group.overall && !group.overall.passed)
+                          const hasContent  = group.subItems.length > 0 || group.orphanIssues.length > 0 || (group.overall && (gNotFound || !group.overall.passed))
 
                           return (
                             <div key={group.key} className="bg-gray-50/20">
@@ -1106,34 +1076,40 @@ export default function App() {
                               >
                                 <div className={`flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center ${
                                   gPassed === true  ? 'bg-green-100' :
-                                  gPassed === false ? 'bg-red-100'   : 'bg-gray-100'
+                                  gPassed === false ? 'bg-red-100'   :
+                                  gNotFound         ? 'bg-amber-100' : 'bg-gray-100'
                                 }`}>
-                                  {gPassed === true  && <CheckCircle size={11} className="text-green-600" />}
-                                  {gPassed === false && <XCircle     size={11} className="text-red-500" />}
-                                  {gPassed === undefined && <span className="w-1.5 h-1.5 rounded-full bg-gray-400" />}
+                                  {gPassed === true  && <CheckCircle   size={11} className="text-green-600" />}
+                                  {gPassed === false && <XCircle       size={11} className="text-red-500" />}
+                                  {gNotFound         && <AlertTriangle size={11} className="text-amber-500" />}
+                                  {gPassed === undefined && !gNotFound && <span className="w-1.5 h-1.5 rounded-full bg-gray-400" />}
                                 </div>
 
-                                <span className={`text-xs font-semibold flex-1 text-left ${
-                                  gPassed === true  ? 'text-green-800' :
-                                  gPassed === false ? 'text-red-800'   : 'text-gray-600'
-                                }`}>{group.displayName}</span>
+                                <div className="flex-1 min-w-0 text-left">
+                                  <div className={`text-xs font-semibold ${
+                                    gPassed === true  ? 'text-green-800' :
+                                    gPassed === false ? 'text-red-800'   :
+                                    gNotFound         ? 'text-amber-800' : 'text-gray-600'
+                                  }`}>{group.displayName}</div>
+                                  {gNotFound && group.overall && (
+                                    <div className="text-[10px] text-gray-400 mt-0.5 leading-snug">
+                                      {group.overall.description.replace(/^(PASS|FAIL|NOT FOUND|N\/A)\s*[—–-]\s*/i, '')}
+                                    </div>
+                                  )}
+                                </div>
 
                                 {group.subItems.length > 0 && (
                                   <span className="text-[10px] text-gray-400">
                                     {group.subItems.length - subFailed}/{group.subItems.length}
                                   </span>
                                 )}
-                                {issueCount > 0 && (
-                                  <span className="text-[10px] text-amber-600 font-semibold">
-                                    {issueCount} issue{issueCount > 1 ? 's' : ''}
-                                  </span>
-                                )}
                                 <span className={`text-[10px] font-bold px-2 py-0.5 rounded tracking-wide ${
                                   gPassed === true  ? 'bg-green-100 text-green-700 border border-green-200' :
                                   gPassed === false ? 'bg-red-100 text-red-700 border border-red-200'       :
+                                  gNotFound         ? 'bg-amber-100 text-amber-700 border border-amber-200' :
                                                       'bg-gray-100 text-gray-400 border border-gray-200'
                                 }`}>
-                                  {gPassed === true ? 'PASS' : gPassed === false ? 'FAIL' : 'N/A'}
+                                  {gPassed === true ? 'PASS' : gPassed === false ? 'FAIL' : gNotFound ? 'NOT FOUND' : 'N/A'}
                                 </span>
                                 {hasContent && (
                                   <ChevronDown size={12} className={`text-gray-400 ml-1 flex-shrink-0 transition-transform ${gExpanded ? 'rotate-180' : ''}`} />
@@ -1160,10 +1136,7 @@ export default function App() {
                                               : <XCircle    size={9} className="text-red-500" />}
                                           </div>
                                           <span className="text-[11px] font-medium text-gray-600 w-28 flex-shrink-0 truncate" title={label}>{label}</span>
-                                          <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded flex-shrink-0 ${
-                                            sub.summary.passed ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
-                                          }`}>{sub.summary.passed ? 'PASS' : 'FAIL'}</span>
-                                          <span className={`text-[11px] leading-relaxed ml-1 ${sub.summary.passed ? 'text-gray-400' : 'text-red-700'}`}>
+                                          <span className={`text-[11px] leading-relaxed ${sub.summary.passed ? 'text-gray-400' : 'text-red-700'}`}>
                                             {sub.summary.description.replace(/^(PASS|FAIL)\s*—\s*/, '')}
                                           </span>
                                         </div>
@@ -1192,9 +1165,12 @@ export default function App() {
                                     )
                                   })}
 
-                                  {group.subItems.length === 0 && group.overall && (
-                                    <div className={`text-[11px] leading-relaxed py-1 px-2 rounded ${group.overall.passed ? 'text-green-700' : 'text-red-700'}`}>
-                                      {group.overall.description.replace(/^(PASS|FAIL|N\/A)\s*—\s*/, '')}
+                                  {group.subItems.length === 0 && group.overall && group.orphanIssues.length === 0 && (
+                                    <div className={`text-[11px] leading-relaxed py-1 px-2 rounded ${
+                                      group.overall.passed ? 'text-green-700' :
+                                      gNotFound            ? 'text-amber-700' : 'text-red-700'
+                                    }`}>
+                                      {group.overall.description.replace(/^(PASS|FAIL|N\/A|NOT FOUND)\s*—\s*/, '')}
                                     </div>
                                   )}
                                 </div>

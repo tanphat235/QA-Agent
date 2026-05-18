@@ -25,33 +25,94 @@ _TASK = """\
 Review the bar schedule (Stabliste), mesh schedule (Mattenstahlliste), and rebar schemas in this structural drawing.
 Report ONLY issues you can directly observe from clearly visible values in the PDF.
 
-CHECK 1 — Pos Coverage in Schemas (pos_coverage)
-Cross-reference every Pos number listed in the Stabliste (excluding Pos > 100) with the rebar schemas in the Bewehrung.
-Flag any Pos (≤ 100) that exists in the Stabliste but has no corresponding schema drawn on the sheet.
-Do NOT flag Pos > 100 in this check.
+CHECK 1 — Last Position Number vs Title Block (pos_count)
+The title block contains two fields that declare the last (highest) position number used:
+  • "letzte Stabstahlposition" — last regular bar position in the Stabliste
+  • "letzte Mattenposition"    — last mesh position in the Mattenstahlliste (if mesh is present)
 
-CHECK 2 — Schema Coverage for All Pos (schema_coverage)
-Every distinct Pos in the Stabliste — including the Pos 100+ series — must have at least one bending schema shown.
-Flag any Pos (including 100+ series) that lacks any schema representation.
-Do NOT flag if a shared group schema explicitly covers the Pos.
+PROCEDURE for Stabliste:
+  1. Scan the Stabliste and find the highest Pos number that is ≤ 99 (ignore Pos 100+ completely).
+  2. Read the value in the "letzte Stabstahlposition" field of the title block.
+  3. If highest_pos_≤99 == title_block_value → PASS, do NOT flag anything.
+  4. If highest_pos_≤99 ≠ title_block_value → flag as an issue.
+
+PROCEDURE for Mattenstahlliste (only if the table is present on the sheet):
+  1. Find the highest Pos number listed in the Mattenstahlliste.
+  2. Read the value in the "letzte Mattenposition" field of the title block.
+  3. If highest_mesh_pos == title_block_value → PASS, do NOT flag anything.
+  4. If highest_mesh_pos ≠ title_block_value → flag as an issue.
+
+IMPORTANT:
+  • The presence of Pos 100, 101, 102, … in the Stabliste is normal and expected.
+    These are special accessory bars. They do NOT affect letzte Stabstahlposition at all.
+    If the title block value equals the highest regular Pos (≤99), the check PASSES — period.
+  • Only flag when the numbers clearly and unambiguously differ.
+
+If "letzte Stabstahlposition" is not visible in the title block, add "pos_count" to not_found.
+If Mattenstahlliste is absent, skip the mesh part of this check (do NOT add to not_found for that).
+
+CHECK 2 — Pos Coverage in Schemas (pos_coverage)
+Cross-reference every Pos number in the Stabliste with ALL representations visible anywhere on the sheet.
+
+WHAT COUNTS AS COVERAGE FOR A POS — any of the following satisfies the requirement:
+  A. A bar-shape sketch (bent or straight) shown in the margin or alongside a section view
+     (Schnitt a-a, Schnitt b-b, Schnitt c-c, Bewehrung, etc.) with the Pos number adjacent.
+     The sketch can be as simple as an L-shape, U-shape, or straight line segment.
+  B. A bar annotation in any section or plan view that shows:
+       Pos number  +  quantity × diameter  (e.g. "2 ø 12" or "4 × Ø8")
+     Even without a separate drawn shape — if the Pos is labeled in a section with its bar
+     dimensions, that counts as coverage.
+  C. An annotation of the form  "n ø d / spacing"  or  "n ø d -M.E."  next to a position
+     in any Schnitt or Bewehrung view — distributed and spacer bars are covered this way.
+  D. A combined label like  "n × Ø d  L=xxx cm"  shown anywhere on the sheet adjacent to
+     a bar representation, whether or not a formal schema box is drawn.
+  E. A shared schema or note explicitly listing multiple Pos numbers covers ALL of them.
+
+WHERE TO LOOK — search ALL of the following areas:
+  • Left and right margin columns of every Schnitt section (a-a, b-b, c-c, etc.)
+  • Top and bottom margin areas of every Schnitt section
+  • The Bewehrung plan/elevation area — inline sketches with leader lines
+  • Any Detail panels or callout boxes on the sheet
+  • Dimension annotation areas around section cross-sections
+
+PROCEDURE:
+  1. List every Pos number from the Stabliste.
+  2. Scan ALL areas listed above for any coverage representation (A–E) for each Pos.
+  3. Only flag a Pos if you found absolutely NO coverage after searching the full sheet.
+
+FLAG only if confidence ≥ 0.80 that coverage is genuinely absent from the ENTIRE sheet.
+Do NOT flag if coverage might exist but is small, partially hidden, or hard to read.
 
 CHECK 3 — Mesh Reinforcement Pos (mesh_pos)
-If a Mattenstahlliste is present, verify each mesh Pos listed appears in at least one section view.
-Do NOT flag if no Mattenstahlliste is visible on the sheet.
+This check requires BOTH of the following tables to be present on the sheet:
+  • Mattenstahlliste (mesh rebar schedule)
+  • Matten-Schneideskizze (mesh cut sketch)
+If both are present, verify each mesh Pos listed in the Mattenstahlliste appears in at least one view of the Matten-Schneideskizze.
+Flag any mesh Pos that is listed in the Mattenstahlliste but has no corresponding entry in the Matten-Schneideskizze.
+If either Mattenstahlliste or Matten-Schneideskizze is absent from the sheet, add "mesh_pos" to not_found.
 
 CHECK 4 — Mesh-to-Total Mass Ratio (mesh_ratio)
-If both Stabliste and Mattenstahlliste are present, calculate:
+This check requires BOTH Stabliste and Mattenstahlliste to be present on the sheet.
+If both are present, calculate:
   ratio = (total_mesh_mass / (total_rebar_mass + total_mesh_mass)) × 100
 Flag if ratio < 85 %.
 Obtain totals from the "Gesamt" (total) rows of each schedule.
-Do NOT flag if either schedule is absent or the totals are not clearly visible.
+If either Stabliste or Mattenstahlliste is absent, or if the Gesamt totals are not clearly visible, add "mesh_ratio" to not_found.
 
 CHECK 5 — Total Mass Arithmetic (mass_arithmetic)
-For each row in the Stabliste (and Mattenstahlliste if present) where ALL four values are clearly visible:
-  quantity (n), bar length (m), unit mass (kg/m), shown total mass (kg)
-  expected = n × length × unit_mass
-Flag if |shown − expected| / expected > 5 %.
-Do NOT flag if any required value is missing or unclear.
+Verify that the Gesamtmasse (grand total mass) at the bottom of the Stabliste equals the sum
+of all individual row Masse [kg] values.
+
+PROCEDURE:
+  1. Read every row's Masse [kg] value from the Stabliste.
+  2. Sum them: computed_total = Σ Masse_i
+  3. Read the Gesamtmasse [kg] footer value.
+  4. If computed_total ≠ Gesamtmasse → flag immediately. Any difference is an error.
+
+If the Mattenstahlliste is also present, apply the same check to it independently.
+
+Do NOT flag if individual row values or the Gesamtmasse footer are not clearly readable.
+If the Gesamtmasse footer is absent or illegible, add "mass_arithmetic" to not_found.
 
 CHECK 6 — Bending Angle / Mandrel Diameter (bending_angle)
 For each rebar schema, verify any explicitly labeled mandrel diameter using these minimum values:
@@ -68,53 +129,63 @@ Do NOT flag unlabeled bending radii or diameters.
 CHECK 7 — Bar Length vs Schedule (bar_length)
 For each rebar schema where a total length L is explicitly shown, compare it with the "Einzel Länge" in the Stabliste.
 Flag if the schema length clearly differs from the schedule value.
-Do NOT flag if either value is not explicitly shown.
+If the schema total length or Einzel Länge values are not explicitly shown, add "bar_length" to not_found.
 
 ═══════════════════════════════════
 OUTPUT FORMAT — one item per finding
 ═══════════════════════════════════
-  check:       "pos_coverage" | "schema_coverage" | "mesh_pos" | "mesh_ratio" | "mass_arithmetic" | "bending_angle" | "bar_length"
+  check:       "pos_count" | "pos_coverage" | "mesh_pos" | "mesh_ratio" | "mass_arithmetic" | "bending_angle" | "bar_length"
   severity:    "error" for clear non-compliance; "warning" for borderline or ambiguous
   description: concise — quote Pos number, computed vs shown value, or ratio result
   page:        1
   location:    specific location (e.g. "Stabliste row Pos 12" or "Bewehrung Schnitt 3-3")
   confidence:  0.65–1.0 — omit the item entirely if confidence is below 0.65
+  not_found:   list of check keys where required drawing information was not visible, e.g. ["mesh_pos", "mesh_ratio"]
 
 RULES:
   • Only report what is directly visible and unambiguous in the drawing.
   • Do NOT infer or estimate values not shown.
-  • If no issues are found for all checks, return an empty list — that is correct.\
+  • If required information is absent from the drawing, add the check key to not_found instead of skipping.
+  • If no issues are found for all checks, return an empty issues list and an empty not_found list — that is correct.\
 """
 
 # Python generates pass/fail summaries — LLM never needs to produce them.
-_CHECK_META: dict[str, tuple[str, str]] = {
-    "pos_coverage": (
-        "Pos Coverage (≤100)",
-        "PASS — all Stabliste positions (≤100) have a corresponding schema.",
+# Tuple: (display_name, pass_desc, not_found_desc)
+_CHECK_META: dict[str, tuple[str, str, str]] = {
+    "pos_count": (
+        "Last Position Number vs Title Block",
+        "PASS — letzte Stabstahlposition and letzte Mattenposition match schedule tables.",
+        "NOT FOUND — 'letzte Stabstahlposition' field not visible in title block.",
     ),
-    "schema_coverage": (
-        "Schema Coverage (All Pos)",
-        "PASS — all Pos including 100+ series have at least one schema.",
+    "pos_coverage": (
+        "Pos Coverage",
+        "PASS — all Stabliste positions have a corresponding schema.",
+        "NOT FOUND — Stabliste not found on sheet.",
     ),
     "mesh_pos": (
         "Mesh Reinforcement Pos",
         "PASS — all mesh positions appear in section views.",
+        "NOT FOUND — Mattenstahlliste or Matten-Schneideskizze absent from sheet.",
     ),
     "mesh_ratio": (
         "Mesh-to-Total Mass Ratio",
         "PASS — mesh reinforcement ratio ≥ 85 %.",
+        "NOT FOUND — Mattenstahlliste absent or Gesamtmasse totals not visible.",
     ),
     "mass_arithmetic": (
         "Total Mass Arithmetic",
-        "PASS — bar schedule mass arithmetic verified correct.",
+        "PASS — sum of row masses matches Gesamtmasse footer.",
+        "NOT FOUND — Gesamtmasse footer absent or illegible.",
     ),
     "bending_angle": (
         "Bending Angle / Mandrel Diameter",
         "PASS — all labeled mandrel diameters comply with minimum requirements.",
+        "NOT FOUND — no labeled mandrel diameters found in schemas.",
     ),
     "bar_length": (
         "Bar Length vs Schedule",
         "PASS — all schema lengths match Einzel Länge in Stabliste.",
+        "NOT FOUND — schema total lengths or Einzel Länge values not visible.",
     ),
 }
 
@@ -140,7 +211,7 @@ class _UsageCallback(BaseCallbackHandler):
 
 
 class _BendIssue(BaseModel):
-    check: str = Field(description="pos_coverage | schema_coverage | mesh_pos | mesh_ratio | mass_arithmetic | bending_angle | bar_length")
+    check: str = Field(description="pos_count | pos_coverage | mesh_pos | mesh_ratio | mass_arithmetic | bending_angle | bar_length")
     severity: str = Field(description="error | warning")
     description: str
     page: int
@@ -150,6 +221,50 @@ class _BendIssue(BaseModel):
 
 class _BendResult(BaseModel):
     issues: list[_BendIssue]  # required — no default so missing field raises ValidationError
+    not_found: list[str] = Field(default_factory=list, description="Check keys where required drawing information was not visible")
+
+
+# pos_coverage requires a higher confidence bar to suppress false positives.
+_HIGH_CONFIDENCE_CHECKS = {"pos_coverage"}
+
+
+def _group_bend_issue(item: _BendIssue, by_check: dict[str, list[_BendIssue]]) -> None:
+    if item.check not in by_check:
+        return
+    threshold = 0.80 if item.check in _HIGH_CONFIDENCE_CHECKS else 0.60
+    if item.confidence >= threshold:
+        by_check[item.check].append(item)
+
+
+def _build_bend_summary(check_key: str, check_name: str, pass_desc: str, nf_desc: str,
+                        found: list[_BendIssue], not_found_set: set[str]) -> list[Issue]:
+    """Return the summary item (and individual findings) for one bend check."""
+    if check_key in not_found_set:
+        return [Issue(  # type: ignore[call-arg]
+            category="bend", check_name=check_name, not_found=True,
+            severity="info",
+            description=nf_desc,
+            page=1, location="drawing", confidence=1.0,
+        )]
+    passed = len(found) == 0
+    if passed:
+        summary_desc = pass_desc
+    elif len(found) == 1:
+        summary_desc = f"FAIL — {found[0].description}"
+    else:
+        summary_desc = f"FAIL — {len(found)} issue(s) found."
+    items: list[Issue] = [Issue(  # type: ignore[call-arg]
+        category="bend", check_name=check_name, passed=passed,
+        severity="info" if passed else "error",
+        description=summary_desc, page=1, location="drawing", confidence=1.0,
+    )]
+    for item in found:
+        items.append(Issue(  # type: ignore[call-arg]
+            category="bend", severity=item.severity,
+            description=item.description, page=item.page,
+            location=item.location, confidence=item.confidence,
+        ))
+    return items
 
 
 def bend_check(state: GraphState) -> dict:
@@ -157,7 +272,7 @@ def bend_check(state: GraphState) -> dict:
 
     llm = ChatAnthropic(  # type: ignore[call-arg]
         model="claude-sonnet-4-5",  # type: ignore[call-arg]
-        temperature=0,
+        temperature=0,  # type: ignore[call-arg]
         max_tokens=4096,  # type: ignore[call-arg]
     ).with_structured_output(_BendResult).with_retry(stop_after_attempt=2)
 
@@ -180,42 +295,13 @@ def bend_check(state: GraphState) -> dict:
     )
     print(f"[usage][bend_check] raw items from LLM: {len(result.issues)}")
 
-    # Group LLM findings by check category, filter low-confidence
     by_check: dict[str, list[_BendIssue]] = {k: [] for k in _CHECK_META}
     for item in result.issues:
-        if item.confidence >= 0.60 and item.check in by_check:
-            by_check[item.check].append(item)
+        _group_bend_issue(item, by_check)
 
+    not_found_set = set(result.not_found or [])
     issues: list[Issue] = []
-
-    # Python always generates a guaranteed pass/fail summary for every check
-    for check_key, (check_name, pass_desc) in _CHECK_META.items():
-        found = by_check[check_key]
-        passed = len(found) == 0
-        if passed:
-            summary_desc = pass_desc
-        elif len(found) == 1:
-            summary_desc = f"FAIL — {found[0].description}"
-        else:
-            summary_desc = f"FAIL — {len(found)} issue(s) found."
-        issues.append({
-            "category": "bend",
-            "check_name": check_name,
-            "passed": passed,
-            "severity": "info" if passed else "error",
-            "description": summary_desc,
-            "page": 1,
-            "location": "drawing",
-            "confidence": 1.0,
-        })
-        for item in found:
-            issues.append({
-                "category": "bend",
-                "severity": item.severity,
-                "description": item.description,
-                "page": item.page,
-                "location": item.location,
-                "confidence": item.confidence,
-            })
+    for check_key, (check_name, pass_desc, nf_desc) in _CHECK_META.items():
+        issues.extend(_build_bend_summary(check_key, check_name, pass_desc, nf_desc, by_check[check_key], not_found_set))
 
     return {"bend_issues": issues}

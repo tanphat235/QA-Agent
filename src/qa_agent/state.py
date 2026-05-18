@@ -15,6 +15,7 @@ class _IssueBase(TypedDict):
 class Issue(_IssueBase, total=False):
     passed: bool        # True/False — only set on per-check summary items
     check_name: str     # Name of the check area — only set on summary items
+    not_found: bool     # True — only set when required drawing info was absent (check could not be performed)
 
 
 class PDFContent(TypedDict):
