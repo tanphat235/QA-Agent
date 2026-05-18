@@ -4,15 +4,22 @@ import json
 import tempfile
 import traceback
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Annotated
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from langgraph_sdk import get_client
+
+_MISTAKES_PATH = (
+    Path(__file__).parent.parent.parent
+    / "QA AI Drawing" / "QA Knowledge" / "qa_ai_common_mistakes.txt"
+)
 
 LANGGRAPH_URL = os.getenv("LANGGRAPH_URL", "http://127.0.0.1:2024")
 GRAPH_NAME = "qa_agent"
@@ -127,3 +134,24 @@ async def analyze(
             print("[server] === Analysis done ===\n")
 
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@app.get("/api/mistakes")
+async def get_mistakes():
+    if not _MISTAKES_PATH.exists():
+        return {"content": ""}
+    content = await asyncio.to_thread(_MISTAKES_PATH.read_text, encoding="utf-8")
+    return {"content": content}
+
+
+class _MistakesBody(BaseModel):
+    content: str
+
+
+@app.post("/api/mistakes")
+async def save_mistakes(body: _MistakesBody):
+    try:
+        await asyncio.to_thread(_MISTAKES_PATH.write_text, body.content, encoding="utf-8")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {"ok": True}

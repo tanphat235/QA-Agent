@@ -3,7 +3,7 @@ import {
   LayoutDashboard, History, HelpCircle,
   FileText, CheckCircle, AlertTriangle,
   Download, Loader2, ChevronLeft, ChevronRight, ChevronDown,
-  XCircle,
+  XCircle, BookOpen, Save,
 } from 'lucide-react'
 
 // ── Types ────────────────────────────────────────────────────
@@ -45,7 +45,7 @@ interface HistoryEntry {
 }
 type AppState    = 'idle' | 'ready' | 'analyzing' | 'done' | 'error'
 type ResultFilter = null | 'passed' | 'failed' | 'issues'
-type ActiveView  = 'dashboard' | 'history'
+type ActiveView  = 'dashboard' | 'history' | 'training'
 
 // ── Constants ────────────────────────────────────────────────
 const NODES = [
@@ -63,8 +63,9 @@ const CHECK_OPTIONS = [
   { key: 'rebar', label: 'Rebar Labels & Dims',   color: 'blue' },
 ] as const
 const NAV = [
-  { icon: LayoutDashboard, label: 'Dashboard',   view: 'dashboard' as ActiveView },
-  { icon: History,         label: 'Check History', view: 'history'   as ActiveView },
+  { icon: LayoutDashboard, label: 'Dashboard',    view: 'dashboard' as ActiveView },
+  { icon: History,         label: 'Check History', view: 'history'  as ActiveView },
+  { icon: BookOpen,        label: 'AI Training',   view: 'training' as ActiveView },
 ]
 
 // ── Tree-building types ──────────────────────────────────────
@@ -314,6 +315,10 @@ export default function App() {
   const [activeView,        setActiveView]        = useState<ActiveView>('dashboard')
   const [historyEntries,    setHistoryEntries]    = useState<HistoryEntry[]>(() => loadHistory())
   const [viewingEntry,      setViewingEntry]      = useState<HistoryEntry | null>(null)
+  const [mistakesText,      setMistakesText]      = useState('')
+  const [mistakesLoading,   setMistakesLoading]   = useState(false)
+  const [mistakesSaving,    setMistakesSaving]    = useState(false)
+  const [mistakesSaveOk,    setMistakesSaveOk]    = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
   const toggleSection = (cat: string) =>
@@ -367,6 +372,32 @@ export default function App() {
   const clearHistory = () => {
     localStorage.removeItem(HISTORY_KEY)
     setHistoryEntries([])
+  }
+
+  // Load mistakes file when training view is opened
+  useEffect(() => {
+    if (activeView !== 'training') return
+    setMistakesLoading(true)
+    fetch('/api/mistakes')
+      .then(r => r.json())
+      .then((d: { content: string }) => setMistakesText(d.content))
+      .catch(() => {})
+      .finally(() => setMistakesLoading(false))
+  }, [activeView])
+
+  const saveMistakes = async () => {
+    setMistakesSaving(true)
+    setMistakesSaveOk(false)
+    try {
+      const res = await fetch('/api/mistakes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: mistakesText }),
+      })
+      if (res.ok) { setMistakesSaveOk(true); setTimeout(() => setMistakesSaveOk(false), 2500) }
+    } finally {
+      setMistakesSaving(false)
+    }
   }
 
   const toggleCheck = (key: string) => {
@@ -611,12 +642,14 @@ export default function App() {
         <header className="bg-white border-b border-gray-200/70 px-8 py-3.5 flex items-center flex-shrink-0">
           <div>
             <h1 className="text-[15px] font-bold text-gray-900 tracking-tight">
-              {activeView === 'history' ? 'Check History' : 'Dashboard'}
+              {activeView === 'history' ? 'Check History' : activeView === 'training' ? 'AI Training' : 'Dashboard'}
             </h1>
             <p className="text-[11px] text-gray-400 mt-0.5 tracking-wide">
               {activeView === 'history'
                 ? `${historyEntries.length} of ${HISTORY_MAX} recent analyses stored`
-                : 'Structural drawing validation · PDF analysis'}
+                : activeView === 'training'
+                  ? 'Edit common AI mistakes · Saved file is injected into every analysis'
+                  : 'Structural drawing validation · PDF analysis'}
             </p>
           </div>
         </header>
@@ -704,6 +737,55 @@ export default function App() {
                   })}
                 </>
               )}
+            </div>
+          )}
+
+          {/* ── Training view ───────────────────────────── */}
+          {activeView === 'training' && (
+            <div className="flex flex-col gap-4 h-full">
+              <div className="bg-white rounded-2xl border border-gray-200/70 p-5 shadow-sm flex flex-col gap-3">
+                <div className="flex items-center justify-between flex-wrap gap-3">
+                  <div className="flex items-start gap-3">
+                    <div className="w-9 h-9 rounded-xl bg-blue-50 border border-blue-100 flex items-center justify-center flex-shrink-0">
+                      <BookOpen size={16} className="text-blue-500" />
+                    </div>
+                    <div>
+                      <p className="text-[13px] font-bold text-gray-800">Known AI Check Mistakes</p>
+                      <p className="text-[11px] text-gray-400 mt-0.5">
+                        Document cases where the AI checked incorrectly. This file is automatically
+                        appended to every analysis prompt so the AI avoids repeating the same mistakes.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={saveMistakes}
+                    disabled={mistakesSaving || mistakesLoading}
+                    className={`flex items-center gap-2 px-5 py-2.5 text-xs font-bold rounded-xl transition-all flex-shrink-0 shadow-sm ${
+                      mistakesSaveOk
+                        ? 'bg-green-600 text-white'
+                        : 'bg-slate-900 text-white hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed'
+                    }`}
+                  >
+                    {mistakesSaving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
+                    {mistakesSaveOk ? 'Saved!' : mistakesSaving ? 'Saving…' : 'Save'}
+                  </button>
+                </div>
+
+                {mistakesLoading ? (
+                  <div className="flex items-center justify-center py-16 gap-2 text-gray-400">
+                    <Loader2 size={18} className="animate-spin" />
+                    <span className="text-sm">Loading…</span>
+                  </div>
+                ) : (
+                  <textarea
+                    value={mistakesText}
+                    onChange={e => setMistakesText(e.target.value)}
+                    spellCheck={false}
+                    className="w-full font-mono text-[12px] text-gray-700 bg-gray-50 border border-gray-200 rounded-xl p-4 resize-none focus:outline-none focus:ring-2 focus:ring-blue-300 focus:border-transparent leading-relaxed"
+                    style={{ minHeight: '60vh' }}
+                  />
+                )}
+              </div>
             </div>
           )}
 
