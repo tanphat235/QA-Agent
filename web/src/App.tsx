@@ -3,7 +3,7 @@ import {
   LayoutDashboard, History, HelpCircle,
   FileText, CheckCircle, AlertTriangle,
   Download, Loader2, ChevronLeft, ChevronRight, ChevronDown,
-  XCircle, BookOpen, Save,
+  XCircle, BookOpen, Save, Pencil,
 } from 'lucide-react'
 
 // ── Types ────────────────────────────────────────────────────
@@ -43,6 +43,15 @@ interface HistoryEntry {
   checks: string[]
   result: AnalysisResult
 }
+interface TrainingMistake {
+  id: string
+  check_key: string
+  title: string
+  wrong: string
+  correct: string
+}
+type TrainingData = Record<string, TrainingMistake[]>
+
 type AppState    = 'idle' | 'ready' | 'analyzing' | 'done' | 'error'
 type ResultFilter = null | 'passed' | 'failed' | 'issues'
 type ActiveView  = 'dashboard' | 'history' | 'training'
@@ -66,6 +75,48 @@ const NAV = [
   { icon: LayoutDashboard, label: 'Dashboard',    view: 'dashboard' as ActiveView },
   { icon: History,         label: 'Check History', view: 'history'  as ActiveView },
   { icon: BookOpen,        label: 'AI Training',   view: 'training' as ActiveView },
+]
+
+const NODE_SECTIONS = [
+  {
+    key: 'bend',
+    title: 'Bending & Schedule',
+    checks: [
+      { key: 'pos_count',       title: 'Last Position Number vs Title Block' },
+      { key: 'pos_coverage',    title: 'Pos Coverage' },
+      { key: 'mesh_pos',        title: 'Mesh Reinforcement Pos' },
+      { key: 'mesh_ratio',      title: 'Mesh-to-Total Mass Ratio' },
+      { key: 'mass_arithmetic', title: 'Total Mass Arithmetic' },
+      { key: 'bending_angle',   title: 'Bending Angle / Mandrel Diameter' },
+      { key: 'bar_length',      title: 'Bar Length vs Schedule' },
+    ],
+  },
+  {
+    key: 'spell',
+    title: 'Spelling & Title Block',
+    checks: [
+      { key: 'spelling',         title: 'Spelling' },
+      { key: 'section_name',     title: 'Section Name Completeness' },
+      { key: 'component_name',   title: 'Component Name vs Title Block' },
+      { key: 'section_scale',    title: 'Scale Consistency' },
+      { key: 'grid_lines',       title: 'Grid Lines Consistency' },
+      { key: 'parts_lists',      title: 'Parts Lists Present' },
+      { key: 'parts_quantities', title: 'Parts Quantities' },
+      { key: 'parts_labels',     title: 'Built-in Part Labels' },
+      { key: '3d_view',          title: '3D View' },
+      { key: 'drawing_title',    title: 'Drawing Title vs Title Block' },
+    ],
+  },
+  {
+    key: 'rebar',
+    title: 'Rebar Labels & Dims',
+    checks: [
+      { key: 'spacer_label',         title: 'Spacer/Clamp Label Suffix' },
+      { key: 'pin_width_vertical',   title: 'Vertical Pin Width' },
+      { key: 'pin_width_horizontal', title: 'Horizontal Pin Width' },
+      { key: 'spacer_width',         title: 'Spacer/Clamp Width' },
+    ],
+  },
 ]
 
 // ── Tree-building types ──────────────────────────────────────
@@ -314,11 +365,15 @@ export default function App() {
   const [resultFilter,      setResultFilter]      = useState<ResultFilter>(null)
   const [activeView,        setActiveView]        = useState<ActiveView>('dashboard')
   const [historyEntries,    setHistoryEntries]    = useState<HistoryEntry[]>(() => loadHistory())
-  const [viewingEntry,      setViewingEntry]      = useState<HistoryEntry | null>(null)
-  const [mistakesText,      setMistakesText]      = useState('')
-  const [mistakesLoading,   setMistakesLoading]   = useState(false)
-  const [mistakesSaving,    setMistakesSaving]    = useState(false)
-  const [mistakesSaveOk,    setMistakesSaveOk]    = useState(false)
+  const [viewingEntry,           setViewingEntry]           = useState<HistoryEntry | null>(null)
+  const [trainingData,           setTrainingData]           = useState<TrainingData>({})
+  const [trainingLoading,        setTrainingLoading]        = useState(false)
+  const [trainingSaving,         setTrainingSaving]         = useState(false)
+  const [trainingSaveOk,         setTrainingSaveOk]         = useState(false)
+  const [activeTrainingTab,      setActiveTrainingTab]      = useState('bend')
+  const [expandedTrainingChecks, setExpandedTrainingChecks] = useState<Set<string>>(new Set())
+  const [editingMistakes,        setEditingMistakes]        = useState<Set<string>>(new Set())
+  const [cardErrors,             setCardErrors]             = useState<Record<string, string>>({})
   const inputRef = useRef<HTMLInputElement>(null)
 
   const toggleSection = (cat: string) =>
@@ -374,31 +429,79 @@ export default function App() {
     setHistoryEntries([])
   }
 
-  // Load mistakes file when training view is opened
+  // Load structured training data when training view is opened
   useEffect(() => {
     if (activeView !== 'training') return
-    setMistakesLoading(true)
-    fetch('/api/mistakes')
+    setTrainingLoading(true)
+    fetch('/api/mistakes-structured')
       .then(r => r.json())
-      .then((d: { content: string }) => setMistakesText(d.content))
+      .then((d: TrainingData) => {
+        setTrainingData(d)
+        setExpandedTrainingChecks(new Set())  // all collapsed by default
+        setEditingMistakes(new Set())          // all read-only — already saved
+      })
       .catch(() => {})
-      .finally(() => setMistakesLoading(false))
+      .finally(() => setTrainingLoading(false))
   }, [activeView])
 
   const saveMistakes = async () => {
-    setMistakesSaving(true)
-    setMistakesSaveOk(false)
+    setTrainingSaving(true)
+    setTrainingSaveOk(false)
     try {
-      const res = await fetch('/api/mistakes', {
+      const res = await fetch('/api/mistakes-structured', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: mistakesText }),
+        body: JSON.stringify({ data: trainingData }),
       })
-      if (res.ok) { setMistakesSaveOk(true); setTimeout(() => setMistakesSaveOk(false), 2500) }
+      if (res.ok) {
+        setTrainingSaveOk(true)
+        setTimeout(() => {
+          setTrainingSaveOk(false)
+          setEditingMistakes(new Set())  // exit edit mode after brief confirmation
+        }, 800)
+      }
     } finally {
-      setMistakesSaving(false)
+      setTrainingSaving(false)
     }
   }
+
+  const updateMistake = (section: string, updated: TrainingMistake) => {
+    setCardErrors(prev => { const next = { ...prev }; delete next[updated.id]; return next })
+    setTrainingData(prev => ({
+      ...prev,
+      [section]: (prev[section] ?? []).map(m => m.id === updated.id ? updated : m),
+    }))
+  }
+
+  const deleteMistake = (section: string, id: string) => {
+    setTrainingData(prev => {
+      const next = { ...prev, [section]: (prev[section] ?? []).filter(m => m.id !== id) }
+      fetch('/api/mistakes-structured', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ data: next }),
+      })
+      return next
+    })
+  }
+
+  const addMistake = (section: string, check_key: string) => {
+    const newItem: TrainingMistake = {
+      id: `${Date.now()}_${Math.random().toString(36).slice(2)}`,
+      check_key,
+      title: '',
+      wrong: '',
+      correct: '',
+    }
+    setTrainingData(prev => ({ ...prev, [section]: [...(prev[section] ?? []), newItem] }))
+    setExpandedTrainingChecks(prev => new Set([...prev, `${section}::${check_key}`]))
+    setEditingMistakes(prev => new Set([...prev, newItem.id]))  // new mistake starts in edit mode
+  }
+
+  const toggleTrainingCheck = (key: string) =>
+    setExpandedTrainingChecks(prev => {
+      const next = new Set(prev); next.has(key) ? next.delete(key) : next.add(key); return next
+    })
 
   const toggleCheck = (key: string) => {
     setEnabledChecks(prev =>
@@ -548,22 +651,22 @@ export default function App() {
   // Stats — count at sub-item level: each Schnitt/Pos counts as 1;
   // groups with no sub-items (just an overall) count as 1.
   const _countChecks = (wantPassed: boolean) =>
-    (result?.sections ?? []).flatMap(section =>
-      buildCheckGroups(section.issues).flatMap(group => {
+    (result?.sections ?? []).reduce((total, section) =>
+      total + buildCheckGroups(section.issues).reduce((n, group) => {
         if (group.subItems.length > 0)
-          return group.subItems.filter(sub => sub.summary.passed === wantPassed)
-        return group.overall?.passed === wantPassed ? [group.overall] : []
-      })
-    ).length
+          return n + group.subItems.filter(sub => sub.summary.passed === wantPassed).length
+        return n + (group.overall?.passed === wantPassed ? 1 : 0)
+      }, 0)
+    , 0)
   const totalChecksPassed = _countChecks(true)
   const totalChecksFailed = _countChecks(false)
-  const totalNotFound = (result?.sections ?? []).flatMap(section =>
-    buildCheckGroups(section.issues).flatMap(group => {
+  const totalNotFound = (result?.sections ?? []).reduce((total, section) =>
+    total + buildCheckGroups(section.issues).reduce((n, group) => {
       if (group.subItems.length > 0)
-        return group.subItems.filter(sub => sub.summary.not_found === true)
-      return group.overall?.not_found === true ? [group.overall] : []
-    })
-  ).length
+        return n + group.subItems.filter(sub => sub.summary.not_found === true).length
+      return n + (group.overall?.not_found === true ? 1 : 0)
+    }, 0)
+  , 0)
 
   // ── Render ─────────────────────────────────────────────────
   return (
@@ -607,16 +710,16 @@ export default function App() {
             return (
               <button key={label} title={!sidebarOpen ? label : undefined}
                 onClick={() => setActiveView(view)}
-                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-[13px] font-medium transition-all duration-150 ${
+                className={`relative w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-[13px] font-medium transition-all duration-150 ${
                   isActive
                     ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/40'
                     : 'text-slate-500 hover:bg-slate-800/70 hover:text-slate-200'
                 }`}
               >
                 <Icon size={15} className="flex-shrink-0" />
-                {sidebarOpen && <span className="truncate flex-1">{label}</span>}
+                {sidebarOpen && <span className="flex-1 text-center truncate">{label}</span>}
                 {sidebarOpen && badge !== null && (
-                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${isActive ? 'bg-white/20 text-white' : 'bg-slate-700 text-slate-300'}`}>
+                  <span className={`absolute right-3 text-[10px] font-bold px-1.5 py-0.5 rounded-full ${isActive ? 'bg-white/20 text-white' : 'bg-slate-700 text-slate-300'}`}>
                     {badge}
                   </span>
                 )}
@@ -742,50 +845,200 @@ export default function App() {
 
           {/* ── Training view ───────────────────────────── */}
           {activeView === 'training' && (
-            <div className="flex flex-col gap-4 h-full">
-              <div className="bg-white rounded-2xl border border-gray-200/70 p-5 shadow-sm flex flex-col gap-3">
-                <div className="flex items-center justify-between flex-wrap gap-3">
-                  <div className="flex items-start gap-3">
-                    <div className="w-9 h-9 rounded-xl bg-blue-50 border border-blue-100 flex items-center justify-center flex-shrink-0">
-                      <BookOpen size={16} className="text-blue-500" />
-                    </div>
-                    <div>
-                      <p className="text-[13px] font-bold text-gray-800">Known AI Check Mistakes</p>
-                      <p className="text-[11px] text-gray-400 mt-0.5">
-                        Document cases where the AI checked incorrectly. This file is automatically
-                        appended to every analysis prompt so the AI avoids repeating the same mistakes.
-                      </p>
-                    </div>
-                  </div>
-                  <button
-                    onClick={saveMistakes}
-                    disabled={mistakesSaving || mistakesLoading}
-                    className={`flex items-center gap-2 px-5 py-2.5 text-xs font-bold rounded-xl transition-all flex-shrink-0 shadow-sm ${
-                      mistakesSaveOk
-                        ? 'bg-green-600 text-white'
-                        : 'bg-slate-900 text-white hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed'
-                    }`}
-                  >
-                    {mistakesSaving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
-                    {mistakesSaveOk ? 'Saved!' : mistakesSaving ? 'Saving…' : 'Save'}
-                  </button>
-                </div>
+            <div className="space-y-4">
 
-                {mistakesLoading ? (
-                  <div className="flex items-center justify-center py-16 gap-2 text-gray-400">
-                    <Loader2 size={18} className="animate-spin" />
-                    <span className="text-sm">Loading…</span>
-                  </div>
-                ) : (
-                  <textarea
-                    value={mistakesText}
-                    onChange={e => setMistakesText(e.target.value)}
-                    spellCheck={false}
-                    className="w-full font-mono text-[12px] text-gray-700 bg-gray-50 border border-gray-200 rounded-xl p-4 resize-none focus:outline-none focus:ring-2 focus:ring-blue-300 focus:border-transparent leading-relaxed"
-                    style={{ minHeight: '60vh' }}
-                  />
-                )}
+              {/* Header */}
+              <div className="bg-white rounded-2xl border border-gray-200/70 px-6 py-4 shadow-sm flex items-center gap-4">
+                <div className="w-9 h-9 rounded-xl bg-blue-50 border border-blue-100 flex items-center justify-center flex-shrink-0">
+                  <BookOpen size={16} className="text-blue-500" />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-[13px] font-bold text-gray-800">Known AI Check Mistakes</p>
+                  <p className="text-[11px] text-gray-400 mt-0.5">
+                    Each entry records a confirmed AI check error and is injected into every analysis prompt to prevent the same mistake from recurring.
+                  </p>
+                </div>
               </div>
+
+              {trainingLoading ? (
+                <div className="flex items-center justify-center py-20 gap-2 text-gray-400">
+                  <Loader2 size={18} className="animate-spin" />
+                  <span className="text-sm">Loading…</span>
+                </div>
+              ) : <>
+
+              {/* Section tabs */}
+              <div className="flex gap-2 flex-wrap">
+                {NODE_SECTIONS.map(sec => {
+                  const count   = (trainingData[sec.key] ?? []).length
+                  const isActive = activeTrainingTab === sec.key
+                  return (
+                    <button key={sec.key} onClick={() => setActiveTrainingTab(sec.key)}
+                      className={`flex items-center gap-2 px-4 py-2 rounded-xl text-[12px] font-bold transition-all ${
+                        isActive
+                          ? 'bg-slate-900 text-white shadow-sm'
+                          : 'bg-white border border-gray-200 text-gray-500 hover:border-gray-300 hover:text-gray-700'
+                      }`}
+                    >
+                      {sec.title}
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-bold ${
+                        isActive ? 'bg-white/20 text-white' : 'bg-gray-100 text-gray-500'
+                      }`}>{count}</span>
+                    </button>
+                  )
+                })}
+              </div>
+
+              {/* Check groups for active tab */}
+              {(NODE_SECTIONS.find(s => s.key === activeTrainingTab)?.checks ?? []).map(check => {
+                const gKey    = `${activeTrainingTab}::${check.key}`
+                const expanded = expandedTrainingChecks.has(gKey)
+                const mistakes = (trainingData[activeTrainingTab] ?? []).filter(m => m.check_key === check.key)
+
+                return (
+                  <div key={check.key} className="bg-white rounded-2xl border border-gray-200/70 overflow-hidden shadow-sm">
+
+                    {/* Check header */}
+                    <button
+                      onClick={() => toggleTrainingCheck(gKey)}
+                      className="w-full px-5 py-3 flex items-center gap-3 hover:bg-gray-50/60 transition-colors"
+                    >
+                      <ChevronDown size={13} className={`text-gray-400 transition-transform flex-shrink-0 ${expanded ? 'rotate-180' : ''}`} />
+                      <span className="text-[13px] font-semibold text-gray-700 flex-1 text-left">{check.title}</span>
+                      {mistakes.length > 0 && (
+                        <span className="text-[10px] px-2 py-0.5 bg-amber-100 text-amber-700 border border-amber-200 rounded-full font-bold flex-shrink-0">
+                          {mistakes.length} mistake{mistakes.length > 1 ? 's' : ''}
+                        </span>
+                      )}
+                    </button>
+
+                    {expanded && (
+                      <div className="border-t border-gray-100 px-5 py-4 space-y-3">
+
+                        {mistakes.length === 0 && (
+                          <p className="text-[12px] text-gray-300 italic">No mistakes recorded for this check.</p>
+                        )}
+
+                        {mistakes.map((mistake, idx) => {
+                          const isEditing = editingMistakes.has(mistake.id)
+                          return (
+                            <div key={mistake.id} className={`border rounded-xl overflow-hidden transition-colors ${isEditing ? 'border-blue-200 bg-blue-50/10' : 'border-gray-200 bg-gray-50/40'}`}>
+                              {/* Title row */}
+                              <div className="flex items-center gap-2 px-3.5 py-2.5 border-b border-gray-100">
+                                <span className="text-[10px] font-bold text-gray-300 flex-shrink-0 w-4">#{idx + 1}</span>
+                                {isEditing ? (
+                                  <input
+                                    value={mistake.title}
+                                    onChange={e => updateMistake(activeTrainingTab, { ...mistake, title: e.target.value })}
+                                    placeholder="Brief description of this mistake…"
+                                    className="flex-1 text-[12px] font-semibold text-gray-700 bg-transparent focus:outline-none placeholder:text-gray-300"
+                                    autoFocus
+                                  />
+                                ) : (
+                                  <span className="flex-1 text-[12px] font-semibold text-gray-400 truncate">
+                                    {mistake.title || <span className="italic text-gray-300 font-normal">No title</span>}
+                                  </span>
+                                )}
+                                {isEditing ? (
+                                  <button
+                                    onClick={() => {
+                                      const m = (trainingData[activeTrainingTab] ?? []).find(x => x.id === mistake.id)
+                                      if (!m) return
+                                      const missing: string[] = []
+                                      if (!m.title.trim())   missing.push('Title')
+                                      if (!m.wrong.trim())   missing.push('Wrong')
+                                      if (!m.correct.trim()) missing.push('Correct')
+                                      if (missing.length) {
+                                        setCardErrors(prev => ({ ...prev, [mistake.id]: `Required: ${missing.join(', ')}` }))
+                                        return
+                                      }
+                                      setCardErrors(prev => { const next = { ...prev }; delete next[mistake.id]; return next })
+                                      saveMistakes()
+                                    }}
+                                    disabled={trainingSaving}
+                                    className={`flex items-center gap-1 text-[10px] font-bold px-2.5 py-1 rounded-lg transition-all flex-shrink-0 ${
+                                      trainingSaveOk
+                                        ? 'bg-green-500 text-white'
+                                        : 'bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50'
+                                    }`}
+                                  >
+                                    {trainingSaving
+                                      ? <Loader2 size={10} className="animate-spin" />
+                                      : <Save size={10} />}
+                                    {trainingSaveOk ? 'Saved!' : trainingSaving ? '…' : 'Save'}
+                                  </button>
+                                ) : (
+                                  <button
+                                    onClick={() => setEditingMistakes(prev => new Set([...prev, mistake.id]))}
+                                    className="text-gray-300 hover:text-blue-500 transition-colors flex-shrink-0"
+                                    title="Edit"
+                                  ><Pencil size={13} /></button>
+                                )}
+                                <button
+                                  onClick={() => deleteMistake(activeTrainingTab, mistake.id)}
+                                  className="text-gray-300 hover:text-red-500 transition-colors flex-shrink-0"
+                                  title="Delete"
+                                ><XCircle size={14} /></button>
+                              </div>
+                              {/* Validation error */}
+                              {isEditing && cardErrors[mistake.id] && (
+                                <div className="px-3.5 py-2 bg-red-50 border-b border-red-100 flex items-center gap-1.5">
+                                  <XCircle size={11} className="text-red-400 flex-shrink-0" />
+                                  <span className="text-[11px] text-red-600 font-medium">{cardErrors[mistake.id]}</span>
+                                </div>
+                              )}
+                              {/* WRONG */}
+                              <div className="px-3.5 py-2.5 border-b border-gray-100">
+                                <p className={`text-[10px] font-black uppercase tracking-wider mb-1 ${isEditing ? 'text-red-500' : 'text-red-300'}`}>Wrong</p>
+                                {isEditing ? (
+                                  <textarea
+                                    value={mistake.wrong}
+                                    onChange={e => updateMistake(activeTrainingTab, { ...mistake, wrong: e.target.value })}
+                                    placeholder="What the AI did incorrectly…"
+                                    rows={2}
+                                    className="w-full text-[11px] text-gray-600 bg-white border border-gray-200 rounded-lg px-2.5 py-2 resize-y focus:outline-none focus:ring-1 focus:ring-red-300 focus:border-red-300 leading-relaxed"
+                                  />
+                                ) : (
+                                  <p className={`text-[11px] leading-relaxed ${mistake.wrong ? 'text-gray-400' : 'italic text-gray-300'}`}>
+                                    {mistake.wrong || 'Not set'}
+                                  </p>
+                                )}
+                              </div>
+                              {/* CORRECT */}
+                              <div className="px-3.5 py-2.5">
+                                <p className={`text-[10px] font-black uppercase tracking-wider mb-1 ${isEditing ? 'text-green-600' : 'text-green-300'}`}>Correct</p>
+                                {isEditing ? (
+                                  <textarea
+                                    value={mistake.correct}
+                                    onChange={e => updateMistake(activeTrainingTab, { ...mistake, correct: e.target.value })}
+                                    placeholder="The correct behavior or rule…"
+                                    rows={2}
+                                    className="w-full text-[11px] text-gray-600 bg-white border border-gray-200 rounded-lg px-2.5 py-2 resize-y focus:outline-none focus:ring-1 focus:ring-green-300 focus:border-green-300 leading-relaxed"
+                                  />
+                                ) : (
+                                  <p className={`text-[11px] leading-relaxed ${mistake.correct ? 'text-gray-400' : 'italic text-gray-300'}`}>
+                                    {mistake.correct || 'Not set'}
+                                  </p>
+                                )}
+                              </div>
+                            </div>
+                          )
+                        })}
+
+                        <button
+                          onClick={() => addMistake(activeTrainingTab, check.key)}
+                          className="flex items-center gap-1.5 text-[11px] font-semibold text-blue-500 hover:text-blue-700 transition-colors py-0.5"
+                        >
+                          <span className="w-4 h-4 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 font-black text-[10px]">+</span>
+                          Add Mistake
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+
+              </>}
             </div>
           )}
 
@@ -1145,7 +1398,6 @@ export default function App() {
                                 ? group.subItems.every(s => s.summary.passed === true)
                                 : undefined
                           const subFailed   = group.subItems.filter(s => !s.summary.passed && !s.summary.not_found).length
-                          const issueCount  = group.orphanIssues.length + group.subItems.reduce((a, s) => a + s.issues.length, 0)
                           const hasContent  = group.subItems.length > 0 || group.orphanIssues.length > 0 || (group.overall && (gNotFound || !group.overall.passed))
 
                           return (

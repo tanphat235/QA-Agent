@@ -38,9 +38,8 @@ def _load_cache() -> dict:
     return data
 
 
-@lru_cache(maxsize=1)
 def _load_mistakes() -> str:
-    """Load the common-mistakes reference file once."""
+    """Load the common-mistakes reference file (always reads fresh)."""
     if not _MISTAKES_PATH.exists():
         logger.warning("Common-mistakes file not found at %s", _MISTAKES_PATH)
         return ""

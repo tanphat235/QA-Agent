@@ -4,7 +4,6 @@ import json
 import tempfile
 import traceback
 from collections.abc import AsyncIterator
-from pathlib import Path
 from typing import Annotated
 from dotenv import load_dotenv
 
@@ -16,10 +15,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from langgraph_sdk import get_client
 
-_MISTAKES_PATH = (
-    Path(__file__).parent.parent.parent
-    / "QA AI Drawing" / "QA Knowledge" / "qa_ai_common_mistakes.txt"
-)
+from qa_agent.mistakes_store import load_structured, save_structured
 
 LANGGRAPH_URL = os.getenv("LANGGRAPH_URL", "http://127.0.0.1:2024")
 GRAPH_NAME = "qa_agent"
@@ -136,22 +132,20 @@ async def analyze(
     return StreamingResponse(stream(), media_type="text/event-stream")
 
 
-@app.get("/api/mistakes")
-async def get_mistakes():
-    if not _MISTAKES_PATH.exists():
-        return {"content": ""}
-    content = await asyncio.to_thread(_MISTAKES_PATH.read_text, encoding="utf-8")
-    return {"content": content}
+@app.get("/api/mistakes-structured")
+async def get_mistakes_structured():
+    data = await asyncio.to_thread(load_structured)
+    return data
 
 
-class _MistakesBody(BaseModel):
-    content: str
+class _MistakesStructuredBody(BaseModel):
+    data: dict
 
 
-@app.post("/api/mistakes")
-async def save_mistakes(body: _MistakesBody):
+@app.post("/api/mistakes-structured")
+async def save_mistakes_structured(body: _MistakesStructuredBody):
     try:
-        await asyncio.to_thread(_MISTAKES_PATH.write_text, body.content, encoding="utf-8")
+        await asyncio.to_thread(save_structured, body.data)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
     return {"ok": True}
