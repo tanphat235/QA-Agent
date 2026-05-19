@@ -6,7 +6,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.outputs import LLMResult
 
 from qa_agent.state import GraphState, Issue
-from qa_agent.rag.retriever import get_node_context
+from qa_agent.rag.retriever import get_node_context, get_node_images
 
 logger = logging.getLogger(__name__)
 
@@ -200,20 +200,24 @@ def rebar_check(state: GraphState) -> dict:
         max_tokens=4096,  # type: ignore[call-arg]
     ).with_structured_output(_RebarResult).with_retry(stop_after_attempt=2)
 
+    kb_images = get_node_images("rebar")
+    human_content: list[dict] = []
+    for i, img in enumerate(kb_images):
+        block = dict(img)
+        if i == len(kb_images) - 1:
+            block["cache_control"] = {"type": "ephemeral"}
+        human_content.append(block)
+    human_content.append({
+        "type": "document",
+        "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data},
+        "cache_control": {"type": "ephemeral"},
+    })
+    human_content.append({"type": "text", "text": _TASK + get_node_context("rebar")})
+
     result: _RebarResult = llm.invoke(  # type: ignore[assignment]
         [
             SystemMessage(content=_COMMON_SYSTEM),
-            HumanMessage(content=[
-                {
-                    "type": "document",
-                    "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data},
-                    "cache_control": {"type": "ephemeral"},
-                },
-                {
-                    "type": "text",
-                    "text": _TASK + get_node_context("rebar"),
-                },
-            ]),
+            HumanMessage(content=human_content),
         ],
         config={"callbacks": [_UsageCallback("rebar_check")]},
     )

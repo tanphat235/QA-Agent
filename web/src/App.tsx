@@ -3,7 +3,7 @@ import {
   LayoutDashboard, History, HelpCircle,
   FileText, CheckCircle, AlertTriangle,
   Download, Loader2, ChevronLeft, ChevronRight, ChevronDown,
-  XCircle, BookOpen, Save, Pencil,
+  XCircle, BookOpen, Save, Pencil, Database,
 } from 'lucide-react'
 
 // ── Types ────────────────────────────────────────────────────
@@ -54,7 +54,7 @@ type TrainingData = Record<string, TrainingMistake[]>
 
 type AppState    = 'idle' | 'ready' | 'analyzing' | 'done' | 'error'
 type ResultFilter = null | 'passed' | 'failed' | 'issues'
-type ActiveView  = 'dashboard' | 'history' | 'training'
+type ActiveView  = 'dashboard' | 'history' | 'training' | 'knowledge'
 
 // ── Constants ────────────────────────────────────────────────
 const NODES = [
@@ -75,6 +75,7 @@ const NAV = [
   { icon: LayoutDashboard, label: 'Dashboard',    view: 'dashboard' as ActiveView },
   { icon: History,         label: 'Check History', view: 'history'  as ActiveView },
   { icon: BookOpen,        label: 'AI Training',   view: 'training' as ActiveView },
+  { icon: Database,        label: 'Knowledge Base', view: 'knowledge' as ActiveView },
 ]
 
 const NODE_SECTIONS = [
@@ -374,6 +375,8 @@ export default function App() {
   const [expandedTrainingChecks, setExpandedTrainingChecks] = useState<Set<string>>(new Set())
   const [editingMistakes,        setEditingMistakes]        = useState<Set<string>>(new Set())
   const [cardErrors,             setCardErrors]             = useState<Record<string, string>>({})
+  const [kbSaving,               setKbSaving]               = useState(false)
+  const [kbSaveOk,               setKbSaveOk]               = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
   const toggleSection = (cat: string) =>
@@ -443,6 +446,26 @@ export default function App() {
       .catch(() => {})
       .finally(() => setTrainingLoading(false))
   }, [activeView])
+
+  const downloadKbFile = () => {
+    window.open('/api/knowledge-base/download', '_blank')
+  }
+
+  const uploadKbFile = async (f: File) => {
+    setKbSaving(true)
+    setKbSaveOk(false)
+    try {
+      const form = new FormData()
+      form.append('file', f)
+      const res = await fetch('/api/knowledge-base/upload', { method: 'POST', body: form })
+      if (res.ok) {
+        setKbSaveOk(true)
+        setTimeout(() => setKbSaveOk(false), 2000)
+      }
+    } finally {
+      setKbSaving(false)
+    }
+  }
 
   const saveMistakes = async () => {
     setTrainingSaving(true)
@@ -745,14 +768,19 @@ export default function App() {
         <header className="bg-white border-b border-gray-200/70 px-8 py-3.5 flex items-center flex-shrink-0">
           <div>
             <h1 className="text-[15px] font-bold text-gray-900 tracking-tight">
-              {activeView === 'history' ? 'Check History' : activeView === 'training' ? 'AI Training' : 'Dashboard'}
+              {activeView === 'history' ? 'Check History'
+                : activeView === 'training' ? 'AI Training'
+                : activeView === 'knowledge' ? 'Knowledge Base'
+                : 'Dashboard'}
             </h1>
             <p className="text-[11px] text-gray-400 mt-0.5 tracking-wide">
               {activeView === 'history'
                 ? `${historyEntries.length} of ${HISTORY_MAX} recent analyses stored`
                 : activeView === 'training'
                   ? 'Edit common AI mistakes · Saved file is injected into every analysis'
-                  : 'Structural drawing validation · PDF analysis'}
+                  : activeView === 'knowledge'
+                    ? 'Edit QA rules · Saved content is used by AI in every analysis via RAG'
+                    : 'Structural drawing validation · PDF analysis'}
             </p>
           </div>
         </header>
@@ -1038,6 +1066,80 @@ export default function App() {
             </div>
           )}
 
+          {/* ── Knowledge Base view ──────────────────────── */}
+          {activeView === 'knowledge' && (
+            <div className="space-y-4">
+
+              {/* Header card */}
+              <div className="bg-white rounded-2xl border border-gray-200/70 px-6 py-4 shadow-sm flex items-center gap-4">
+                <div className="w-9 h-9 rounded-xl bg-violet-50 border border-violet-100 flex items-center justify-center flex-shrink-0">
+                  <Database size={16} className="text-violet-500" />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-[13px] font-bold text-gray-800">QA Knowledge Base</p>
+                  <p className="text-[11px] text-gray-400 mt-0.5">
+                    Edit rules in Microsoft Word — text, tables, and images are all supported.
+                    Download, edit, then upload to apply changes to every AI analysis.
+                  </p>
+                </div>
+              </div>
+
+              {/* Actions */}
+              <div className="bg-white rounded-2xl border border-gray-200/70 shadow-sm p-6 flex flex-col gap-5">
+
+                {/* Step 1 — Download */}
+                <div className="flex items-start gap-4">
+                  <div className="w-7 h-7 rounded-full bg-violet-100 text-violet-600 flex items-center justify-center text-[11px] font-black flex-shrink-0 mt-0.5">1</div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[13px] font-semibold text-gray-700">Download &amp; edit in Word</p>
+                    <p className="text-[11px] text-gray-400 mt-0.5 mb-3">
+                      Download the file, open in Microsoft Word. Add text, tables, or images freely.
+                      Use headings <span className="font-mono bg-gray-100 px-1 rounded text-gray-500">Spell Check Node</span>, <span className="font-mono bg-gray-100 px-1 rounded text-gray-500">Bend Check Node</span>, <span className="font-mono bg-gray-100 px-1 rounded text-gray-500">Rebar Check Node</span> to organize rules by domain.
+                      Save the file in Word when done.
+                    </p>
+                    <button
+                      onClick={downloadKbFile}
+                      className="flex items-center gap-2 px-4 py-2 bg-slate-900 text-white text-[12px] font-bold rounded-xl hover:bg-slate-700 transition-colors shadow-sm"
+                    >
+                      <Download size={13} />
+                      Download .docx
+                    </button>
+                  </div>
+                </div>
+
+                <div className="border-t border-gray-100" />
+
+                {/* Step 2 — Upload */}
+                <div className="flex items-start gap-4">
+                  <div className="w-7 h-7 rounded-full bg-violet-100 text-violet-600 flex items-center justify-center text-[11px] font-black flex-shrink-0 mt-0.5">2</div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[13px] font-semibold text-gray-700">Upload the edited file</p>
+                    <p className="text-[11px] text-gray-400 mt-0.5 mb-3">
+                      Select the saved .docx from your machine. The server will store it and rebuild the RAG knowledge index immediately — the AI will use the updated rules on every subsequent analysis.
+                    </p>
+                    <label className={`inline-flex items-center gap-2 px-4 py-2 text-[12px] font-bold rounded-xl cursor-pointer transition-all shadow-sm ${
+                      kbSaveOk
+                        ? 'bg-green-500 text-white'
+                        : 'bg-violet-600 text-white hover:bg-violet-700'
+                    } ${kbSaving ? 'opacity-50 pointer-events-none' : ''}`}>
+                      {kbSaving
+                        ? <Loader2 size={13} className="animate-spin" />
+                        : <Save size={13} />}
+                      {kbSaveOk ? 'Uploaded!' : kbSaving ? 'Uploading…' : 'Upload & Update RAG'}
+                      <input
+                        type="file"
+                        accept=".docx"
+                        className="hidden"
+                        onChange={e => { const f = e.target.files?.[0]; if (f) uploadKbFile(f); e.target.value = '' }}
+                      />
+                    </label>
+                  </div>
+                </div>
+
+              </div>
+            </div>
+          )}
+
           {/* ── Dashboard view ───────────────────────────── */}
           {activeView === 'dashboard' && <>
 
@@ -1137,7 +1239,7 @@ export default function App() {
                     <FileText size={19} className="text-gray-300" />
                   </div>
                   <p className="text-sm text-gray-300 font-medium">No file selected</p>
-                  <p className="text-[11px] text-gray-200 tracking-wide">Upload a PDF to begin</p>
+                  <p className="text-[11px] text-gray-200 tracking-wide">Upload a PDF to analyze</p>
                 </div>
               ) : (
                 <>

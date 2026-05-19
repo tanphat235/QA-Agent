@@ -48,6 +48,21 @@ def _load_mistakes() -> str:
     return text
 
 
+def get_node_images(domain: str) -> list[dict]:
+    """
+    Return a list of Anthropic image content blocks for the given domain.
+    Each block: {"type": "image", "source": {"type": "base64", "media_type": ..., "data": ...}}
+    Returns [] if no images are stored for this domain.
+    """
+    cache = _load_cache()
+    if not cache:
+        return []
+    return [
+        {"type": "image", "source": {"type": "base64", "media_type": img["media_type"], "data": img["data"]}}
+        for img in cache.get("docx_images", {}).get(domain, [])
+    ]
+
+
 def get_node_context(domain: str) -> str:
     """
     Return a formatted reference context block to append to a node's task prompt.
