@@ -50,19 +50,28 @@ Do NOT flag Pos numbers that never appear with "-M.E." anywhere — those are no
 Do NOT flag if you cannot clearly read the label.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-HOW TO FIND THE SHARED DIMENSIONS (used in CHECK 2, 3, 4)
+STEP A — EXTRACT ACTUAL VALUES FROM THIS DRAWING FIRST
+(Complete this step before doing any calculation. Never substitute example numbers.)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-wall_width — total wall thickness in cm:
-  Look at the FORMWORK cross-section views (Draufsicht X-X, Schnitt X-X in the Ansicht/
-  formwork area, NOT the Bewehrung area). A small dimension line spanning the full wall
-  thickness will show the value (e.g. "30" = 30 cm). It may also appear in the title block.
+A1. wall_width — total wall thickness in cm:
+  Read from the FORMWORK cross-section views (Draufsicht X-X, Schnitt X-X in the Ansicht /
+  formwork area, NOT the Bewehrung area). A dimension line spanning the full thickness gives
+  the value. It may also appear in the title block.
+  → Record as: wall_width = [value you read from this drawing] cm
 
-Cv — design concrete cover in cm:
-  Read from the title block "BETONDECKUNG" table. The column labeled "Cv" (or "Cᵥ") contains
-  the design cover value in mm — divide by 10 to convert to cm.
-  Example: Cv column shows "25" → Cv = 2.5 cm.
-  Do NOT use Cmin,dur or ΔCdev — use only the Cv column value.
+A2. Cv — design concrete cover in cm:
+  Read from the title block "BETONDECKUNG" table, column labeled "Cv" (or "Cᵥ"), in mm.
+  Divide by 10 to convert to cm. Do NOT use Cmin,dur or ΔCdev.
+  → Record as: Cv = [value from BETONDECKUNG table] cm
+
+A3. Ø_layer1 — outermost rebar layer diameter (needed for CHECK 3):
+  In the SIDE section view (Schnitt a-a in the Bewehrung), find the first rebar layer from
+  the wall face inward. Read its label (e.g. "ø 12/15" → Ø12 → 1.2 cm).
+  → Record as: Ø_layer1 = [value from this drawing] cm
+
+If any of these values cannot be found in the drawing, do NOT guess or use any number from
+the examples below — instead add the affected check key to not_found.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -73,11 +82,11 @@ IDENTIFICATION — locate vertical pins using their bending schema:
   dimension runs vertically (tall and narrow). The width dimension labeled on that schema is
   the value to verify.
 
-WIDTH FORMULA:
+WIDTH FORMULA (use values from STEP A, not the illustration numbers):
   Required width = wall_width – 2 × Cv
-  Example: wall_width=30 cm, Cv=2.5 cm → required = 30 – 5.0 = 25 cm
+  [Formula illustration only — values are not from any real drawing]:
+    e.g. if wall_width were 20 cm and Cv were 2.0 cm → required = 20 – 4.0 = 16 cm
 
-HOW TO FIND wall_width and Cv: see the shared dimension guide above.
 Flag if the labeled pin width clearly differs from the required calculated value.
 If wall_width, Cv, or the labeled pin dimension cannot be found, add "pin_width_vertical" to not_found.
 
@@ -88,28 +97,21 @@ IDENTIFICATION — locate horizontal pins using their bending schema:
   long dimension runs horizontally (wide and shallow). The width dimension labeled on that schema
   is the value to verify.
 
-WIDTH FORMULA:
+WIDTH FORMULA (use values from STEP A, not the illustration numbers):
   Required width = wall_width – 2 × Cv – 2 × Ø_layer1   (round down to nearest mm)
-  Example: wall_width=30, Cv=2.5, Ø_layer1=1.2 → 30 – 5.0 – 2.4 = 22.6 → 22 cm
+  [Formula illustration only — values are not from any real drawing]:
+    e.g. if wall_width were 20 cm, Cv=2.0 cm, Ø_layer1=1.0 cm → 20 – 4.0 – 2.0 = 14 cm
 
-HOW TO FIND Ø_layer1 (outermost rebar layer diameter):
-  Look at the SIDE section view Schnitt a-a in the Bewehrung.
-  Identify the first rebar layer counting from the wall face (outer edge) inward.
-  Read the bar label for that layer — it will show diameter and spacing, e.g. "ø 12/15" means Ø12.
-  Use that diameter: Ø_layer1 = 1.2 cm (for Ø12), 1.0 cm (for Ø10), 0.8 cm (for Ø8), etc.
-  Do NOT use inner layers — only the outermost layer touching the cover zone.
-
-HOW TO FIND wall_width and Cv: see the shared dimension guide above.
 Flag if the labeled horizontal pin width clearly differs from the calculated value.
 If any required dimension (wall_width, Cv, Ø_layer1, or pin width) cannot be found, add "pin_width_horizontal" to not_found.
 
 CHECK 4 — Spacer / Clamp Width (spacer_width)
-For each spacer or clamp element, verify its width using:
+For each spacer or clamp element, verify its width using values from STEP A:
   Required width = wall_width – 2 × Cv + 2 × Ø_spacer   (round up to nearest mm)
-  where Ø_spacer = physical diameter of the spacer/clamp wire or element (read from its label).
-  Example: wall_width=30, Cv=2.5, Ø_spacer=0.8 → 30 – 5.0 + 1.6 = 26.6 → 27 cm
+  where Ø_spacer = physical diameter of the spacer/clamp wire, read from its label in this drawing.
+  [Formula illustration only — values are not from any real drawing]:
+    e.g. if wall_width=20, Cv=2.0, Ø_spacer=0.6 → 20 – 4.0 + 1.2 = 17.2 → 18 cm
 
-HOW TO FIND wall_width and Cv: see the shared dimension guide above.
 Flag if the labeled spacer/clamp width clearly differs from the calculated value.
 If any required dimension (wall_width, Cv, or Ø_spacer) cannot be found, add "spacer_width" to not_found.
 

@@ -49,9 +49,9 @@ SPELLING & TITLE BLOCK CHECKS
 
 [CHECK: Parts Quantities]
 
-[MISTAKE] Parts Quantities / Built-in Part Labels — Showing PASS when tables are absent
-  WRONG: Reporting "Parts Quantities Consistent — PASS" and "Built-in Part Labels — PASS" even when both Einbauteilliste and Montageteilliste are absent from the sheet. These checks cannot be performed without the parts tables.
-  CORRECT: If parts_lists check FAILS (one or both tables absent), mark "parts_quantities" and "parts_labels" as NOT FOUND — do not attempt to check them at all.
+[MISTAKE] Parts Label Consistency / Part Labels in Views — Wrong NOT FOUND condition
+  WRONG: Marking parts_quantities or parts_labels as NOT FOUND just because one of the two tables (Einbauteilliste or Montageteilliste) is absent. A drawing does not need both tables.
+  CORRECT: Only mark parts_quantities or parts_labels as NOT FOUND when NEITHER Einbauteilliste NOR Montageteilliste is present on the sheet. If at least one table is present, perform the check against whichever table(s) exist. Cross-reference part labels visible in views only against the tables that are actually on the sheet.
 
 [CHECK: 3D View]
 
@@ -83,3 +83,7 @@ REBAR LABEL & DIMENSION CHECKS
 [MISTAKE] Vertical vs Horizontal Pin identification
   WRONG: Confusing vertical and horizontal pins, leading to wrong width formula applied.
   CORRECT: - Vertical pins (stirrups): schematized in the SIDE section view (Schnitt a-a style), appear as narrow U-shapes or tall rectangles. Formula: wall_width – 2×Cv. - Horizontal pins: schematized in the BOTTOM cross-section view (Schnitt b-b style), appear as wide flat rectangles. Formula: wall_width – 2×Cv – 2×Ø_layer1. Read the pin schema from the correct section before applying the formula.
+
+[MISTAKE] Pin/Spacer Width — Using example numbers from prompt instead of actual drawing values
+  WRONG: Calculating pin or spacer width using illustrative values from the prompt or knowledge base (e.g. wall_width=30, Cv=2.5, Ø_layer1=1.2) instead of the actual values found in this drawing. This causes false FAILs when the real wall has different dimensions.
+  CORRECT: ALWAYS read wall_width, Cv, and Ø_layer1 directly from the drawing being analyzed — these values differ on every drawing. (1) wall_width: read the dimension line on the formwork cross-section (Draufsicht / Ansicht Schnitt). (2) Cv: read from the BETONDECKUNG table in the title block, Cv column, divide mm by 10. (3) Ø_layer1: read the outermost rebar label in Schnitt a-a. Only after recording these actual values apply the formula. If a value cannot be found in this drawing, add the check to not_found — never substitute an assumed or example value.

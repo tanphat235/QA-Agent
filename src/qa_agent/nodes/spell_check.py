@@ -59,25 +59,34 @@ Verify the sheet contains both:
 Flag each table that is clearly absent.
 
 CHECK 7 — Parts Label Consistency (parts_quantities)
-PREREQUISITE: Both Einbauteilliste AND Montageteilliste must be present on the sheet.
-If either or both tables are absent (flagged in CHECK 6), add "parts_quantities" to not_found
-and skip this check entirely — do NOT attempt to cross-reference.
+A drawing does NOT need to have both tables — check whichever table(s) are present.
+If NEITHER Einbauteilliste NOR Montageteilliste is present, add "parts_quantities" to not_found and skip.
 
-If both tables are present: cross-reference every part label visible in Schnitt and Ansicht views.
-  1. UNLABELED PARTS — any built-in or mounting part with NO label. Flag each.
-  2. LABEL NOT IN TABLE — any label code in views NOT in Einbauteilliste or Montageteilliste. Flag each.
+For each table that IS present, cross-reference every part label visible in Schnitt and Ansicht views
+against that table:
+  1. UNLABELED PARTS — any part belonging to a present table with NO label in the views. Flag each.
+  2. LABEL NOT IN TABLE — any label code in the views that cannot be found in any present table. Flag each.
 RULES:
-  • A label found in EITHER table is consistent — do NOT flag it.
+  • A label found in ANY present table is consistent — do NOT flag it.
   • Do NOT flag rebar Pos numbers — only flag embedded/mounting part designations.
-  • Only flag when you can clearly read the label AND confirm it is absent from both tables.
+  • Only flag when you can clearly read the label AND confirm it is absent from all present tables.
+  • If only Einbauteilliste is present, only cross-reference against Einbauteilliste.
+  • If only Montageteilliste is present, only cross-reference against Montageteilliste.
 
-CHECK 8 — Built-in Part Labels (parts_labels)
-PREREQUISITE: At least one of Einbauteilliste or Montageteilliste must be present on the sheet.
-If BOTH tables are absent (flagged in CHECK 6), add "parts_labels" to not_found and skip.
+CHECK 8 — Part Labels in Views (parts_labels)
+Check that every part listed in any present table has an explicit label in the section/elevation views.
+A drawing does NOT need both tables — check whichever table(s) are present.
+If NEITHER table is present, add "parts_labels" to not_found and skip.
 
-If at least one table is present: count all built-in parts visible in section and elevation views.
-Verify each part has an explicit label (position number or designation) shown directly adjacent
-or via leader line. Flag any built-in part shown without a label.
+For Einbauteilliste (built-in parts / Einbauteile) — if this table is present:
+  Count all built-in parts visible in Schnitt and Ansicht views.
+  Verify each part has an explicit label (position number or designation) shown directly adjacent
+  or via leader line. Flag any Einbauteil shown in the views without a label.
+
+For Montageteilliste (mounting parts / Montageteile) — if this table is present:
+  Count all mounting parts visible in Schnitt and Ansicht views.
+  Verify each part has an explicit label shown directly adjacent or via leader line.
+  Flag any Montageteil shown in the views without a label.
 
 CHECK 9 — 3D View Present (3d_view)
 Check whether the sheet contains a 3D pictorial view of the wall element.
@@ -181,14 +190,14 @@ _CHECK_META: dict[str, tuple[str, str, str]] = {
         "NOT FOUND — neither Einbauteilliste nor Montageteilliste visible on sheet.",
     ),
     "parts_quantities": (
-        "Parts Quantities Consistent",
-        "PASS — built-in and mounting part counts match schedules.",
-        "NOT FOUND — no part labels or schedule tables visible.",
+        "Parts Label Consistency",
+        "PASS — all part labels in views match the present schedule table(s).",
+        "NOT FOUND — no schedule tables (Einbauteilliste / Montageteilliste) visible on sheet.",
     ),
     "parts_labels": (
-        "Built-in Part Labels",
-        "PASS — all built-in parts are labeled in section/elevation views.",
-        "NOT FOUND — no built-in parts visible in section or elevation views.",
+        "Part Labels in Views",
+        "PASS — all parts from present table(s) are labeled in section/elevation views.",
+        "NOT FOUND — no schedule tables (Einbauteilliste / Montageteilliste) visible on sheet.",
     ),
     "3d_view": (
         "3D View Present and Consistent",
@@ -318,11 +327,6 @@ def spell_check(state: GraphState) -> dict:
             by_check[item.check].append(item)
 
     not_found_set = set(result.not_found or [])
-
-    # If parts tables are absent, dependent checks cannot run
-    if by_check.get("parts_lists"):
-        not_found_set.add("parts_quantities")
-        not_found_set.add("parts_labels")
 
     issues: list[Issue] = []
     for check_key, (check_name, pass_desc, nf_desc) in _CHECK_META.items():

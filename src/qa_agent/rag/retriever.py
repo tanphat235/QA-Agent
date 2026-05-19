@@ -78,7 +78,12 @@ def get_node_context(domain: str) -> str:
     # 1. Rules extracted from the QA knowledge docx
     docx_text = cache.get("docx_knowledge", {}).get(domain, "")
     if docx_text:
-        parts.append("QA KNOWLEDGE BASE RULES:\n" + docx_text)
+        parts.append(
+            "QA KNOWLEDGE BASE RULES:\n"
+            "⚠ Any numeric values in the examples below are ILLUSTRATIVE ONLY.\n"
+            "Always read actual wall_width, Cv, and rebar diameters from THIS drawing.\n\n"
+            + docx_text
+        )
 
     # 2. Reference patterns extracted from approved sample drawings
     ref_blocks: list[str] = []
