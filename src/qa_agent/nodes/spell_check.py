@@ -21,44 +21,59 @@ German terminology:
   Draufsicht = top/plan view | Matten-Schneideskizze = mesh cut sketch | Detail = detail view\
 """
 
-_TASK = """\
+_TASK_INTRO = """\
 Inspect visible text, annotations, views, and tables in this precast wall structural drawing.
-Report ONLY issues you can directly observe in the PDF.
+Report ONLY issues you can directly observe in the PDF.\
+"""
 
-CHECK 1 — Spelling Errors (spelling)
+_CHECK_PROMPTS: dict[str, str] = {
+    "spelling": """\
+CHECK — Spelling Errors (spelling)
 Flag clear spelling mistakes in German or English words in titles, labels, notes, callouts, or title block.
-Do NOT flag: accepted engineering abbreviations (Ø, typ., M.E., Reinf., Bew., pos.), capitalization style.
+Do NOT flag: accepted engineering abbreviations (Ø, typ., M.E., Reinf., Bew., pos.), capitalization style.\
+""",
 
-CHECK 2 — Section Name Completeness (section_name)
+    "section_name": """\
+CHECK — Section Name Completeness (section_name)
 Identify all section cut designations called out in the Ansicht or Bewehrung (e.g. "1-1", "2-2", "3-3").
 Verify that a corresponding view with the same designation number is present on the sheet.
 A view satisfies the requirement if it is labeled "Schnitt X-X", "Draufsicht X-X", or any other
 view type (top view, cross-section, detail) that carries the same designation number X-X.
 Flag only if NO view of any type with that designation number exists anywhere on the sheet.
-Do NOT flag if the view exists but is located elsewhere on the sheet.
+Do NOT flag if the view exists but is located elsewhere on the sheet.\
+""",
 
-CHECK 3 — Component Name vs Title Block (component_name)
+    "component_name": """\
+CHECK — Component Name vs Title Block (component_name)
 Verify the component/element name on the Wandansicht matches the drawing name in the title block.
 Flag only where BOTH are visible and they clearly differ.
-If only one of the two (Wandansicht label or title block name) is visible, add "component_name" to not_found.
+If only one of the two (Wandansicht label or title block name) is visible, add "component_name" to not_found.\
+""",
 
-CHECK 4 — Scale Consistency (section_scale)
+    "section_scale": """\
+CHECK — Scale Consistency (section_scale)
 Compare every explicit scale label (M 1:XX) on views or sections against the title block scale.
 Flag any view whose labeled scale clearly differs from the title block value.
-Only flag where both scales are simultaneously visible and unambiguously different.
+Only flag where both scales are simultaneously visible and unambiguously different.\
+""",
 
-CHECK 5 — Formwork Grid Lines vs Wandansicht (grid_lines)
+    "grid_lines": """\
+CHECK — Formwork Grid Lines vs Wandansicht (grid_lines)
 Check that grid lines (axis labels / column lines) in the wall formwork Schnitt views match those in the Wandansicht.
 Flag any grid line present in the Schnitt but absent from the Wandansicht, or vice versa.
-If no Wandansicht is visible on the sheet, add "grid_lines" to not_found.
+If no Wandansicht is visible on the sheet, add "grid_lines" to not_found.\
+""",
 
-CHECK 6 — Parts Lists Present (parts_lists)
+    "parts_lists": """\
+CHECK — Parts Lists Present (parts_lists)
 Verify the sheet contains both:
   • Einbauteilliste (embedded parts list)
   • Montageteilliste (assembly/mounting parts list)
-Flag each table that is clearly absent.
+Flag each table that is clearly absent.\
+""",
 
-CHECK 7 — Parts Label Consistency (parts_quantities)
+    "parts_quantities": """\
+CHECK — Parts Label Consistency (parts_quantities)
 A drawing does NOT need to have both tables — check whichever table(s) are present.
 If NEITHER Einbauteilliste NOR Montageteilliste is present, add "parts_quantities" to not_found and skip.
 
@@ -71,9 +86,11 @@ RULES:
   • Do NOT flag rebar Pos numbers — only flag embedded/mounting part designations.
   • Only flag when you can clearly read the label AND confirm it is absent from all present tables.
   • If only Einbauteilliste is present, only cross-reference against Einbauteilliste.
-  • If only Montageteilliste is present, only cross-reference against Montageteilliste.
+  • If only Montageteilliste is present, only cross-reference against Montageteilliste.\
+""",
 
-CHECK 8 — Part Labels in Views (parts_labels)
+    "parts_labels": """\
+CHECK — Part Labels in Views (parts_labels)
 Check that every part listed in any present table has an explicit label in the section/elevation views.
 A drawing does NOT need both tables — check whichever table(s) are present.
 If NEITHER table is present, add "parts_labels" to not_found and skip.
@@ -86,9 +103,11 @@ For Einbauteilliste (built-in parts / Einbauteile) — if this table is present:
 For Montageteilliste (mounting parts / Montageteile) — if this table is present:
   Count all mounting parts visible in Schnitt and Ansicht views.
   Verify each part has an explicit label shown directly adjacent or via leader line.
-  Flag any Montageteil shown in the views without a label.
+  Flag any Montageteil shown in the views without a label.\
+""",
 
-CHECK 9 — 3D View Present (3d_view)
+    "3d_view": """\
+CHECK — 3D View Present (3d_view)
 Check whether the sheet contains a 3D pictorial view of the wall element.
 
 WHAT COUNTS AS A 3D VIEW — ANY ONE of the following is sufficient to pass:
@@ -117,9 +136,11 @@ HOW TO SCAN:
 If ANY such view exists anywhere on the sheet → PASS immediately, do NOT flag.
 If after scanning the entire sheet no such view exists → flag as an error.
 
-Do NOT perform any consistency or orientation check — presence alone is sufficient.
+Do NOT perform any consistency or orientation check — presence alone is sufficient.\
+""",
 
-CHECK 10 — Drawing Title vs Title Block (drawing_title)
+    "drawing_title": """\
+CHECK — Drawing Title vs Title Block (drawing_title)
 Locate the drawing title shown prominently at the top of the sheet (the main heading above the
 drawing views, often in a large font or header area).
 Also find the Drawing Title field inside the title block (Schriftfeld / title block area, usually
@@ -136,12 +157,16 @@ MATCHING RULE:
 
 If the sheet heading is not visible, or the title block Drawing Title field is not visible,
 add "drawing_title" to not_found.
-Do NOT flag if both texts convey the same meaning with only formatting/punctuation differences.
+Do NOT flag if both texts convey the same meaning with only formatting/punctuation differences.\
+""",
+}
+
+_TASK_OUTRO_TPL = """\
 
 ═══════════════════════════════════
 OUTPUT FORMAT — one item per finding
 ═══════════════════════════════════
-  check:       "spelling" | "section_name" | "component_name" | "section_scale" | "grid_lines" | "parts_lists" | "parts_quantities" | "parts_labels" | "3d_view" | "drawing_title"
+  check:       {check_keys}
   severity:    "error" for clear non-compliance; "warning" for ambiguous or minor
   description: concise — quote the specific text, field, label, or count involved
   page:        1
@@ -155,6 +180,13 @@ RULES:
   • If prerequisite drawing elements are absent, add the check key to not_found instead of skipping.
   • If no issues are found for all checks, return an empty issues list and an empty not_found list — that is correct.\
 """
+
+
+def _build_spell_task(enabled_sub: list[str] | None) -> str:
+    active = list(_CHECK_PROMPTS.keys()) if enabled_sub is None else [k for k in enabled_sub if k in _CHECK_PROMPTS]
+    check_keys = " | ".join(f'"{k}"' for k in active)
+    blocks = "\n\n".join(_CHECK_PROMPTS[k] for k in active)
+    return _TASK_INTRO + "\n\n" + blocks + _TASK_OUTRO_TPL.format(check_keys=check_keys)
 
 # Python generates pass/fail summaries — LLM never needs to produce them.
 # Tuple: (display_name, pass_desc, not_found_desc)
@@ -291,6 +323,7 @@ def _build_spell_summary(check_key: str, check_name: str, pass_desc: str, nf_des
 
 def spell_check(state: GraphState) -> dict:
     pdf_data: str = state["pdf_data"]  # type: ignore[assignment]
+    enabled_sub = (state.get("enabled_sub_checks") or {}).get("spell")
 
     llm = ChatAnthropic(  # type: ignore[call-arg]
         model="claude-sonnet-4-5",  # type: ignore[call-arg]
@@ -310,7 +343,7 @@ def spell_check(state: GraphState) -> dict:
         "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data},
         "cache_control": {"type": "ephemeral"},
     })
-    human_content.append({"type": "text", "text": _TASK + get_node_context("spell")})
+    human_content.append({"type": "text", "text": _build_spell_task(enabled_sub) + get_node_context("spell")})
 
     result: _SpellResult = llm.invoke(  # type: ignore[assignment]
         [
@@ -330,6 +363,8 @@ def spell_check(state: GraphState) -> dict:
 
     issues: list[Issue] = []
     for check_key, (check_name, pass_desc, nf_desc) in _CHECK_META.items():
+        if enabled_sub is not None and check_key not in enabled_sub:
+            continue
         issues.extend(_build_spell_summary(check_key, check_name, pass_desc, nf_desc, by_check[check_key], not_found_set))
 
     return {"spell_issues": issues}

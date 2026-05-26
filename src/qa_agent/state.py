@@ -30,7 +30,8 @@ class _GraphStateRequired(TypedDict):
 
 
 class GraphState(_GraphStateRequired, total=False):
-    enabled_checks: Optional[list[str]]   # subset of ["spell", "bend", "rebar"]
+    enabled_checks: Optional[list[str]]             # subset of ["spell", "bend", "rebar"]
+    enabled_sub_checks: Optional[dict[str, list[str]]]  # e.g. {"spell": ["spelling", ...]}
     pdf_data: Optional[str]               # base64-encoded PDF, encoded once in preprocess
     page_count: Optional[int]
     spell_issues: Optional[list[Issue]]

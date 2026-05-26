@@ -84,7 +84,11 @@ def _node_sse_events(node_name: str, node_data: dict) -> list[str]:
     return events
 
 
-async def _run_graph(tmp_path: str, enabled_checks: list[str]) -> AsyncIterator[str]:
+async def _run_graph(
+    tmp_path: str,
+    enabled_checks: list[str],
+    enabled_sub_checks: dict[str, list[str]] | None = None,
+) -> AsyncIterator[str]:
     """Stream SSE events by routing graph execution through LangGraph API."""
     lg = get_client(url=LANGGRAPH_URL)
     thread = await lg.threads.create()
@@ -95,10 +99,14 @@ async def _run_graph(tmp_path: str, enabled_checks: list[str]) -> AsyncIterator[
 
     yield _sse({"type": "run_started", "thread_id": thread_id, "studio_url": studio_url})
 
+    graph_input: dict = {"pdf_path": tmp_path, "enabled_checks": enabled_checks}
+    if enabled_sub_checks:
+        graph_input["enabled_sub_checks"] = enabled_sub_checks
+
     async for chunk in lg.runs.stream(
         thread_id,
         GRAPH_NAME,
-        input={"pdf_path": tmp_path, "enabled_checks": enabled_checks},
+        input=graph_input,
         stream_mode="updates",
     ):
         if chunk.event == "metadata":
@@ -118,19 +126,25 @@ async def _run_graph(tmp_path: str, enabled_checks: list[str]) -> AsyncIterator[
 async def analyze(
     file: Annotated[UploadFile, File()],
     checks: Annotated[str, Form()] = "spell,bend,rebar",
+    sub_checks: Annotated[str, Form()] = "{}",
 ):
     enabled_checks = [c.strip() for c in checks.split(",") if c.strip() in _ALL_CHECKS] or _ALL_CHECKS[:]
+
+    try:
+        enabled_sub_checks: dict[str, list[str]] = json.loads(sub_checks) if sub_checks else {}
+    except (json.JSONDecodeError, ValueError):
+        enabled_sub_checks = {}
 
     data = await file.read()
     tmp_path = await _save_upload(data)
 
-    print(f"\n[server] === New analysis: {file.filename} → {tmp_path} | checks: {enabled_checks} ===")
+    print(f"\n[server] === New analysis: {file.filename} → {tmp_path} | checks: {enabled_checks} | sub_checks: {enabled_sub_checks} ===")
     print(f"[server] Routing to LangGraph API at {LANGGRAPH_URL}")
 
     async def stream():
         yield _sse({"type": "ack"})
         try:
-            async for event in _run_graph(tmp_path, enabled_checks):
+            async for event in _run_graph(tmp_path, enabled_checks, enabled_sub_checks):
                 yield event
         except Exception as exc:
             print(f"[server] ✗ EXCEPTION: {exc}")

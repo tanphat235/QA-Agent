@@ -359,8 +359,11 @@ export default function App() {
   const [isDragging, setIsDragging]     = useState(false)
   const [doneNodes, setDoneNodes]       = useState<string[]>([])
   const [activeNode, setActiveNode]     = useState<string | null>(null)
-  const [sidebarOpen, setSidebarOpen]       = useState(true)
-  const [enabledChecks, setEnabledChecks]   = useState<string[]>(['spell', 'bend', 'rebar'])
+  const [sidebarOpen, setSidebarOpen]           = useState(true)
+  const [enabledSubChecks, setEnabledSubChecks] = useState<Record<string, string[]>>(() =>
+    Object.fromEntries(NODE_SECTIONS.map(s => [s.key, s.checks.map(c => c.key)]))
+  )
+  const [expandedCheckCategories, setExpandedCheckCategories] = useState<Set<string>>(new Set())
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set())
   const [expandedGroups,    setExpandedGroups]    = useState<Set<string>>(new Set())
   const [resultFilter,      setResultFilter]      = useState<ResultFilter>(null)
@@ -526,10 +529,33 @@ export default function App() {
       const next = new Set(prev); next.has(key) ? next.delete(key) : next.add(key); return next
     })
 
-  const toggleCheck = (key: string) => {
-    setEnabledChecks(prev =>
-      prev.includes(key) ? prev.filter(c => c !== key) : [...prev, key]
-    )
+  const enabledChecks = CHECK_OPTIONS
+    .filter(o => (enabledSubChecks[o.key] ?? []).length > 0)
+    .map(o => o.key)
+
+  const toggleSubCheck = (categoryKey: string, subKey: string) => {
+    setEnabledSubChecks(prev => {
+      const current = prev[categoryKey] ?? []
+      const next = current.includes(subKey)
+        ? current.filter(k => k !== subKey)
+        : [...current, subKey]
+      return { ...prev, [categoryKey]: next }
+    })
+  }
+
+  const toggleAllInCategory = (categoryKey: string) => {
+    setEnabledSubChecks(prev => {
+      const allKeys = NODE_SECTIONS.find(s => s.key === categoryKey)?.checks.map(c => c.key) ?? []
+      const current = prev[categoryKey] ?? []
+      const allEnabled = allKeys.every(k => current.includes(k))
+      return { ...prev, [categoryKey]: allEnabled ? [] : allKeys }
+    })
+  }
+
+  const toggleCheckCategoryExpanded = (key: string) => {
+    setExpandedCheckCategories(prev => {
+      const next = new Set(prev); next.has(key) ? next.delete(key) : next.add(key); return next
+    })
   }
 
   const visibleNodes = NODES.filter(n =>
@@ -554,6 +580,10 @@ export default function App() {
     const form = new FormData()
     form.append('file', file)
     form.append('checks', enabledChecks.join(','))
+    const subChecksPayload = Object.fromEntries(
+      enabledChecks.map(cat => [cat, enabledSubChecks[cat] ?? []])
+    )
+    form.append('sub_checks', JSON.stringify(subChecksPayload))
 
     try {
       const res = await fetch('/api/analyze', { method: 'POST', body: form })
@@ -1181,33 +1211,131 @@ export default function App() {
                 )}
               </div>
 
-              {/* Check toggles */}
-              <div className="flex gap-2 flex-wrap">
+              <div className="flex flex-col gap-2.5">
+
+                {/* 3 category cards — horizontal row */}
+                <div className="flex gap-2">
+                  {CHECK_OPTIONS.map(({ key, label }) => {
+                    const section = NODE_SECTIONS.find(s => s.key === key)!
+                    const allSubKeys = section.checks.map(c => c.key)
+                    const enabledSubs = enabledSubChecks[key] ?? []
+                    const allEnabled = allSubKeys.every(k => enabledSubs.includes(k))
+                    const someEnabled = enabledSubs.length > 0
+                    const isExpanded = expandedCheckCategories.has(key)
+                    const disabled = appState === 'analyzing'
+                    return (
+                      <div key={key} className={`flex-1 rounded-xl overflow-hidden border transition-all ${
+                        someEnabled
+                          ? isExpanded ? 'border-blue-400 shadow-md shadow-blue-100' : 'border-blue-200 shadow-sm shadow-blue-100/50'
+                          : 'border-gray-200'
+                      } ${disabled ? 'opacity-60' : ''}`}>
+                        <div className={`flex flex-col ${someEnabled ? 'bg-blue-600' : 'bg-gray-50'}`}>
+                          {/* Label + checkbox */}
+                          <button
+                            onClick={() => !disabled && toggleAllInCategory(key)}
+                            disabled={disabled}
+                            className="flex items-start gap-2 w-full px-3 pt-2.5 pb-1 text-left"
+                          >
+                            <span className={`mt-0.5 w-3.5 h-3.5 rounded border-[1.5px] flex-shrink-0 flex items-center justify-center transition-colors ${
+                              allEnabled ? 'bg-white/25 border-white/60'
+                              : someEnabled ? 'bg-white/15 border-white/40'
+                              : 'bg-white border-gray-300'
+                            }`}>
+                              {allEnabled && (
+                                <svg viewBox="0 0 10 8" className="w-2 h-1.5" fill="none">
+                                  <path d="M1 4L3.5 6.5L9 1" stroke="white" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
+                                </svg>
+                              )}
+                              {!allEnabled && someEnabled && (
+                                <span className="w-1.5 h-0.5 bg-white/80 rounded-full block" />
+                              )}
+                            </span>
+                            <span className={`text-[10px] font-bold leading-snug ${someEnabled ? 'text-white' : 'text-gray-500'}`}>
+                              {label}
+                            </span>
+                          </button>
+                          {/* Count + chevron */}
+                          <div className="flex items-center justify-between px-3 pb-2 pt-0.5">
+                            <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full leading-none ${
+                              someEnabled ? 'bg-white/20 text-white/90' : 'bg-gray-200 text-gray-500'
+                            }`}>
+                              {enabledSubs.length}/{allSubKeys.length}
+                            </span>
+                            <button
+                              onClick={() => toggleCheckCategoryExpanded(key)}
+                              className={`flex items-center justify-center w-5 h-5 rounded-md transition-colors ${
+                                someEnabled ? 'hover:bg-white/20 text-white/70' : 'hover:bg-gray-200 text-gray-400'
+                              }`}
+                            >
+                              <ChevronDown size={12} className={`transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`} />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+
+                {/* Sub-checks panel — full-width, below the row */}
                 {CHECK_OPTIONS.map(({ key, label }) => {
-                  const on = enabledChecks.includes(key)
+                  if (!expandedCheckCategories.has(key)) return null
+                  const section = NODE_SECTIONS.find(s => s.key === key)!
+                  const enabledSubs = enabledSubChecks[key] ?? []
+                  const someEnabled = enabledSubs.length > 0
                   const disabled = appState === 'analyzing'
                   return (
-                    <button
-                      key={key}
-                      onClick={() => !disabled && toggleCheck(key)}
-                      disabled={disabled}
-                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border transition-all ${
-                        disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
-                      } ${
-                        on
-                          ? 'bg-blue-600 border-blue-600 text-white shadow-sm'
-                          : 'bg-white border-gray-200 text-gray-400 hover:border-gray-300 hover:text-gray-600'
-                      }`}
-                    >
-                      <span className={`w-3 h-3 rounded-sm border flex items-center justify-center flex-shrink-0 ${
-                        on ? 'bg-white/30 border-white/50' : 'border-gray-300'
+                    <div key={`sub-${key}`} className={`rounded-xl border overflow-hidden ${
+                      someEnabled ? 'border-blue-200' : 'border-gray-200'
+                    }`}>
+                      {/* Panel header */}
+                      <div className={`flex items-center justify-between px-3.5 py-2 border-b ${
+                        someEnabled ? 'bg-blue-50 border-blue-100' : 'bg-gray-50 border-gray-100'
                       }`}>
-                        {on && <span className="text-white text-[8px] leading-none font-black">✓</span>}
-                      </span>
-                      {label}
-                    </button>
+                        <span className={`text-[9px] font-bold uppercase tracking-widest ${
+                          someEnabled ? 'text-blue-500' : 'text-gray-400'
+                        }`}>{label}</span>
+                        <button
+                          onClick={() => !disabled && toggleAllInCategory(key)}
+                          className={`text-[9px] font-semibold transition-colors ${
+                            someEnabled ? 'text-blue-400 hover:text-blue-600' : 'text-gray-400 hover:text-gray-600'
+                          }`}
+                        >
+                          {enabledSubs.length === section.checks.length ? 'Deselect all' : 'Select all'}
+                        </button>
+                      </div>
+                      {/* Sub-check list — 2-column grid */}
+                      <div className="bg-white px-3 py-2.5 grid grid-cols-2 gap-x-2 gap-y-0.5">
+                        {section.checks.map(check => {
+                          const subOn = enabledSubs.includes(check.key)
+                          return (
+                            <button
+                              key={check.key}
+                              onClick={() => !disabled && toggleSubCheck(key, check.key)}
+                              disabled={disabled}
+                              className={`flex items-center gap-2 px-2 py-1.5 rounded-lg text-left transition-colors ${
+                                subOn
+                                  ? 'text-blue-700 hover:bg-blue-50'
+                                  : 'text-gray-400 hover:bg-gray-50 hover:text-gray-500'
+                              }`}
+                            >
+                              <span className={`w-3.5 h-3.5 rounded border-[1.5px] flex-shrink-0 flex items-center justify-center transition-colors ${
+                                subOn ? 'bg-blue-500 border-blue-500' : 'border-gray-300 bg-white'
+                              }`}>
+                                {subOn && (
+                                  <svg viewBox="0 0 10 8" className="w-2 h-1.5" fill="none">
+                                    <path d="M1 4L3.5 6.5L9 1" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+                                  </svg>
+                                )}
+                              </span>
+                              <span className="text-[10px] font-medium leading-tight truncate">{check.title}</span>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </div>
                   )
                 })}
+
               </div>
 
               {!file && viewingEntry ? (

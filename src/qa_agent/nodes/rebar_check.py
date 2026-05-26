@@ -21,11 +21,43 @@ German terminology:
   Draufsicht = top/plan view | Matten-Schneideskizze = mesh cut sketch | Detail = detail view\
 """
 
-_TASK = """\
+_TASK_INTRO = """\
 Inspect reinforcement elements, spacers, pin bars, and clamps in this precast wall structural drawing.
-Report ONLY issues you can directly observe from visible annotations and dimensions in the PDF.
+Report ONLY issues you can directly observe from visible annotations and dimensions in the PDF.\
+"""
 
-CHECK 1 — Spacer / Clamp Label Suffix (spacer_label)
+# Shared dimension-extraction block — included whenever any dimension check is active.
+_STEP_A = """\
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP A — EXTRACT ACTUAL VALUES FROM THIS DRAWING FIRST
+(Complete this step before doing any calculation. Never substitute example numbers.)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+A1. wall_width — total wall thickness in cm:
+  Read from the FORMWORK cross-section views (Draufsicht X-X, Schnitt X-X in the Ansicht /
+  formwork area, NOT the Bewehrung area). A dimension line spanning the full thickness gives
+  the value. It may also appear in the title block.
+  → Record as: wall_width = [value you read from this drawing] cm
+
+A2. Cv — design concrete cover in cm:
+  Read from the title block "BETONDECKUNG" table, column labeled "Cv" (or "Cᵥ"), in mm.
+  Divide by 10 to convert to cm. Do NOT use Cmin,dur or ΔCdev.
+  → Record as: Cv = [value from BETONDECKUNG table] cm
+
+A3. Ø_layer1 — outermost rebar layer diameter (needed for Horizontal Pin Width check):
+  In the SIDE section view (Schnitt a-a in the Bewehrung), find the first rebar layer from
+  the wall face inward. Read its label (e.g. "ø 12/15" → Ø12 → 1.2 cm).
+  → Record as: Ø_layer1 = [value from this drawing] cm
+
+If any of these values cannot be found in the drawing, do NOT guess or use any number from
+the examples below — instead add the affected check key to not_found.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\
+"""
+
+_CHECK_PROMPTS: dict[str, str] = {
+    "spacer_label": """\
+CHECK — Spacer / Clamp Label Suffix (spacer_label)
 Use the "-M.E." suffix itself to identify which Pos numbers are spacers/clamps, then verify every
 label for those positions also carries the suffix.
 
@@ -47,35 +79,11 @@ EXAMPLE:
   If all occurrences of Pos 11 include "-M.E." → PASS for Pos 11.
 
 Do NOT flag Pos numbers that never appear with "-M.E." anywhere — those are not spacers/clamps.
-Do NOT flag if you cannot clearly read the label.
+Do NOT flag if you cannot clearly read the label.\
+""",
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STEP A — EXTRACT ACTUAL VALUES FROM THIS DRAWING FIRST
-(Complete this step before doing any calculation. Never substitute example numbers.)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-A1. wall_width — total wall thickness in cm:
-  Read from the FORMWORK cross-section views (Draufsicht X-X, Schnitt X-X in the Ansicht /
-  formwork area, NOT the Bewehrung area). A dimension line spanning the full thickness gives
-  the value. It may also appear in the title block.
-  → Record as: wall_width = [value you read from this drawing] cm
-
-A2. Cv — design concrete cover in cm:
-  Read from the title block "BETONDECKUNG" table, column labeled "Cv" (or "Cᵥ"), in mm.
-  Divide by 10 to convert to cm. Do NOT use Cmin,dur or ΔCdev.
-  → Record as: Cv = [value from BETONDECKUNG table] cm
-
-A3. Ø_layer1 — outermost rebar layer diameter (needed for CHECK 3):
-  In the SIDE section view (Schnitt a-a in the Bewehrung), find the first rebar layer from
-  the wall face inward. Read its label (e.g. "ø 12/15" → Ø12 → 1.2 cm).
-  → Record as: Ø_layer1 = [value from this drawing] cm
-
-If any of these values cannot be found in the drawing, do NOT guess or use any number from
-the examples below — instead add the affected check key to not_found.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-CHECK 2 — Vertical Pin Width (pin_width_vertical)
+    "pin_width_vertical": """\
+CHECK — Vertical Pin Width (pin_width_vertical)
 IDENTIFICATION — locate vertical pins using their bending schema:
   Vertical pins are schematized in the SIDE section view of the Bewehrung (e.g. Schnitt a-a).
   In that view, the pin schema appears as a narrow U-shape or rectangular stirrup whose long
@@ -88,9 +96,11 @@ WIDTH FORMULA (use values from STEP A, not the illustration numbers):
     e.g. if wall_width were 20 cm and Cv were 2.0 cm → required = 20 – 4.0 = 16 cm
 
 Flag if the labeled pin width clearly differs from the required calculated value.
-If wall_width, Cv, or the labeled pin dimension cannot be found, add "pin_width_vertical" to not_found.
+If wall_width, Cv, or the labeled pin dimension cannot be found, add "pin_width_vertical" to not_found.\
+""",
 
-CHECK 3 — Horizontal Pin Width (pin_width_horizontal)
+    "pin_width_horizontal": """\
+CHECK — Horizontal Pin Width (pin_width_horizontal)
 IDENTIFICATION — locate horizontal pins using their bending schema:
   Horizontal pins are schematized in the BOTTOM / HORIZONTAL cross-section view of the Bewehrung
   (e.g. Schnitt b-b). In that view, the pin schema appears as a flat rectangular stirrup whose
@@ -103,9 +113,11 @@ WIDTH FORMULA (use values from STEP A, not the illustration numbers):
     e.g. if wall_width were 20 cm, Cv=2.0 cm, Ø_layer1=1.0 cm → 20 – 4.0 – 2.0 = 14 cm
 
 Flag if the labeled horizontal pin width clearly differs from the calculated value.
-If any required dimension (wall_width, Cv, Ø_layer1, or pin width) cannot be found, add "pin_width_horizontal" to not_found.
+If any required dimension (wall_width, Cv, Ø_layer1, or pin width) cannot be found, add "pin_width_horizontal" to not_found.\
+""",
 
-CHECK 4 — Spacer / Clamp Width (spacer_width)
+    "spacer_width": """\
+CHECK — Spacer / Clamp Width (spacer_width)
 For each spacer or clamp element, verify its width using values from STEP A:
   Required width = wall_width – 2 × Cv + 2 × Ø_spacer   (round up to nearest mm)
   where Ø_spacer = physical diameter of the spacer/clamp wire, read from its label in this drawing.
@@ -113,12 +125,19 @@ For each spacer or clamp element, verify its width using values from STEP A:
     e.g. if wall_width=20, Cv=2.0, Ø_spacer=0.6 → 20 – 4.0 + 1.2 = 17.2 → 18 cm
 
 Flag if the labeled spacer/clamp width clearly differs from the calculated value.
-If any required dimension (wall_width, Cv, or Ø_spacer) cannot be found, add "spacer_width" to not_found.
+If any required dimension (wall_width, Cv, or Ø_spacer) cannot be found, add "spacer_width" to not_found.\
+""",
+}
+
+# These three checks all require STEP A dimension extraction.
+_DIMENSION_CHECKS = {"pin_width_vertical", "pin_width_horizontal", "spacer_width"}
+
+_TASK_OUTRO_TPL = """\
 
 ═══════════════════════════════════
 OUTPUT FORMAT — one item per finding
 ═══════════════════════════════════
-  check:       "spacer_label" | "pin_width_vertical" | "pin_width_horizontal" | "spacer_width"
+  check:       {check_keys}
   severity:    "error" for missing/wrong label or incorrect dimension causing fabrication risk; "warning" for ambiguous
   description: concise — quote label text, or state: formula, calculated value, and declared value
   page:        1
@@ -132,6 +151,18 @@ RULES:
   • If required dimensions or values are not visible in the drawing, add the check key to not_found instead of skipping.
   • If no issues are found for all checks, return an empty issues list and an empty not_found list — that is correct.\
 """
+
+
+def _build_rebar_task(enabled_sub: list[str] | None) -> str:
+    active = list(_CHECK_PROMPTS.keys()) if enabled_sub is None else [k for k in enabled_sub if k in _CHECK_PROMPTS]
+    check_keys = " | ".join(f'"{k}"' for k in active)
+    parts: list[str] = [_TASK_INTRO]
+    # STEP A only needed when at least one dimension-based check is active
+    if any(k in _DIMENSION_CHECKS for k in active):
+        parts.append(_STEP_A)
+    parts.append("\n\n".join(_CHECK_PROMPTS[k] for k in active))
+    parts.append(_TASK_OUTRO_TPL.format(check_keys=check_keys))
+    return "\n\n".join(parts)
 
 # Python generates pass/fail summaries — LLM never needs to produce them.
 # Tuple: (display_name, pass_desc, not_found_desc)
@@ -195,6 +226,7 @@ class _RebarResult(BaseModel):
 
 def rebar_check(state: GraphState) -> dict:
     pdf_data: str = state["pdf_data"]  # type: ignore[assignment]
+    enabled_sub = (state.get("enabled_sub_checks") or {}).get("rebar")
 
     llm = ChatAnthropic(  # type: ignore[call-arg]
         model="claude-sonnet-4-5",  # type: ignore[call-arg]
@@ -214,7 +246,7 @@ def rebar_check(state: GraphState) -> dict:
         "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data},
         "cache_control": {"type": "ephemeral"},
     })
-    human_content.append({"type": "text", "text": _TASK + get_node_context("rebar")})
+    human_content.append({"type": "text", "text": _build_rebar_task(enabled_sub) + get_node_context("rebar")})
 
     result: _RebarResult = llm.invoke(  # type: ignore[assignment]
         [
@@ -236,6 +268,8 @@ def rebar_check(state: GraphState) -> dict:
 
     # Python always generates a guaranteed pass/fail/not_found summary for every check
     for check_key, (check_name, pass_desc, nf_desc) in _CHECK_META.items():
+        if enabled_sub is not None and check_key not in enabled_sub:
+            continue
         if check_key in not_found_set:
             issues.append({
                 "category": "rebar",
