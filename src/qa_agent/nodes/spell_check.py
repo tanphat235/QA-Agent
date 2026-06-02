@@ -28,7 +28,7 @@ Report ONLY issues you can directly observe in the PDF.\
 
 _SPELL_CHECKS = [
     "spelling", "section_name", "component_name", "section_scale", "grid_lines",
-    "parts_lists", "parts_quantities", "parts_labels", "3d_view", "drawing_title",
+    "parts_lists", "parts_quantities", "3d_view", "drawing_title",
 ]
 _CHECK_PROMPTS: dict[str, str] = {k: get_check_prompt("spell", k) for k in _SPELL_CHECKS}
 _CHECK_META: dict[str, tuple[str, str, str]] = {k: get_check_meta("spell", k) for k in _SPELL_CHECKS}
@@ -84,7 +84,7 @@ class _UsageCallback(BaseCallbackHandler):
 
 
 class _SpellIssue(BaseModel):
-    check: str = Field(description="spelling | section_name | component_name | section_scale | grid_lines | parts_lists | parts_quantities | parts_labels | 3d_view | drawing_title")
+    check: str = Field(description="spelling | section_name | component_name | section_scale | grid_lines | parts_lists | parts_quantities | 3d_view | drawing_title")
     severity: str = Field(description="error | warning")
     description: str
     page: int

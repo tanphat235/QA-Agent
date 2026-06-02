@@ -103,7 +103,6 @@ const NODE_SECTIONS = [
       { key: 'grid_lines',       title: 'Grid Lines Consistency' },
       { key: 'parts_lists',      title: 'Parts Lists Present' },
       { key: 'parts_quantities', title: 'Parts Quantities' },
-      { key: 'parts_labels',     title: 'Built-in Part Labels' },
       { key: '3d_view',          title: '3D View' },
       { key: 'drawing_title',    title: 'Drawing Title vs Title Block' },
     ],
