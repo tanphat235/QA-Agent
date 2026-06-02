@@ -7,15 +7,15 @@ Drawing Title vs Title Block
 
 ## Pass
 
-PASS — sheet heading matches title block Drawing Title field.
+PASS — Drawing Title matches the Title Block field in either German or English.
 
 ## Not Found
 
-NOT FOUND — sheet heading or title block Drawing Title field not visible.
+NOT FOUND — Drawing Title or Title Block field not visible in the drawing.
 
 ## Description
 
-Check whether the drawing name matches the drawing name in the title block.
+Check whether the Drawing Title matches the Title Block field in at least one language.
 
 ## Reference Images
 
@@ -24,20 +24,15 @@ Check whether the drawing name matches the drawing name in the title block.
 ## Check Prompt
 
 CHECK — Drawing Title vs Title Block (drawing_title)
-Locate the drawing title shown prominently at the top of the sheet (the main heading above the
-drawing views, often in a large font or header area).
-Also find the Drawing Title field inside the title block (Schriftfeld / title block area, usually
+Find the Drawing Title field inside the title block (Schriftfeld / title block area, usually
 in the lower-right corner of the sheet).
+The field may contain a bilingual entry separated by "/" (e.g. "Schalung und Bewehrung ... /
+Formwork and reinforcement ..."), or a single-language entry.
 
-MATCHING RULE:
-  The title block Drawing Title field may contain a bilingual entry with German and English
-  separated by "/" (e.g. "Schalung und Bewehrung ... / Formwork and reinforcement ...").
-  In that case, compare ONLY the German part (the text before the "/" separator) against the
-  sheet heading. Minor punctuation differences (trailing period, dash spacing) are acceptable.
-  Flag only if the semantic content clearly differs — e.g. different element name, wrong axis label.
+PASS if the Drawing Title matches the Title Block field in German OR in English.
+If the field is bilingual, a match with either the German part (before "/") or the English part
+(after "/") is sufficient to pass.
+Minor punctuation differences (trailing period, dash spacing) are acceptable — flag only if the
+semantic content clearly differs (e.g. different element name, wrong axis label).
 
-  If the title block field contains only one language, compare it directly to the sheet heading.
-
-If the sheet heading is not visible, or the title block Drawing Title field is not visible,
-add "drawing_title" to not_found.
-Do NOT flag if both texts convey the same meaning with only formatting/punctuation differences.
+If the Drawing Title field or the Title Block is not visible, add "drawing_title" to not_found.
