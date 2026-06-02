@@ -6,7 +6,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.outputs import LLMResult
 
 from qa_agent.state import GraphState, Issue
-from qa_agent.rag.retriever import get_node_context, get_node_images
+from qa_agent.rag.retriever import get_node_images, get_check_prompt, get_check_meta
 
 logger = logging.getLogger(__name__)
 
@@ -26,140 +26,12 @@ Inspect visible text, annotations, views, and tables in this precast wall struct
 Report ONLY issues you can directly observe in the PDF.\
 """
 
-_CHECK_PROMPTS: dict[str, str] = {
-    "spelling": """\
-CHECK — Spelling Errors (spelling)
-Flag clear spelling mistakes in German or English words in titles, labels, notes, callouts, or title block.
-Do NOT flag: accepted engineering abbreviations (Ø, typ., M.E., Reinf., Bew., pos.), capitalization style.\
-""",
-
-    "section_name": """\
-CHECK — Section Name Completeness (section_name)
-Identify all section cut designations called out in the Ansicht or Bewehrung (e.g. "1-1", "2-2", "3-3").
-Verify that a corresponding view with the same designation number is present on the sheet.
-A view satisfies the requirement if it is labeled "Schnitt X-X", "Draufsicht X-X", or any other
-view type (top view, cross-section, detail) that carries the same designation number X-X.
-Flag only if NO view of any type with that designation number exists anywhere on the sheet.
-Do NOT flag if the view exists but is located elsewhere on the sheet.\
-""",
-
-    "component_name": """\
-CHECK — Component Name vs Title Block (component_name)
-Verify the component/element name on the Wandansicht matches the drawing name in the title block.
-Flag only where BOTH are visible and they clearly differ.
-If only one of the two (Wandansicht label or title block name) is visible, add "component_name" to not_found.\
-""",
-
-    "section_scale": """\
-CHECK — Scale Consistency (section_scale)
-Compare every explicit scale label (M 1:XX) on views or sections against the title block scale.
-Flag any view whose labeled scale clearly differs from the title block value.
-Only flag where both scales are simultaneously visible and unambiguously different.\
-""",
-
-    "grid_lines": """\
-CHECK — Formwork Grid Lines vs Wandansicht (grid_lines)
-Check that grid lines (axis labels / column lines) in the wall formwork Schnitt views match those in the Wandansicht.
-Flag any grid line present in the Schnitt but absent from the Wandansicht, or vice versa.
-If no Wandansicht is visible on the sheet, add "grid_lines" to not_found.\
-""",
-
-    "parts_lists": """\
-CHECK — Parts Lists Present (parts_lists)
-Verify the sheet contains both:
-  • Einbauteilliste (embedded parts list)
-  • Montageteilliste (assembly/mounting parts list)
-Flag each table that is clearly absent.\
-""",
-
-    "parts_quantities": """\
-CHECK — Parts Label Consistency (parts_quantities)
-A drawing does NOT need to have both tables — check whichever table(s) are present.
-If NEITHER Einbauteilliste NOR Montageteilliste is present, add "parts_quantities" to not_found and skip.
-
-For each table that IS present, cross-reference every part label visible in Schnitt and Ansicht views
-against that table:
-  1. UNLABELED PARTS — any part belonging to a present table with NO label in the views. Flag each.
-  2. LABEL NOT IN TABLE — any label code in the views that cannot be found in any present table. Flag each.
-RULES:
-  • A label found in ANY present table is consistent — do NOT flag it.
-  • Do NOT flag rebar Pos numbers — only flag embedded/mounting part designations.
-  • Only flag when you can clearly read the label AND confirm it is absent from all present tables.
-  • If only Einbauteilliste is present, only cross-reference against Einbauteilliste.
-  • If only Montageteilliste is present, only cross-reference against Montageteilliste.\
-""",
-
-    "parts_labels": """\
-CHECK — Part Labels in Views (parts_labels)
-Check that every part listed in any present table has an explicit label in the section/elevation views.
-A drawing does NOT need both tables — check whichever table(s) are present.
-If NEITHER table is present, add "parts_labels" to not_found and skip.
-
-For Einbauteilliste (built-in parts / Einbauteile) — if this table is present:
-  Count all built-in parts visible in Schnitt and Ansicht views.
-  Verify each part has an explicit label (position number or designation) shown directly adjacent
-  or via leader line. Flag any Einbauteil shown in the views without a label.
-
-For Montageteilliste (mounting parts / Montageteile) — if this table is present:
-  Count all mounting parts visible in Schnitt and Ansicht views.
-  Verify each part has an explicit label shown directly adjacent or via leader line.
-  Flag any Montageteil shown in the views without a label.\
-""",
-
-    "3d_view": """\
-CHECK — 3D View Present (3d_view)
-Check whether the sheet contains a 3D pictorial view of the wall element.
-
-WHAT COUNTS AS A 3D VIEW — ANY ONE of the following is sufficient to pass:
-
-  LABELED VIEWS (pass regardless of visual appearance):
-  • Any area or view titled "3D Perspektive", "Perspektive", "isometrische Ansicht",
-    "3D Ansicht", "3D View", or any text containing "3D" or "Perspektiv".
-
-  UNLABELED VIEWS (visual recognition — no label required):
-  • A drawing of the wall body shown from a diagonal/oblique angle (approximately 45°),
-    where the wall appears as a solid rectangular block or slab tilted toward the viewer.
-  • Telltale signs: the main face of the wall AND at least one side edge or top edge are
-    visible simultaneously; the wall outline lines run diagonally (not purely horizontal
-    or vertical); the view gives an overall "bird's eye" or "overview" impression of the
-    entire wall element in three dimensions.
-  • This type of view is a standard engineering axonometric or isometric line drawing.
-    It is typically placed in a corner of the sheet, often without any scale label or title.
-    It may show embedded hardware, rebar protruding from the wall face, lifting anchors, etc.
-  • Shading, color, or fill are NOT required — a pure line drawing counts.
-  • The view may be small or appear in a corner of the sheet — size does not matter.
-
-HOW TO SCAN:
-  Look at ALL areas of the sheet, including corners and margins. If you see a rectangular
-  wall-shaped outline drawn at a diagonal angle (showing depth), that IS the 3D view.
-
-If ANY such view exists anywhere on the sheet → PASS immediately, do NOT flag.
-If after scanning the entire sheet no such view exists → flag as an error.
-
-Do NOT perform any consistency or orientation check — presence alone is sufficient.\
-""",
-
-    "drawing_title": """\
-CHECK — Drawing Title vs Title Block (drawing_title)
-Locate the drawing title shown prominently at the top of the sheet (the main heading above the
-drawing views, often in a large font or header area).
-Also find the Drawing Title field inside the title block (Schriftfeld / title block area, usually
-in the lower-right corner of the sheet).
-
-MATCHING RULE:
-  The title block Drawing Title field may contain a bilingual entry with German and English
-  separated by "/" (e.g. "Schalung und Bewehrung ... / Formwork and reinforcement ...").
-  In that case, compare ONLY the German part (the text before the "/" separator) against the
-  sheet heading. Minor punctuation differences (trailing period, dash spacing) are acceptable.
-  Flag only if the semantic content clearly differs — e.g. different element name, wrong axis label.
-
-  If the title block field contains only one language, compare it directly to the sheet heading.
-
-If the sheet heading is not visible, or the title block Drawing Title field is not visible,
-add "drawing_title" to not_found.
-Do NOT flag if both texts convey the same meaning with only formatting/punctuation differences.\
-""",
-}
+_SPELL_CHECKS = [
+    "spelling", "section_name", "component_name", "section_scale", "grid_lines",
+    "parts_lists", "parts_quantities", "parts_labels", "3d_view", "drawing_title",
+]
+_CHECK_PROMPTS: dict[str, str] = {k: get_check_prompt("spell", k) for k in _SPELL_CHECKS}
+_CHECK_META: dict[str, tuple[str, str, str]] = {k: get_check_meta("spell", k) for k in _SPELL_CHECKS}
 
 _TASK_OUTRO_TPL = """\
 
@@ -188,60 +60,7 @@ def _build_spell_task(enabled_sub: list[str] | None) -> str:
     blocks = "\n\n".join(_CHECK_PROMPTS[k] for k in active)
     return _TASK_INTRO + "\n\n" + blocks + _TASK_OUTRO_TPL.format(check_keys=check_keys)
 
-# Python generates pass/fail summaries — LLM never needs to produce them.
-# Tuple: (display_name, pass_desc, not_found_desc)
-_CHECK_META: dict[str, tuple[str, str, str]] = {
-    "spelling": (
-        "Spelling Check",
-        "PASS — no spelling errors found in drawing text.",
-        "NOT FOUND — no readable text found on sheet.",
-    ),
-    "section_name": (
-        "Section Name Completeness",
-        "PASS — all section cuts in Ansicht/Bewehrung have a corresponding Schnitt view.",
-        "NOT FOUND — no section cut designations found in Ansicht or Bewehrung.",
-    ),
-    "component_name": (
-        "Component Name vs Title Block",
-        "PASS — Wandansicht component name matches title block.",
-        "NOT FOUND — Wandansicht element label or title block name not visible.",
-    ),
-    "section_scale": (
-        "Scale Consistency",
-        "PASS — all view scales consistent with title block.",
-        "NOT FOUND — no scale labels (M 1:XX) visible on views or title block.",
-    ),
-    "grid_lines": (
-        "Formwork Grid Lines Consistency",
-        "PASS — grid lines in Schnitt views match Wandansicht.",
-        "NOT FOUND — Wandansicht absent from sheet.",
-    ),
-    "parts_lists": (
-        "Parts Lists Present",
-        "PASS — Einbauteilliste and Montageteilliste both present.",
-        "NOT FOUND — neither Einbauteilliste nor Montageteilliste visible on sheet.",
-    ),
-    "parts_quantities": (
-        "Parts Label Consistency",
-        "PASS — all part labels in views match the present schedule table(s).",
-        "NOT FOUND — no schedule tables (Einbauteilliste / Montageteilliste) visible on sheet.",
-    ),
-    "parts_labels": (
-        "Part Labels in Views",
-        "PASS — all parts from present table(s) are labeled in section/elevation views.",
-        "NOT FOUND — no schedule tables (Einbauteilliste / Montageteilliste) visible on sheet.",
-    ),
-    "3d_view": (
-        "3D View Present and Consistent",
-        "PASS — 3D view present and consistent with Ansicht.",
-        "NOT FOUND — no 3D pictorial (oblique/isometric) view found on sheet.",
-    ),
-    "drawing_title": (
-        "Drawing Title vs Title Block",
-        "PASS — sheet heading matches title block Drawing Title field.",
-        "NOT FOUND — sheet heading or title block Drawing Title field not visible.",
-    ),
-}
+
 
 
 class _UsageCallback(BaseCallbackHandler):
@@ -274,51 +93,8 @@ class _SpellIssue(BaseModel):
 
 
 class _SpellResult(BaseModel):
-    issues: list[_SpellIssue]  # required — no default so missing field raises ValidationError
+    issues: list[_SpellIssue]
     not_found: list[str] = Field(default_factory=list, description="Check keys where prerequisite drawing elements were absent")
-
-
-def _build_spell_summary(check_key: str, check_name: str, pass_desc: str, nf_desc: str,
-                         found: list[_SpellIssue], not_found_set: set[str]) -> list[Issue]:
-    """Return the summary item (and individual findings) for one spell check."""
-    if check_key in not_found_set:
-        return [{
-            "category": "spell",
-            "check_name": check_name,
-            "not_found": True,
-            "severity": "info",
-            "description": nf_desc,
-            "page": 1,
-            "location": "drawing",
-            "confidence": 1.0,
-        }]
-    passed = len(found) == 0
-    if passed:
-        summary_desc = pass_desc
-    elif len(found) == 1:
-        summary_desc = f"FAIL — {found[0].description}"
-    else:
-        summary_desc = f"FAIL — {len(found)} issue(s) found."
-    items: list[Issue] = [{
-        "category": "spell",
-        "check_name": check_name,
-        "passed": passed,
-        "severity": "info" if passed else "error",
-        "description": summary_desc,
-        "page": 1,
-        "location": "drawing",
-        "confidence": 1.0,
-    }]
-    for item in found:
-        items.append({
-            "category": "spell",
-            "severity": item.severity,
-            "description": item.description,
-            "page": item.page,
-            "location": item.location,
-            "confidence": item.confidence,
-        })
-    return items
 
 
 def spell_check(state: GraphState) -> dict:
@@ -326,7 +102,7 @@ def spell_check(state: GraphState) -> dict:
     enabled_sub = (state.get("enabled_sub_checks") or {}).get("spell")
 
     llm = ChatAnthropic(  # type: ignore[call-arg]
-        model="claude-sonnet-4-5",  # type: ignore[call-arg]
+        model="claude-sonnet-4-6",  # type: ignore[call-arg]
         temperature=0,  # type: ignore[call-arg]
         max_tokens=4096,  # type: ignore[call-arg]
     ).with_structured_output(_SpellResult).with_retry(stop_after_attempt=2)
@@ -343,7 +119,7 @@ def spell_check(state: GraphState) -> dict:
         "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data},
         "cache_control": {"type": "ephemeral"},
     })
-    human_content.append({"type": "text", "text": _build_spell_task(enabled_sub) + get_node_context("spell")})
+    human_content.append({"type": "text", "text": _build_spell_task(enabled_sub)})
 
     result: _SpellResult = llm.invoke(  # type: ignore[assignment]
         [
@@ -360,11 +136,44 @@ def spell_check(state: GraphState) -> dict:
             by_check[item.check].append(item)
 
     not_found_set = set(result.not_found or [])
-
     issues: list[Issue] = []
+
     for check_key, (check_name, pass_desc, nf_desc) in _CHECK_META.items():
         if enabled_sub is not None and check_key not in enabled_sub:
             continue
-        issues.extend(_build_spell_summary(check_key, check_name, pass_desc, nf_desc, by_check[check_key], not_found_set))
+        if check_key in not_found_set:
+            issues.append({
+                "category": "spell",
+                "check_name": check_name,
+                "not_found": True,
+                "severity": "info",
+                "description": nf_desc,
+                "page": 1,
+                "location": "drawing",
+                "confidence": 1.0,
+            })
+            continue
+        found = by_check[check_key]
+        passed = len(found) == 0
+        summary_desc = pass_desc if passed else (f"FAIL — {found[0].description}" if len(found) == 1 else f"FAIL — {len(found)} issue(s) found.")
+        issues.append({
+            "category": "spell",
+            "check_name": check_name,
+            "passed": passed,
+            "severity": "info" if passed else "error",
+            "description": summary_desc,
+            "page": 1,
+            "location": "drawing",
+            "confidence": 1.0,
+        })
+        for item in found:
+            issues.append({
+                "category": "spell",
+                "severity": item.severity,
+                "description": item.description,
+                "page": item.page,
+                "location": item.location,
+                "confidence": item.confidence,
+            })
 
     return {"spell_issues": issues}

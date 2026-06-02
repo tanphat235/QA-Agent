@@ -42,7 +42,7 @@ def build_graph():
     g.add_edge("preprocess", "bend_check")
     g.add_edge("preprocess", "rebar_check")
 
-    # Fan in: aggregate waits for all three to complete (skipped ones finish instantly)
+    # Fan in: aggregate waits for all three to complete
     g.add_edge("spell_check",  "aggregate_results")
     g.add_edge("bend_check",   "aggregate_results")
     g.add_edge("rebar_check",  "aggregate_results")

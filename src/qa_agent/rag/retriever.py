@@ -1,113 +1,83 @@
 """
-Runtime retriever: loads the pre-built knowledge cache and returns
-domain-specific reference context for injection into node prompts.
+Knowledge retrieval for QA check nodes.
 
-Usage in a node:
-    from qa_agent.rag.retriever import get_node_context
-    task_text = _TASK + get_node_context("bend")  # "" if cache not built
+All check knowledge lives in the .md files under QA Knowledge/.
+This module provides cached readers — no pre-built cache file required.
 """
 from __future__ import annotations
 
-import json
+import base64
 import logging
 from functools import lru_cache
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_CACHE_PATH = Path(__file__).parent / "data" / "knowledge_cache.json"
-_MISTAKES_PATH = (
+_KNOWLEDGE_DIR = (
     Path(__file__).parent.parent.parent.parent
-    / "QA AI Drawing" / "QA Knowledge" / "qa_ai_common_mistakes.txt"
+    / "QA AI Drawing" / "QA Knowledge"
 )
 
-
-@lru_cache(maxsize=1)
-def _load_cache() -> dict:
-    """Load knowledge cache once; subsequent calls return the cached dict."""
-    if not _CACHE_PATH.exists():
-        logger.warning(
-            "RAG knowledge cache not found at %s — "
-            "run: python -m qa_agent.rag.knowledge_builder",
-            _CACHE_PATH,
-        )
-        return {}
-    with open(_CACHE_PATH, encoding="utf-8") as f:
-        data = json.load(f)
-    logger.info("RAG cache loaded: %d sample drawing(s).", len(data.get("sample_references", [])))
-    return data
+_IMG_EXTS: dict[str, str] = {
+    ".png":  "image/png",
+    ".jpg":  "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif":  "image/gif",
+    ".webp": "image/webp",
+}
 
 
-def _load_mistakes() -> str:
-    """Load the common-mistakes reference file (always reads fresh)."""
-    if not _MISTAKES_PATH.exists():
-        logger.warning("Common-mistakes file not found at %s", _MISTAKES_PATH)
+def _read_md_section(md_path: Path, section: str) -> str:
+    """Extract the content of a ## Section from a markdown file."""
+    if not md_path.exists():
         return ""
-    text = _MISTAKES_PATH.read_text(encoding="utf-8").strip()
-    logger.info("Common-mistakes file loaded (%d chars).", len(text))
-    return text
+    text = md_path.read_text(encoding="utf-8")
+    marker = f"## {section}"
+    start = text.find(marker)
+    if start == -1:
+        return ""
+    content = text[start + len(marker):].strip()
+    next_sec = content.find("\n## ")
+    return content[:next_sec].strip() if next_sec != -1 else content.strip()
 
 
+@lru_cache(maxsize=None)
+def get_check_prompt(domain: str, check_key: str) -> str:
+    """Read the ## Check Prompt section from the check's .md file."""
+    md_path = _KNOWLEDGE_DIR / domain / check_key / f"{check_key}.md"
+    prompt = _read_md_section(md_path, "Check Prompt")
+    if not prompt:
+        logger.warning("No '## Check Prompt' in %s/%s/%s.md", domain, check_key, check_key)
+    return prompt
+
+
+@lru_cache(maxsize=None)
+def get_check_meta(domain: str, check_key: str) -> tuple[str, str, str]:
+    """Return (display_name, pass_desc, not_found_desc) from the check's .md file."""
+    md_path = _KNOWLEDGE_DIR / domain / check_key / f"{check_key}.md"
+    name  = _read_md_section(md_path, "Display Name") or check_key.replace("_", " ").title()
+    pass_ = _read_md_section(md_path, "Pass")         or "PASS"
+    nf    = _read_md_section(md_path, "Not Found")    or "NOT FOUND"
+    return name, pass_, nf
+
+
+@lru_cache(maxsize=None)
 def get_node_images(domain: str) -> list[dict]:
     """
-    Return a list of Anthropic image content blocks for the given domain.
-    Each block: {"type": "image", "source": {"type": "base64", "media_type": ..., "data": ...}}
-    Returns [] if no images are stored for this domain.
+    Load all reference images for a domain from the knowledge filesystem.
+    Returns Anthropic image content blocks. Cached in memory after first call.
     """
-    cache = _load_cache()
-    if not cache:
+    domain_dir = _KNOWLEDGE_DIR / domain
+    if not domain_dir.exists():
         return []
-    return [
-        {"type": "image", "source": {"type": "base64", "media_type": img["media_type"], "data": img["data"]}}
-        for img in cache.get("docx_images", {}).get(domain, [])
-    ]
-
-
-def get_node_context(domain: str) -> str:
-    """
-    Return a formatted reference context block to append to a node's task prompt.
-    domain: "spell" | "bend" | "rebar"
-    Returns "" if the knowledge cache has not been built yet (graceful degradation).
-    """
-    cache = _load_cache()
-    if not cache:
-        return ""
-
-    parts: list[str] = []
-
-    # 1. Rules extracted from the QA knowledge docx
-    docx_text = cache.get("docx_knowledge", {}).get(domain, "")
-    if docx_text:
-        parts.append(
-            "QA KNOWLEDGE BASE RULES:\n"
-            "⚠ Any numeric values in the examples below are ILLUSTRATIVE ONLY.\n"
-            "Always read actual wall_width, Cv, and rebar diameters from THIS drawing.\n\n"
-            + docx_text
-        )
-
-    # 2. Reference patterns extracted from approved sample drawings
-    ref_blocks: list[str] = []
-    for entry in cache.get("sample_references", []):
-        text = entry.get("domains", {}).get(domain, "")
-        if text:
-            ref_blocks.append(f"[Reference: {entry['filename']}]\n{text}")
-    if ref_blocks:
-        parts.append(
-            "REFERENCE PATTERNS FROM APPROVED DRAWINGS:\n"
-            + "\n\n".join(ref_blocks)
-        )
-
-    mistakes = _load_mistakes()
-    if mistakes:
-        parts.append(mistakes)
-
-    if not parts:
-        return ""
-
-    return (
-        "\n\n═══════════════════════════════════\n"
-        "RAG REFERENCE KNOWLEDGE\n"
-        "(Use the rules and approved-drawing patterns below to calibrate your judgement.)\n"
-        "═══════════════════════════════════\n"
-        + "\n\n".join(parts)
-    )
+    images: list[dict] = []
+    for img_file in sorted(domain_dir.rglob("*")):
+        ext = img_file.suffix.lower()
+        if ext not in _IMG_EXTS:
+            continue
+        data = base64.standard_b64encode(img_file.read_bytes()).decode()
+        images.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": _IMG_EXTS[ext], "data": data},
+        })
+    return images

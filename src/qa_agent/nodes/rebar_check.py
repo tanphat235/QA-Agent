@@ -6,7 +6,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.outputs import LLMResult
 
 from qa_agent.state import GraphState, Issue
-from qa_agent.rag.retriever import get_node_context, get_node_images
+from qa_agent.rag.retriever import get_node_images, get_check_prompt, get_check_meta
 
 logger = logging.getLogger(__name__)
 
@@ -55,79 +55,9 @@ the examples below — instead add the affected check key to not_found.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\
 """
 
-_CHECK_PROMPTS: dict[str, str] = {
-    "spacer_label": """\
-CHECK — Spacer / Clamp Label Suffix (spacer_label)
-Use the "-M.E." suffix itself to identify which Pos numbers are spacers/clamps, then verify every
-label for those positions also carries the suffix.
-
-PROCEDURE — two steps:
-
-  STEP 1 — Identify spacer/clamp positions:
-    Scan the entire drawing for any label that ends with "-M.E." (e.g. "11-M.E.", "Ø8-M.E.", "Pos 17-M.E.").
-    Extract the Pos number from each such label.  These are the spacer/clamp positions.
-    Example: if you see "11-M.E." and "17-M.E.", then Pos 11 and Pos 17 are spacer/clamp positions.
-
-  STEP 2 — Check ALL labels for each identified spacer/clamp Pos:
-    For every Pos identified in Step 1, find every place in the drawing where that Pos is labeled
-    (Stabliste rows, bending schemas, section callouts, Bewehrung annotations, dimension leaders, etc.).
-    Flag any label of that Pos that does NOT end with "-M.E.".
-
-EXAMPLE:
-  Pos 11 is found labeled "11-M.E." in the schema → Pos 11 is a spacer.
-  If "11" appears in the Stabliste or a section without the "-M.E." suffix → FAIL.
-  If all occurrences of Pos 11 include "-M.E." → PASS for Pos 11.
-
-Do NOT flag Pos numbers that never appear with "-M.E." anywhere — those are not spacers/clamps.
-Do NOT flag if you cannot clearly read the label.\
-""",
-
-    "pin_width_vertical": """\
-CHECK — Vertical Pin Width (pin_width_vertical)
-IDENTIFICATION — locate vertical pins using their bending schema:
-  Vertical pins are schematized in the SIDE section view of the Bewehrung (e.g. Schnitt a-a).
-  In that view, the pin schema appears as a narrow U-shape or rectangular stirrup whose long
-  dimension runs vertically (tall and narrow). The width dimension labeled on that schema is
-  the value to verify.
-
-WIDTH FORMULA (use values from STEP A, not the illustration numbers):
-  Required width = wall_width – 2 × Cv
-  [Formula illustration only — values are not from any real drawing]:
-    e.g. if wall_width were 20 cm and Cv were 2.0 cm → required = 20 – 4.0 = 16 cm
-
-Flag if the labeled pin width clearly differs from the required calculated value.
-If wall_width, Cv, or the labeled pin dimension cannot be found, add "pin_width_vertical" to not_found.\
-""",
-
-    "pin_width_horizontal": """\
-CHECK — Horizontal Pin Width (pin_width_horizontal)
-IDENTIFICATION — locate horizontal pins using their bending schema:
-  Horizontal pins are schematized in the BOTTOM / HORIZONTAL cross-section view of the Bewehrung
-  (e.g. Schnitt b-b). In that view, the pin schema appears as a flat rectangular stirrup whose
-  long dimension runs horizontally (wide and shallow). The width dimension labeled on that schema
-  is the value to verify.
-
-WIDTH FORMULA (use values from STEP A, not the illustration numbers):
-  Required width = wall_width – 2 × Cv – 2 × Ø_layer1   (round down to nearest mm)
-  [Formula illustration only — values are not from any real drawing]:
-    e.g. if wall_width were 20 cm, Cv=2.0 cm, Ø_layer1=1.0 cm → 20 – 4.0 – 2.0 = 14 cm
-
-Flag if the labeled horizontal pin width clearly differs from the calculated value.
-If any required dimension (wall_width, Cv, Ø_layer1, or pin width) cannot be found, add "pin_width_horizontal" to not_found.\
-""",
-
-    "spacer_width": """\
-CHECK — Spacer / Clamp Width (spacer_width)
-For each spacer or clamp element, verify its width using values from STEP A:
-  Required width = wall_width – 2 × Cv + 2 × Ø_spacer   (round up to nearest mm)
-  where Ø_spacer = physical diameter of the spacer/clamp wire, read from its label in this drawing.
-  [Formula illustration only — values are not from any real drawing]:
-    e.g. if wall_width=20, Cv=2.0, Ø_spacer=0.6 → 20 – 4.0 + 1.2 = 17.2 → 18 cm
-
-Flag if the labeled spacer/clamp width clearly differs from the calculated value.
-If any required dimension (wall_width, Cv, or Ø_spacer) cannot be found, add "spacer_width" to not_found.\
-""",
-}
+_REBAR_CHECKS = ["spacer_label", "pin_width_vertical", "pin_width_horizontal", "spacer_width"]
+_CHECK_PROMPTS: dict[str, str] = {k: get_check_prompt("rebar", k) for k in _REBAR_CHECKS}
+_CHECK_META: dict[str, tuple[str, str, str]] = {k: get_check_meta("rebar", k) for k in _REBAR_CHECKS}
 
 # These three checks all require STEP A dimension extraction.
 _DIMENSION_CHECKS = {"pin_width_vertical", "pin_width_horizontal", "spacer_width"}
@@ -157,37 +87,12 @@ def _build_rebar_task(enabled_sub: list[str] | None) -> str:
     active = list(_CHECK_PROMPTS.keys()) if enabled_sub is None else [k for k in enabled_sub if k in _CHECK_PROMPTS]
     check_keys = " | ".join(f'"{k}"' for k in active)
     parts: list[str] = [_TASK_INTRO]
-    # STEP A only needed when at least one dimension-based check is active
     if any(k in _DIMENSION_CHECKS for k in active):
         parts.append(_STEP_A)
     parts.append("\n\n".join(_CHECK_PROMPTS[k] for k in active))
     parts.append(_TASK_OUTRO_TPL.format(check_keys=check_keys))
     return "\n\n".join(parts)
 
-# Python generates pass/fail summaries — LLM never needs to produce them.
-# Tuple: (display_name, pass_desc, not_found_desc)
-_CHECK_META: dict[str, tuple[str, str, str]] = {
-    "spacer_label": (
-        "Spacer / Clamp Label Suffix",
-        'PASS — all spacer and clamp labels include the "-M.E." suffix.',
-        "NOT FOUND — no '-M.E.' labels found on sheet to identify spacer/clamp positions.",
-    ),
-    "pin_width_vertical": (
-        "Vertical Pin Width",
-        "PASS — all vertical pin widths match wall_width – 2×Cv.",
-        "NOT FOUND — wall thickness, concrete cover (Cv), or labeled pin dimension not visible.",
-    ),
-    "pin_width_horizontal": (
-        "Horizontal Pin Width",
-        "PASS — all horizontal pin widths match wall_width – 2×Cv – 2×Ø_layer1.",
-        "NOT FOUND — wall thickness, Cv, outer rebar diameter, or labeled pin dimension not visible.",
-    ),
-    "spacer_width": (
-        "Spacer / Clamp Width",
-        "PASS — all spacer/clamp widths match wall_width – 2×Cv + 2×Ø_spacer.",
-        "NOT FOUND — wall thickness, Cv, or spacer wire diameter not visible.",
-    ),
-}
 
 
 class _UsageCallback(BaseCallbackHandler):
@@ -220,7 +125,7 @@ class _RebarIssue(BaseModel):
 
 
 class _RebarResult(BaseModel):
-    issues: list[_RebarIssue]  # required — no default so missing field raises ValidationError
+    issues: list[_RebarIssue]
     not_found: list[str] = Field(default_factory=list, description="Check keys where required drawing dimensions were not visible")
 
 
@@ -229,7 +134,7 @@ def rebar_check(state: GraphState) -> dict:
     enabled_sub = (state.get("enabled_sub_checks") or {}).get("rebar")
 
     llm = ChatAnthropic(  # type: ignore[call-arg]
-        model="claude-sonnet-4-5",  # type: ignore[call-arg]
+        model="claude-sonnet-4-6",  # type: ignore[call-arg]
         temperature=0,  # type: ignore[call-arg]
         max_tokens=4096,  # type: ignore[call-arg]
     ).with_structured_output(_RebarResult).with_retry(stop_after_attempt=2)
@@ -246,7 +151,7 @@ def rebar_check(state: GraphState) -> dict:
         "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data},
         "cache_control": {"type": "ephemeral"},
     })
-    human_content.append({"type": "text", "text": _build_rebar_task(enabled_sub) + get_node_context("rebar")})
+    human_content.append({"type": "text", "text": _build_rebar_task(enabled_sub)})
 
     result: _RebarResult = llm.invoke(  # type: ignore[assignment]
         [
@@ -257,7 +162,6 @@ def rebar_check(state: GraphState) -> dict:
     )
     print(f"[usage][rebar_check] raw items from LLM: {len(result.issues)}")
 
-    # Group LLM findings by check category, filter low-confidence
     by_check: dict[str, list[_RebarIssue]] = {k: [] for k in _CHECK_META}
     for item in result.issues:
         if item.confidence >= 0.60 and item.check in by_check:
@@ -266,7 +170,6 @@ def rebar_check(state: GraphState) -> dict:
     not_found_set = set(result.not_found or [])
     issues: list[Issue] = []
 
-    # Python always generates a guaranteed pass/fail/not_found summary for every check
     for check_key, (check_name, pass_desc, nf_desc) in _CHECK_META.items():
         if enabled_sub is not None and check_key not in enabled_sub:
             continue
@@ -284,12 +187,7 @@ def rebar_check(state: GraphState) -> dict:
             continue
         found = by_check[check_key]
         passed = len(found) == 0
-        if passed:
-            summary_desc = pass_desc
-        elif len(found) == 1:
-            summary_desc = f"FAIL — {found[0].description}"
-        else:
-            summary_desc = f"FAIL — {len(found)} issue(s) found."
+        summary_desc = pass_desc if passed else (f"FAIL — {found[0].description}" if len(found) == 1 else f"FAIL — {len(found)} issue(s) found.")
         issues.append({
             "category": "rebar",
             "check_name": check_name,
