@@ -28,3 +28,4 @@ Verify the sheet contains both:
   • Einbauteilliste (embedded parts list)
   • Montageteilliste (assembly/mounting parts list)
 Flag each table that is clearly absent.
+If the sheet is too illegible to determine whether these tables are present, add "parts_lists" to not_found.

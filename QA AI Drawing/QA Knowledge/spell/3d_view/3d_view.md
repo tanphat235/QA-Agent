@@ -46,3 +46,4 @@ HOW TO SCAN:
 
 If ANY such view exists anywhere on the sheet → PASS immediately, do NOT flag.
 If after scanning the entire sheet no such view exists → flag as an error.
+If the sheet is too low-resolution or illegible to scan for views, add "3d_view" to not_found.

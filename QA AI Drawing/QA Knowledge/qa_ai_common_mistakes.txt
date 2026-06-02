@@ -1,12 +1,12 @@
-═══════════════════════════════════════════════════════════════
+===============================================================
 KNOWN AI CHECK MISTAKES — READ BEFORE MAKING ANY JUDGEMENT
 These are real cases where the AI previously checked incorrectly.
 Use them to avoid the same errors.
-═══════════════════════════════════════════════════════════════
+===============================================================
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+------------------------------------------
 BENDING & SCHEDULE CHECKS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+------------------------------------------
 
 [CHECK: Last Position Number vs Title Block]
 
@@ -37,9 +37,9 @@ BENDING & SCHEDULE CHECKS
   CORRECT: The bar diameter MUST be read explicitly from the schema label or Stabliste row. In that case the bar was Ø8 (min. dbr for Ø8 = 3.2 cm → PASS). Never guess or infer the bar diameter. If unclear, do NOT flag.
 
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+------------------------------------------
 SPELLING & TITLE BLOCK CHECKS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+------------------------------------------
 
 [CHECK: Section Name Completeness]
 
@@ -49,9 +49,9 @@ SPELLING & TITLE BLOCK CHECKS
 
 [CHECK: Parts Quantities]
 
-[MISTAKE] Parts Label Consistency / Part Labels in Views — Wrong NOT FOUND condition
-  WRONG: Marking parts_quantities or parts_labels as NOT FOUND just because one of the two tables (Einbauteilliste or Montageteilliste) is absent. A drawing does not need both tables.
-  CORRECT: Only mark parts_quantities or parts_labels as NOT FOUND when NEITHER Einbauteilliste NOR Montageteilliste is present on the sheet. If at least one table is present, perform the check against whichever table(s) exist. Cross-reference part labels visible in views only against the tables that are actually on the sheet.
+[MISTAKE] Parts Label Consistency — Wrong NOT FOUND condition
+  WRONG: Marking parts_quantities as NOT FOUND just because one of the two tables (Einbauteilliste or Montageteilliste) is absent. A drawing does not need both tables.
+  CORRECT: Only mark parts_quantities as NOT FOUND when NEITHER Einbauteilliste NOR Montageteilliste is present on the sheet. If at least one table is present, perform the check against whichever table(s) exist. Cross-reference part labels visible in views only against the tables that are actually on the sheet.
 
 [CHECK: 3D View]
 
@@ -64,9 +64,9 @@ SPELLING & TITLE BLOCK CHECKS
   CORRECT: The standard 3D view in precast wall drawings is an UNLABELED axonometric line drawing placed in a corner of the sheet. It shows the entire wall element tilted at ~45° so the viewer sees the front face AND one or more side/top edges at the same time — giving a complete "overview" impression of the 3D wall body. Typical appearance: tall rectangular slab shown diagonally, with embedded hardware (anchors, bolts, rebar tails) visible on the face, drawn in pure linework. This view does NOT need: a title, a "3D" label, shading, fill, or a scale. HOW TO SCAN: look at ALL corners and margins. If any region shows a wall-shaped rectangular outline drawn at a diagonal angle (clearly not a plan or elevation), that IS the 3D view → check PASSES immediately.
 
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+------------------------------------------
 REBAR LABEL & DIMENSION CHECKS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+------------------------------------------
 
 [CHECK: Spacer/Clamp Label Suffix]
 

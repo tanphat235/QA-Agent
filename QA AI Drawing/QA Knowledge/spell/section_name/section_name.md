@@ -33,3 +33,4 @@ A view satisfies the requirement if it is labeled "Schnitt X-X", "Draufsicht X-X
 view type (top view, cross-section, detail) that carries the same designation number X-X.
 Flag only if NO view of any type with that designation number exists anywhere on the sheet.
 Do NOT flag if the view exists but is located elsewhere on the sheet.
+If no Ansicht or Bewehrung area is visible on the sheet (making it impossible to identify any section cut designations), add "section_name" to not_found.

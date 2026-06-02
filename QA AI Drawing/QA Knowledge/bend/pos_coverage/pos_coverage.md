@@ -33,33 +33,31 @@ Example: in the Stabliste contains positions 1–19 and 100–104, each of these
 ## Check Prompt
 
 CHECK — Pos Coverage in Schemas (pos_coverage)
-Cross-reference every Pos number in the Stabliste with ALL representations visible anywhere on the sheet.
+Every Pos number listed in the Stabliste must have a corresponding rebar schema visible on the sheet.
+See the reference images for examples of what a rebar schema looks like.
 
-WHAT COUNTS AS COVERAGE FOR A POS — any of the following satisfies the requirement:
-  A. A bar-shape sketch (bent or straight) shown in the margin or alongside a section view
-     (Schnitt a-a, Schnitt b-b, Schnitt c-c, Bewehrung, etc.) with the Pos number adjacent.
-     The sketch can be as simple as an L-shape, U-shape, or straight line segment.
-  B. A bar annotation in any section or plan view that shows:
-       Pos number  +  quantity × diameter  (e.g. "2 ø 12" or "4 × Ø8")
-     Even without a separate drawn shape — if the Pos is labeled in a section with its bar
-     dimensions, that counts as coverage.
-  C. An annotation of the form  "n ø d / spacing"  or  "n ø d -M.E."  next to a position
-     in any Schnitt or Bewehrung view — distributed and spacer bars are covered this way.
-  D. A combined label like  "n × Ø d  L=xxx cm"  shown anywhere on the sheet adjacent to
-     a bar representation, whether or not a formal schema box is drawn.
-  E. A shared schema or note explicitly listing multiple Pos numbers covers ALL of them.
+WHAT IS A REBAR SCHEMA:
+  A rebar schema is a drawn bar-shape figure (straight, L-shaped, U-shaped, or multi-bent) with:
+    • Dimension lines on each segment of the bar
+    • Pos number adjacent to the figure
+    • Quantity, diameter, and total length label in the format:
+        (n) Pos ø d  L = xxx cm
+      e.g. (2) 38 ø 10 L = 195 cm  |  (4) 37 ø 10 L = 92 cm
+  All four elements — shape, dimensions, Pos number, and L= label — must be present.
+  A bare annotation in a section view without a drawn shape does NOT count as a schema.
 
-WHERE TO LOOK — search ALL of the following areas:
-  • Left and right margin columns of every Schnitt section (a-a, b-b, c-c, etc.)
-  • Top and bottom margin areas of every Schnitt section
-  • The Bewehrung plan/elevation area — inline sketches with leader lines
-  • Any Detail panels or callout boxes on the sheet
-  • Dimension annotation areas around section cross-sections
+WHERE TO LOOK:
+  • Margin columns beside every Schnitt section (a-a, b-b, c-c, etc.)
+  • Schema panels grouped in the Bewehrung area
+  • Any dedicated schema block anywhere on the sheet
 
 PROCEDURE:
   1. List every Pos number from the Stabliste.
-  2. Scan ALL areas listed above for any coverage representation (A–E) for each Pos.
-  3. Only flag a Pos if you found absolutely NO coverage after searching the full sheet.
+  2. For each Pos, find its rebar schema (drawn shape + dimensions + Pos + L= label) on the sheet.
+  3. Flag every Pos for which NO schema is found after scanning the entire sheet.
+     In the description, list each missing Pos number explicitly.
 
-FLAG only if confidence ≥ 0.80 that coverage is genuinely absent from the ENTIRE sheet.
-Do NOT flag if coverage might exist but is small, partially hidden, or hard to read.
+PASS only when every Stabliste Pos has a visible schema.
+Do NOT flag a Pos if its schema exists but is small or located in an unexpected area — only flag if
+genuinely absent after a full search of the sheet.
+If the Stabliste is not visible on the sheet, add "pos_coverage" to not_found.

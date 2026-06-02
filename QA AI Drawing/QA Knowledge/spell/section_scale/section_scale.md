@@ -28,3 +28,4 @@ CHECK — Scale Consistency (section_scale)
 Compare every explicit scale label (M 1:XX) on views or sections against the title block scale.
 Flag any view whose labeled scale clearly differs from the title block value.
 Only flag where both scales are simultaneously visible and unambiguously different.
+If the title block scale field is not visible, or no scale labels (M 1:XX) appear on any view, add "section_scale" to not_found.
