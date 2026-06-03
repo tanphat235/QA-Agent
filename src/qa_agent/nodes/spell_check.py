@@ -22,6 +22,11 @@ CRITICAL — READ FROM PDF ONLY:
   descriptions) from memory — read only what is visibly printed in the drawing.
   Any number or label not visible in the PDF must not be referenced.
 
+CRITICAL — NEVER SILENTLY PASS:
+  If any information required by a check is missing, not visible, or not readable in the drawing,
+  you MUST add that check key to not_found. Do NOT assume a check passes just because you cannot
+  find the relevant elements. Missing prerequisite = not_found, not pass.
+
 German terminology:
   Schnitt X-X = section/cross-section | Ansicht = elevation/formwork view | Wandansicht = wall elevation
   Bewehrung = reinforcement/rebar | Stabliste = bar list/rebar schedule | Mattenstahlliste = mesh rebar list
