@@ -27,5 +27,9 @@ CHECK — Parts Lists Present (parts_lists)
 Verify the sheet contains both:
   • Einbauteilliste (embedded parts list)
   • Montageteilliste (assembly/mounting parts list)
-Flag each table that is clearly absent.
-If the sheet is too illegible to determine whether these tables are present, add "parts_lists" to not_found.
+Flag each table that is clearly absent from the sheet.
+
+NOT FOUND conditions — add "parts_lists" to not_found (do NOT silently pass) if ANY of:
+  • The area of the sheet where these lists would appear is not visible or not legible
+  • The sheet is too low-resolution or illegible to determine whether these tables are present
+  • Neither table can be confirmed present OR absent (cannot evaluate at all)

@@ -1,4 +1,5 @@
 import logging
+import re
 from pydantic import BaseModel, Field
 from langchain_anthropic import ChatAnthropic
 from langchain_core.callbacks import BaseCallbackHandler
@@ -26,6 +27,20 @@ Inspect visible text, annotations, views, and tables in this precast wall struct
 Report ONLY issues you can directly observe in the PDF.\
 """
 
+# Drop LLM items that describe a passing result instead of an actual violation.
+_PASS_ITEM_RE = re.compile(
+    r"[-–—]\s*pass(?:es)?\b"
+    r"|^pass(?:es)?\b"
+    r"|\bthis pass(?:es)?\b"
+    r"|\bno\b.{0,80}\bfound\b"
+    r"|\bno issue\b"
+    r"|\bexactly meets\b"
+    r"|\bdeclared\b.{0,30}\bmatches\b.{0,30}\bcalculated\b"
+    r"|\bmatches?\b.{0,30}\brequired\b"
+    r"|\bvalues?\s+matches?\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+
 _SPELL_CHECKS = [
     "spelling", "section_name", "component_name", "section_scale", "grid_lines",
     "parts_lists", "parts_quantities", "3d_view", "drawing_title",
@@ -47,10 +62,12 @@ OUTPUT FORMAT — one item per finding
   not_found:   list of check keys where prerequisite drawing elements were absent, e.g. ["grid_lines"]
 
 RULES:
-  • Only report issues directly visible and unambiguous.
+  • OUTPUT ONLY actual problems — items that clearly do not comply.
+  • Do NOT output any item to describe a passing check or a verified-correct result.
+    (e.g. "all section names present" or "no spelling errors found" → output nothing for that check)
+  • An empty issues list means ALL enabled checks passed — that is the correct output when no problems exist.
   • Do NOT flag uncertain or marginally readable text.
-  • If prerequisite drawing elements are absent, add the check key to not_found instead of skipping.
-  • If no issues are found for all checks, return an empty issues list and an empty not_found list — that is correct.\
+  • If prerequisite drawing elements are absent, add the check key to not_found instead of skipping.\
 """
 
 
@@ -132,7 +149,7 @@ def spell_check(state: GraphState) -> dict:
 
     by_check: dict[str, list[_SpellIssue]] = {k: [] for k in _CHECK_META}
     for item in result.issues:
-        if item.confidence >= 0.60 and item.check in by_check:
+        if item.confidence >= 0.60 and item.check in by_check and not _PASS_ITEM_RE.search(item.description):
             by_check[item.check].append(item)
 
     not_found_set = set(result.not_found or [])

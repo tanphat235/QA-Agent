@@ -35,4 +35,7 @@ If the field is bilingual, a match with either the German part (before "/") or t
 Minor punctuation differences (trailing period, dash spacing) are acceptable — flag only if the
 semantic content clearly differs (e.g. different element name, wrong axis label).
 
-If the Drawing Title field or the Title Block is not visible, add "drawing_title" to not_found.
+NOT FOUND conditions — add "drawing_title" to not_found (do NOT silently pass) if ANY of:
+  • The title block is not visible on the sheet
+  • The Drawing Title field inside the title block is not visible or not readable
+  • The drawing title shown on the sheet (outside the title block) is not visible or not readable

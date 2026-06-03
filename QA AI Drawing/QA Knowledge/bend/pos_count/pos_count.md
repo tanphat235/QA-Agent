@@ -41,10 +41,19 @@ PROCEDURE for Mattenstahlliste (only if the table is present on the sheet):
   4. If highest_mesh_pos ≠ title_block_value → flag as an issue.
 
 IMPORTANT:
+  • Read ONLY from the submitted PDF drawing — do NOT use any values from reference/example images.
+    Any circled numbers or title blocks visible in the reference images are examples only and must
+    be completely ignored. Only values in the actual drawing PDF are valid inputs for this check.
+  • Read the Stabliste and title block from THE SAME SHEET in the PDF. Do not compare values
+    across different sheets or different drawings.
   • The presence of Pos 100, 101, 102, … in the Stabliste is normal and expected.
     These are special accessory bars. They do NOT affect letzte Stabstahlposition at all.
     If the title block value equals the highest regular Pos (≤99), the check PASSES — period.
-  • Only flag when the numbers clearly and unambiguously differ.
+  • Only flag when the numbers clearly and unambiguously differ on the same sheet.
 
-If "letzte Stabstahlposition" is not visible in the title block, add "pos_count" to not_found.
-If Mattenstahlliste is absent, skip the mesh part of this check (do NOT add to not_found for that).
+NOT FOUND conditions — add "pos_count" to not_found (do NOT silently pass) if ANY of:
+  • The Stabliste is not visible on the sheet
+  • The title block is not visible on the sheet
+  • The "letzte Stabstahlposition" field is not visible in the title block
+
+If Mattenstahlliste is absent, skip the mesh part of this check only (do NOT add to not_found for that).

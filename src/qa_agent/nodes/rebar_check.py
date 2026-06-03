@@ -1,4 +1,5 @@
 import logging
+import re
 from pydantic import BaseModel, Field
 from langchain_anthropic import ChatAnthropic
 from langchain_core.callbacks import BaseCallbackHandler
@@ -55,6 +56,20 @@ the examples below — instead add the affected check key to not_found.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\
 """
 
+# Drop LLM items that describe a passing result instead of an actual violation.
+_PASS_ITEM_RE = re.compile(
+    r"[-–—]\s*pass(?:es)?\b"
+    r"|^pass(?:es)?\b"
+    r"|\bthis pass(?:es)?\b"
+    r"|\bno\b.{0,80}\bfound\b"
+    r"|\bno issue\b"
+    r"|\bexactly meets\b"
+    r"|\bdeclared\b.{0,30}\bmatches\b.{0,30}\bcalculated\b"
+    r"|\bmatches?\b.{0,30}\brequired\b"
+    r"|\bvalues?\s+matches?\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+
 _REBAR_CHECKS = ["spacer_label", "pin_width_vertical", "pin_width_horizontal", "spacer_width"]
 _CHECK_PROMPTS: dict[str, str] = {k: get_check_prompt("rebar", k) for k in _REBAR_CHECKS}
 _CHECK_META: dict[str, tuple[str, str, str]] = {k: get_check_meta("rebar", k) for k in _REBAR_CHECKS}
@@ -76,10 +91,12 @@ OUTPUT FORMAT — one item per finding
   not_found:   list of check keys where required drawing information was not visible, e.g. ["pin_width_vertical"]
 
 RULES:
-  • Only report issues directly visible and unambiguous.
+  • OUTPUT ONLY actual problems — labels missing suffix, or dimension values that do not match.
+  • Do NOT output any item to describe a passing check or a verified-correct dimension.
+    (e.g. "declared 27 cm matches calculated 27 cm" → output nothing for that check)
+  • An empty issues list means ALL enabled checks passed — that is the correct output when no problems exist.
   • When flagging a dimension issue, state the formula and both values in the description.
-  • If required dimensions or values are not visible in the drawing, add the check key to not_found instead of skipping.
-  • If no issues are found for all checks, return an empty issues list and an empty not_found list — that is correct.\
+  • If required dimensions or values are not visible in the drawing, add the check key to not_found instead of skipping.\
 """
 
 
@@ -164,7 +181,7 @@ def rebar_check(state: GraphState) -> dict:
 
     by_check: dict[str, list[_RebarIssue]] = {k: [] for k in _CHECK_META}
     for item in result.issues:
-        if item.confidence >= 0.60 and item.check in by_check:
+        if item.confidence >= 0.60 and item.check in by_check and not _PASS_ITEM_RE.search(item.description):
             by_check[item.check].append(item)
 
     not_found_set = set(result.not_found or [])

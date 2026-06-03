@@ -53,11 +53,14 @@ WHERE TO LOOK:
 
 PROCEDURE:
   1. List every Pos number from the Stabliste.
-  2. For each Pos, find its rebar schema (drawn shape + dimensions + Pos + L= label) on the sheet.
-  3. Flag every Pos for which NO schema is found after scanning the entire sheet.
-     In the description, list each missing Pos number explicitly.
+  2. For each Pos, search the entire sheet for its rebar schema (drawn shape + dimensions + Pos + L= label).
+  3. For every Pos whose schema is NOT found → output a finding that names the missing Pos explicitly.
+     Example description: "Pos 7 has no rebar schema on the sheet."
+  4. List ALL missing Pos numbers — one finding per missing Pos, or combine into one finding listing all.
 
 PASS only when every Stabliste Pos has a visible schema.
-Do NOT flag a Pos if its schema exists but is small or located in an unexpected area — only flag if
-genuinely absent after a full search of the sheet.
-If the Stabliste is not visible on the sheet, add "pos_coverage" to not_found.
+Do NOT flag a Pos if its schema exists but is small or in an unexpected area — only flag if genuinely absent.
+
+NOT FOUND conditions — add "pos_coverage" to not_found (do NOT silently pass) if:
+  • The Stabliste is not visible on the sheet (cannot determine which Pos need schemas)
+  • The Bewehrung / schema area of the sheet is not legible enough to scan

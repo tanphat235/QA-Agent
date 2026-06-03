@@ -1,4 +1,5 @@
 import logging
+import re
 from pydantic import BaseModel, Field
 from langchain_anthropic import ChatAnthropic
 from langchain_core.callbacks import BaseCallbackHandler
@@ -47,10 +48,12 @@ OUTPUT FORMAT — one item per finding
   not_found:   list of check keys where required drawing information was not visible, e.g. ["mesh_pos", "mesh_ratio"]
 
 RULES:
-  • Only report what is directly visible and unambiguous in the drawing.
+  • OUTPUT ONLY actual problems — values that do not comply, missing items, or clear errors.
+  • Do NOT output any item to describe a passing check, a matching value, or a verified-correct result.
+    (e.g. "all values match" or "no issues found for X" → output nothing for that check)
+  • An empty issues list means ALL enabled checks passed — that is the correct output when no problems exist.
   • Do NOT infer or estimate values not shown.
-  • If required information is absent from the drawing, add the check key to not_found instead of skipping.
-  • If no issues are found for all checks, return an empty issues list and an empty not_found list — that is correct.\
+  • If required information is absent from the drawing, add the check key to not_found instead of skipping.\
 """
 
 
@@ -61,6 +64,20 @@ def _build_bend_task(enabled_sub: list[str] | None) -> str:
     return _TASK_INTRO + "\n\n" + blocks + _TASK_OUTRO_TPL.format(check_keys=check_keys)
 
 
+
+# Drop LLM items that describe a passing result instead of an actual violation.
+_PASS_ITEM_RE = re.compile(
+    r"[-–—]\s*pass(?:es)?\b"
+    r"|^pass(?:es)?\b"
+    r"|\bthis pass(?:es)?\b"
+    r"|\bno\b.{0,80}\bfound\b"
+    r"|\bno issue\b"
+    r"|\bexactly meets\b"
+    r"|\bdeclared\b.{0,30}\bmatches\b.{0,30}\bcalculated\b"
+    r"|\bmatches?\b.{0,30}\brequired\b"
+    r"|\bvalues?\s+matches?\b",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 _HIGH_CONFIDENCE_CHECKS = {"pos_coverage"}
 
@@ -137,7 +154,7 @@ def bend_check(state: GraphState) -> dict:
         if item.check not in by_check:
             continue
         threshold = 0.80 if item.check in _HIGH_CONFIDENCE_CHECKS else 0.60
-        if item.confidence >= threshold:
+        if item.confidence >= threshold and not _PASS_ITEM_RE.search(item.description):
             by_check[item.check].append(item)
 
     not_found_set = set(result.not_found or [])

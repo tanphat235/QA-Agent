@@ -29,4 +29,4 @@ This check requires BOTH of the following tables to be present on the sheet:
   • Matten-Schneideskizze (mesh cut sketch)
 If both are present, verify each mesh Pos listed in the Mattenstahlliste appears in at least one view of the Matten-Schneideskizze.
 Flag any mesh Pos that is listed in the Mattenstahlliste but has no corresponding entry in the Matten-Schneideskizze.
-If either Mattenstahlliste or Matten-Schneideskizze is absent from the sheet, add "mesh_pos" to not_found.
+If either Mattenstahlliste or Matten-Schneideskizze is absent from the sheet, add "mesh_pos" to not_found — do NOT silently pass.

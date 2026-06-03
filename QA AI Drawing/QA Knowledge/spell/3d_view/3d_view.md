@@ -45,5 +45,5 @@ HOW TO SCAN:
   wall-shaped outline drawn at a diagonal angle (showing depth), that IS the 3D view.
 
 If ANY such view exists anywhere on the sheet → PASS immediately, do NOT flag.
-If after scanning the entire sheet no such view exists → flag as an error.
-If the sheet is too low-resolution or illegible to scan for views, add "3d_view" to not_found.
+If after scanning the entire sheet no such view is found → add "3d_view" to not_found, do NOT silently pass.
+If the sheet is too low-resolution or illegible to scan for views → add "3d_view" to not_found.

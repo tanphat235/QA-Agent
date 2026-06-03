@@ -26,4 +26,9 @@ Check whether the component name on the Wandansicht matches the drawing name in 
 CHECK — Component Name vs Title Block (component_name)
 Verify the component/element name on the Wandansicht matches the drawing name in the title block.
 Flag only where BOTH are visible and they clearly differ.
-If only one of the two (Wandansicht label or title block name) is visible, add "component_name" to not_found.
+
+NOT FOUND conditions — add "component_name" to not_found (do NOT silently pass) if ANY of:
+  • The Wandansicht view is not visible on the sheet
+  • The component/element name label on the Wandansicht is not visible or not readable
+  • The title block is not visible on the sheet
+  • The drawing name field in the title block is not visible or not readable

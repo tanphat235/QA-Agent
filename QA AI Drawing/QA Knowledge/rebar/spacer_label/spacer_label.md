@@ -34,24 +34,40 @@ label for those positions also carries the suffix.
 PROCEDURE — two steps:
 
   STEP 1 — Identify spacer/clamp positions:
-    Scan the entire drawing for any label that contains "-M.E." adjacent to a Pos number.
-    The Pos number may appear BEFORE or AFTER "-M.E.":
-      • Pos before: "11-M.E.", "Ø8-M.E.", "Pos 17-M.E."
-      • Pos after:  "-M.E. 11", "-M.E. 17", "M.E. 11"
-    Extract the Pos number from each such label. These are the spacer/clamp positions.
-    Example: if you see "11-M.E." or "-M.E. 11", then Pos 11 is a spacer/clamp position.
+    A Pos number is ONLY the number drawn inside a circle or oval shape in the drawing.
+    Numbers that appear without a circle (quantity counts, bar diameters, spacing values) are
+    NOT Pos numbers — do NOT use them as Pos identifiers.
 
-  STEP 2 — Check ALL labels for each identified spacer/clamp Pos:
-    For every Pos identified in Step 1, find every place in the drawing where that Pos is labeled
-    (Stabliste rows, bending schemas, section callouts, Bewehrung annotations, dimension leaders, etc.).
-    Flag any label of that Pos that does NOT include "-M.E." (regardless of whether the Pos number
-    appears before or after "-M.E.").
+    Scan the drawing for labels where a CIRCLED number appears together with "-M.E.":
+      • Circled pos before: ⑰ ø 8/45 -M.E.   →  Pos 17 is a spacer
+      • Circled pos after:  -M.E. ⑪             →  Pos 11 is a spacer
+    Extract ONLY the numbers that are visually enclosed in a circle/oval. These are the spacer Pos.
 
-EXAMPLE:
-  Pos 11 is found labeled "11-M.E." or "-M.E. 11" in the schema → Pos 11 is a spacer.
-  If "11" appears in the Stabliste or a section without "-M.E." anywhere → FAIL.
-  If all occurrences of Pos 11 include "-M.E." (in any position) → PASS for Pos 11.
+    CRITICAL — do NOT misread label parts as Pos numbers:
+      • In "2x 11 ø 12/15", the "11" is a bar quantity (not circled) → NOT a Pos number
+      • In "4 ø 8/45 -M.E.", the "4" is a count (not circled) → NOT a Pos number
+      • Only a number inside a drawn circle or oval is a Pos number
+
+  STEP 2 — Check ONLY fully visible section view callouts:
+    For every circled Pos identified in Step 1, scan section view callouts in the Schnitt views.
+    A callout is only checkable if ALL of the following are true:
+      • The full label text is clearly readable (not cut off, not at the drawing edge)
+      • The circled Pos number is visible and unambiguous
+      • The "-M.E." portion is either present or clearly absent — not just hidden by truncation
+
+    Flag a callout ONLY when it is fully visible and clearly missing "-M.E.".
+
+    STRICTLY EXCLUDED — do NOT check these under any circumstances:
+      • Stabliste rows (bar schedule table)
+      • Bending schema figures (drawn bar shape with dimension lines and L= label)
+      • Any label that appears cut off, truncated, or reaching the edge of the drawing —
+        a truncated label (e.g. "17 ø 8/4..." cut off at page edge) is NOT a violation,
+        the missing "-M.E." is simply outside the visible area. NEVER flag truncated text.
+
+NOTE — all Pos numbers and examples above are illustrative only.
+Read all actual Pos numbers and labels from the PDF drawing being analyzed.
+Do NOT use any number from the examples as an actual value.
 
 Do NOT flag Pos numbers that never appear with "-M.E." anywhere — those are not spacers/clamps.
-Do NOT flag if you cannot clearly read the label.
-If no "-M.E." labels are visible anywhere on the sheet (making it impossible to identify any spacer/clamp positions), add "spacer_label" to not_found.
+Do NOT flag if you cannot clearly read the full label text.
+If no "-M.E." labels are visible anywhere on the sheet, add "spacer_label" to not_found — do NOT silently pass.
