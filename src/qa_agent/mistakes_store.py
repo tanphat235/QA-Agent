@@ -32,7 +32,6 @@ SECTIONS: dict[str, str] = {
 
 CHECKS: dict[str, list[tuple[str, str]]] = {
     "bend": [
-        ("pos_count",       "Last Position Number vs Title Block"),
         ("pos_coverage",    "Pos Coverage"),
         ("mesh_pos",        "Mesh Reinforcement Pos"),
         ("mesh_ratio",      "Mesh-to-Total Mass Ratio"),
@@ -43,13 +42,9 @@ CHECKS: dict[str, list[tuple[str, str]]] = {
     "spell": [
         ("spelling",         "Spelling"),
         ("section_name",     "Section Name Completeness"),
-        ("component_name",   "Component Name vs Title Block"),
-        ("section_scale",    "Scale Consistency"),
-        ("grid_lines",       "Grid Lines Consistency"),
-        ("parts_lists",      "Parts Lists Present"),
         ("parts_quantities", "Parts Quantities"),
-        ("3d_view",          "3D View"),
         ("drawing_title",    "Drawing Title vs Title Block"),
+        ("pos_count",        "Last Position Number vs Title Block"),
     ],
     "rebar": [
         ("spacer_label",         "Spacer/Clamp Label Suffix"),
@@ -61,11 +56,10 @@ CHECKS: dict[str, list[tuple[str, str]]] = {
 
 _keyword_map: list[tuple[str, str, str]] = [
     ("Pos Coverage",             "bend",  "pos_coverage"),
-    ("Last Position Number",     "bend",  "pos_count"),
-    ("letzte Stabstahlposition", "bend",  "pos_count"),
     ("Total Mass",               "bend",  "mass_arithmetic"),
     ("Bending Angle",            "bend",  "bending_angle"),
-    ("3D View",                  "spell", "3d_view"),
+    ("Last Position Number",     "spell", "pos_count"),
+    ("letzte Stabstahlposition", "spell", "pos_count"),
     ("Section Name",             "spell", "section_name"),
     ("Parts Quantities",         "spell", "parts_quantities"),
     ("Spacer/Clamp Label",       "rebar", "spacer_label"),

@@ -67,9 +67,9 @@ const NODES = [
 ]
 
 const CHECK_OPTIONS = [
-  { key: 'spell', label: 'Spelling & Title Block', color: 'gray' },
-  { key: 'bend',  label: 'Bending & Schedule',    color: 'purple' },
-  { key: 'rebar', label: 'Rebar Labels & Dims',   color: 'blue' },
+  { key: 'spell', label: 'Spelling & Title Block', color: 'gray',   comingSoon: false },
+  { key: 'bend',  label: 'Bending & Schedule',     color: 'purple', comingSoon: true  },
+  { key: 'rebar', label: 'Rebar Labels & Dims',    color: 'blue',   comingSoon: true  },
 ] as const
 const NAV = [
   { icon: LayoutDashboard, label: 'Dashboard',    view: 'dashboard' as ActiveView },
@@ -83,7 +83,6 @@ const NODE_SECTIONS = [
     key: 'bend',
     title: 'Bending & Schedule',
     checks: [
-      { key: 'pos_count',       title: 'Last Position Number vs Title Block' },
       { key: 'pos_coverage',    title: 'Pos Coverage' },
       { key: 'mesh_pos',        title: 'Mesh Reinforcement Pos' },
       { key: 'mesh_ratio',      title: 'Mesh-to-Total Mass Ratio' },
@@ -98,13 +97,9 @@ const NODE_SECTIONS = [
     checks: [
       { key: 'spelling',         title: 'Spelling' },
       { key: 'section_name',     title: 'Section Name Completeness' },
-      { key: 'component_name',   title: 'Component Name vs Title Block' },
-      { key: 'section_scale',    title: 'Scale Consistency' },
-      { key: 'grid_lines',       title: 'Grid Lines Consistency' },
-      { key: 'parts_lists',      title: 'Parts Lists Present' },
       { key: 'parts_quantities', title: 'Parts Quantities' },
-      { key: '3d_view',          title: '3D View' },
       { key: 'drawing_title',    title: 'Drawing Title vs Title Block' },
+      { key: 'pos_count',        title: 'Last Position Number vs Title Block' },
     ],
   },
   {
@@ -360,7 +355,10 @@ export default function App() {
   const [activeNode, setActiveNode]     = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen]           = useState(true)
   const [enabledSubChecks, setEnabledSubChecks] = useState<Record<string, string[]>>(() =>
-    Object.fromEntries(NODE_SECTIONS.map(s => [s.key, s.checks.map(c => c.key)]))
+    Object.fromEntries(NODE_SECTIONS.map(s => [
+      s.key,
+      CHECK_OPTIONS.find(o => o.key === s.key)?.comingSoon ? [] : s.checks.map(c => c.key),
+    ]))
   )
   const [expandedCheckCategories, setExpandedCheckCategories] = useState<Set<string>>(new Set())
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set())
@@ -529,7 +527,7 @@ export default function App() {
     })
 
   const enabledChecks = CHECK_OPTIONS
-    .filter(o => (enabledSubChecks[o.key] ?? []).length > 0)
+    .filter(o => !o.comingSoon && (enabledSubChecks[o.key] ?? []).length > 0)
     .map(o => o.key)
 
   const toggleSubCheck = (categoryKey: string, subKey: string) => {
@@ -1214,7 +1212,7 @@ export default function App() {
 
                 {/* 3 category cards — horizontal row */}
                 <div className="flex gap-2">
-                  {CHECK_OPTIONS.map(({ key, label }) => {
+                  {CHECK_OPTIONS.map(({ key, label, comingSoon }) => {
                     const section = NODE_SECTIONS.find(s => s.key === key)!
                     const allSubKeys = section.checks.map(c => c.key)
                     const enabledSubs = enabledSubChecks[key] ?? []
@@ -1222,6 +1220,25 @@ export default function App() {
                     const someEnabled = enabledSubs.length > 0
                     const isExpanded = expandedCheckCategories.has(key)
                     const disabled = appState === 'analyzing'
+
+                    if (comingSoon) {
+                      return (
+                        <div key={key} className="flex-1 rounded-xl overflow-hidden border border-gray-200 opacity-70 cursor-not-allowed select-none">
+                          <div className="flex flex-col bg-gray-50">
+                            <div className="flex items-start gap-2 px-3 pt-2.5 pb-1">
+                              <span className="mt-0.5 w-3.5 h-3.5 rounded border-[1.5px] flex-shrink-0 border-gray-200 bg-white" />
+                              <span className="text-[10px] font-bold leading-snug text-gray-400">{label}</span>
+                            </div>
+                            <div className="flex items-center px-3 pb-2 pt-0.5">
+                              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full leading-none bg-amber-100 text-amber-600 border border-amber-200">
+                                Coming Soon
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      )
+                    }
+
                     return (
                       <div key={key} className={`flex-1 rounded-xl overflow-hidden border transition-all ${
                         someEnabled
@@ -1276,8 +1293,8 @@ export default function App() {
                 </div>
 
                 {/* Sub-checks panel — full-width, below the row */}
-                {CHECK_OPTIONS.map(({ key, label }) => {
-                  if (!expandedCheckCategories.has(key)) return null
+                {CHECK_OPTIONS.map(({ key, label, comingSoon }) => {
+                  if (comingSoon || !expandedCheckCategories.has(key)) return null
                   const section = NODE_SECTIONS.find(s => s.key === key)!
                   const enabledSubs = enabledSubChecks[key] ?? []
                   const someEnabled = enabledSubs.length > 0

@@ -2,8 +2,8 @@ from qa_agent.state import GraphState
 from qa_agent.nodes._base import run_check
 
 _TASK_INTRO = """\
-Review the bar schedule (Stabliste), mesh schedule (Mattenstahlliste), and rebar schemas in this structural drawing.
-Report ONLY issues you can directly observe from clearly visible values in the PDF.\
+Inspect visible text, annotations, views, and tables in this precast wall structural drawing.
+Report ONLY issues you can directly observe in the PDF.\
 """
 
 _PROMPT = _TASK_INTRO + "\n\n" + """\
@@ -39,8 +39,8 @@ def pos_count_check(state: GraphState) -> dict:
     return run_check(
         state,
         check_key="pos_count",
-        domain="bend",
-        issues_key="bend_issues",
+        domain="spell",
+        issues_key="spell_issues",
         check_name="Last Position Number vs Title Block",
         pass_desc="PASS — letzte Stabstahlposition and letzte Mattenposition match schedule tables.",
         nf_desc="NOT FOUND — 'letzte Stabstahlposition' field not visible in title block.",

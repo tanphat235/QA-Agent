@@ -41,7 +41,7 @@ Report ONLY issues you can directly observe from clearly visible values in the P
 """
 
 _BEND_CHECKS = [
-    "pos_count", "pos_coverage", "mesh_pos", "mesh_ratio",
+    "pos_coverage", "mesh_pos", "mesh_ratio",
     "mass_arithmetic", "bending_angle", "bar_length",
 ]
 _CHECK_PROMPTS: dict[str, str] = {k: get_check_prompt("bend", k) for k in _BEND_CHECKS}
@@ -116,7 +116,7 @@ class _UsageCallback(BaseCallbackHandler):
 
 
 class _BendIssue(BaseModel):
-    check: str = Field(description="pos_count | pos_coverage | mesh_pos | mesh_ratio | mass_arithmetic | bending_angle | bar_length")
+    check: str = Field(description="pos_coverage | mesh_pos | mesh_ratio | mass_arithmetic | bending_angle | bar_length")
     severity: str = Field(description="error | warning")
     description: str
     page: int

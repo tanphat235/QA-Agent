@@ -1,5 +1,5 @@
 # Last Position Number vs Title Block
-> **Domain:** Bending & Schedule | **Check key:** `pos_count`
+> **Domain:** Spelling & Title Block | **Check key:** `pos_count`
 
 ## Display Name
 
