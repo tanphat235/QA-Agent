@@ -1,4 +1,4 @@
-# Mesh-to-Total Mass Ratio
+﻿# Mesh-to-Total Mass Ratio
 > **Domain:** Bending & Schedule | **Check key:** `mesh_ratio`
 
 ## Display Name
@@ -18,10 +18,6 @@ NOT FOUND — Mattenstahlliste or Matten-Schneideskizze absent, or Gesamtmasse t
 check that the ratio of used mesh reinforcement to the total reinforcement quantity is greater than 85%.
 
 Ratio = (226.09/231.99)*100 = 97.46% Pass
-
-## Reference Images
-
-![Mesh-to-Total Mass Ratio example 1](./img_001.png)
 
 ## Check Prompt
 

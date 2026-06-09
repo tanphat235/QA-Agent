@@ -1,4 +1,4 @@
-# Spacer / Clamp Width
+﻿# Spacer / Clamp Width
 > **Domain:** Rebar Labels & Dims | **Check key:** `spacer_width`
 
 ## Display Name
@@ -24,10 +24,6 @@ Cv value in detail
 Layer1 rebar diameter detect the label in the side section of the wall (example is position 12)
 
 Width_hor_pin = 30 – 2*2.5 + 2*0.8 = 26.6 ~ 27
-
-## Reference Images
-
-![Spacer / Clamp Width example 1](./img_001.png)
 
 ## Check Prompt
 

@@ -20,22 +20,30 @@ Check whether all text in the PDF is spelled correctly.
 ## Check Prompt
 
 CHECK — Spelling Errors (spelling)
-Flag clear spelling mistakes in German or English words in titles, labels, notes, callouts, or title block.
+Scan all visible text across the entire drawing sheet and report:
+  1. Clear spelling mistakes in German or English words
+  2. Overlapping or unreadable text
 
-Do NOT flag:
-  • Person name fields — the following title block fields contain personal names or initials
-    which must NEVER be checked for spelling:
-      "Drawn By", "Designed By", "Checked By" and their values (e.g. "T.Ng", "H.T", "D.M",
-      "-I.T", any initials or abbreviated names). These are not subject to spelling rules.
-  • Accepted engineering abbreviations (Ø, typ., M.E., Reinf., Bew., pos.) and capitalization style.
-  • Standard German title block labels — these are fixed standard terms, ALWAYS treat as correct:
-      "FACHPLANER/PLANERSTELLER", "MTT-Nummer", "BETONDECKUNG", "WANDANSICHT", "BEWEHRUNG",
-      "STABLISTE", "MATTENSTAHLLISTE", "EINBAUTEILLISTE", "MONTAGETEILLISTE", "MASSSTAB".
-      PDF fonts frequently distort these (e.g. "FACHPLANFR" = "FACHPLANER", "PLANFRSTFLLER" =
-      "PLANERSTELLER") — treat any such distorted rendering as correct, do NOT flag it.
-  • Any character-level confusion due to compressed PDF fonts:
-      E↔F, T↔I, N↔M, rn↔m, 0↔O — if the intended word is a known standard term, treat as correct.
-  • Only flag completely wrong words that cannot be explained by font rendering, and that are
-    NOT person names and NOT standard engineering/German title block labels.
+SCAN TARGETS — check all of the following:
+  • Title block fields and labels
+  • View titles (Schnitt, Ansicht, Draufsicht, Detail, etc.)
+  • Callout annotations and notes
+  • Table headers and cell content
+  • Dimension labels and legend text
 
-If no readable text is visible anywhere on the sheet, add "spelling" to not_found.
+SPELLING — flag any word that is clearly misspelled in German or English.
+  Acceptable: standard engineering abbreviations (Ø, typ., M.E., Reinf., Bew., Pos.),
+  German compound words, accepted acronyms, and capitalization style differences.
+
+TEXT QUALITY — flag any text that is:
+  • Overlapping with another text or line element, making it unreadable
+  • Truncated or clipped by a view border so the full content cannot be determined
+  • Rendered so small or compressed that individual characters cannot be identified
+
+DO NOT flag:
+  • Person name fields: "Drawn By", "Designed By", "Checked By" and their values
+    (initials, abbreviated names such as "T.Ng", "H.T", "D.M") — these are never spelling errors.
+  • PDF font rendering artifacts where the overall word is still identifiable
+    (e.g. a colon rendered as a period in a scale label, or slightly compressed letter spacing).
+
+NOT FOUND — add "spelling" to not_found only if no readable text is visible anywhere on the sheet.

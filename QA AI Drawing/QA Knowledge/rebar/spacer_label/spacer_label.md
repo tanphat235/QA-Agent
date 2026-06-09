@@ -1,4 +1,4 @@
-# Spacer / Clamp Label Suffix
+﻿# Spacer / Clamp Label Suffix
 > **Domain:** Rebar Labels & Dims | **Check key:** `spacer_label`
 
 ## Display Name
@@ -16,14 +16,6 @@ NOT FOUND — no "-M.E." labels found on sheet to identify spacer/clamp position
 ## Description
 
 Check that the Spacers/Clamps reinforcement label includes the suffix “-M.E.” at the end. Only two types of this rebar is Spacers/Clamps reinforcement
-
-## Reference Images
-
-![Spacer / Clamp Label Suffix example 1](./img_001.png)
-
-![Spacer / Clamp Label Suffix example 2](./img_002.png)
-
-![Spacer / Clamp Label Suffix example 3](./img_003.png)
 
 ## Check Prompt
 

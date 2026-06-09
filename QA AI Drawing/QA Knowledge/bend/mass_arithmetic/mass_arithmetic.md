@@ -1,4 +1,4 @@
-# Total Mass Arithmetic
+﻿# Total Mass Arithmetic
 > **Domain:** Bending & Schedule | **Check key:** `mass_arithmetic`
 
 ## Display Name
@@ -18,12 +18,6 @@ NOT FOUND — Gesamtmasse footer absent or illegible.
 Check whether the total mass in the Stabliste is correct.
 
 Also Check mass for Mattenstahlliste if available
-
-## Reference Images
-
-![Total Mass Arithmetic example 1](./img_001.png)
-
-![Total Mass Arithmetic example 2](./img_002.png)
 
 ## Check Prompt
 

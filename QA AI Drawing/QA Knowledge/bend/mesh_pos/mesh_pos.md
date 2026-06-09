@@ -1,4 +1,4 @@
-# Mesh Reinforcement Pos
+﻿# Mesh Reinforcement Pos
 > **Domain:** Bending & Schedule | **Check key:** `mesh_pos`
 
 ## Display Name
@@ -16,10 +16,6 @@ NOT FOUND — Mattenstahlliste or Matten-Schneideskizze absent from sheet.
 ## Description
 
 check the rebar position of the mesh reinforcement in the drawing, if available.
-
-## Reference Images
-
-![Mesh Reinforcement Pos example 1](./img_001.png)
 
 ## Check Prompt
 

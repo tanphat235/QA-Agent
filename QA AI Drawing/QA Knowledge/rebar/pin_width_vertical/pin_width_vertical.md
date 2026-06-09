@@ -1,4 +1,4 @@
-# Vertical Pin Width
+﻿# Vertical Pin Width
 > **Domain:** Rebar Labels & Dims | **Check key:** `pin_width_vertical`
 
 ## Display Name
@@ -24,10 +24,6 @@ Cv value in detail
 A vertical pin is a vertically placed pin that is usually shown in the cross-section next to the Bewehrung. In this example, it is rebar position 5.
 
 Width_ver_pin = 30 – 2*2.5 = 25
-
-## Reference Images
-
-![Vertical Pin Width example 1](./img_001.png)
 
 ## Check Prompt
 

@@ -1,4 +1,4 @@
-# Parts Label Consistency
+﻿# Parts Label Consistency
 > **Domain:** Spelling & Title Block | **Check key:** `parts_label`
 
 ## Display Name
@@ -17,40 +17,39 @@ NOT FOUND — no schedule tables (Einbauteilliste / Montageteilliste) visible on
 
 Cross-reference part label codes between the views (Ansicht, Schnitt, Draufsicht) and the schedule table(s) (Einbauteilliste / Montageteilliste). Flag any label visible in a view but absent from the table, and any table entry with no corresponding label in any view. Does NOT check quantities or counts.
 
-## Reference Images
-
-![Parts Label Consistency example 1](./img_001.png)
-
 ## Check Prompt
 
 CHECK — Parts Label Consistency (parts_label)
-Verify that every part label code visible in the drawing views exists in the schedule table(s),
-and every table entry has at least one corresponding label visible somewhere in the views.
-Read ALL part codes, labels, and table entries directly from the submitted PDF drawing.
-All part numbers and descriptions in these instructions are examples only — do NOT use memory
-or training knowledge about part codes (e.g. "Halfen", "HTA", specific EBT numbers).
-Every value used in this check must be visually read from the PDF.
 
-A drawing does NOT need to have both tables — check whichever table(s) are present.
+All values used in this check MUST be read directly from this PDF. Discard any part codes,
+EBT-Nummer, or MT-Nummer from memory or from any previous drawing run before starting.
 
-NOT FOUND conditions — add "parts_label" to not_found (do NOT silently pass) if ANY of:
-  • Neither Einbauteilliste NOR Montageteilliste is visible on the sheet
-  • The table area is not legible enough to read part codes
-  • The Ansicht and Schnitt views are not visible or not legible
+NOT FOUND — add "parts_label" to not_found if NEITHER Einbauteilliste NOR Montageteilliste
+is visible on this sheet. Do NOT silently pass.
 
-For each table that IS present, cross-reference every part label visible in Schnitt and Ansicht views
-against that table:
-  1. LABEL NOT IN TABLE — any label code visible in the views that cannot be found in any present table. Flag each.
-  2. TABLE ENTRY NOT LABELED — any part listed in the table with NO corresponding label visible in ANY view
-     (check ALL views: Ansicht, Wandansicht, Draufsicht, all Schnitt sections). Flag only when the label
-     is absent from every view after scanning the entire sheet.
+STEP 1 — READ TABLE NUMBERS FROM THIS PDF
+  Locate the Einbauteilliste (embedded parts list) and/or Montageteilliste (mounting parts list)
+  on this sheet. For each table that is present, read every EBT-Nummer (from Einbauteilliste)
+  and every MT-Nummer (from Montageteilliste) row by row directly from the PDF.
+  Record the full list: TABLE_NUMBERS = [all EBT-Nummer and MT-Nummer read from this PDF]
+
+STEP 2 — READ VIEW LABELS FROM THIS PDF
+  Scan every view on the sheet: Ansicht, Wandansicht, Draufsicht, and every Schnitt section.
+  Collect every part label that looks like an EBT-Nummer or MT-Nummer (numeric codes assigned
+  to embedded or mounting parts). Skip rebar annotations (Pos numbers, "ø", "L=", "-M.E.").
+  For labels with a multiplier prefix (e.g. "2x00104") take the code after "x": "00104".
+  Record the full list: VIEW_LABELS = [all part label codes read from views in this PDF]
+
+STEP 3 — CROSS-REFERENCE
+  A. Label not in table: any code in VIEW_LABELS that is NOT in TABLE_NUMBERS → flag as error.
+     State which label and which view it appeared in.
+  B. Table number not labeled: any EBT-Nummer or MT-Nummer in TABLE_NUMBERS that is NOT found
+     in any view after scanning the entire sheet → flag as error.
+     State which number and which table it came from.
 
 RULES:
-  • Read part codes from the PDF only — do NOT recall part codes from memory or examples.
-  • CHECK LABEL EXISTENCE ONLY — do NOT compare quantities.
-  • Labels with multiplier prefix (e.g. "2x00104") — extract the part code after the multiplier.
-  • A label found in ANY present table is consistent — do NOT flag it.
-  • Do NOT flag rebar Pos numbers — only flag embedded/mounting part designations.
-  • Only flag when you can clearly read the label AND confirm it is absent from all present tables.
-  • If only Einbauteilliste is present, only cross-reference against Einbauteilliste.
-  • If only Montageteilliste is present, only cross-reference against Montageteilliste.
+  • Only flag codes confirmed present in your written lists with a clear mismatch.
+  • A code found in ANY present table is consistent — do NOT flag it.
+  • If only one table is present, cross-reference against that table only.
+  • Do NOT compare quantities or counts — existence only.
+  • Do NOT flag rebar Pos numbers or bar annotations.

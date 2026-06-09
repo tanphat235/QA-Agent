@@ -1,4 +1,4 @@
-# Common Terminology
+﻿# Common Terminology
 > Shared German/English glossary used across all QA checks.
 
 ## Glossary
@@ -30,7 +30,3 @@ Naming:
 Mattenstahlliste is a table listing of mesh rebar
 
 **Matten-Schneideskizze**= A drawing/sketch showing how reinforcement mesh is cut and shaped before installation.
-
-## Reference Images
-
-![Terminology example 1](./img_001.png)

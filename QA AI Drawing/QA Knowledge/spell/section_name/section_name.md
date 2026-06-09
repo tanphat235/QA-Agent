@@ -1,4 +1,4 @@
-# Section Name Completeness
+﻿# Section Name Completeness
 > **Domain:** Spelling & Title Block | **Check key:** `section_name`
 
 ## Display Name
@@ -17,12 +17,6 @@ NOT FOUND — no section cut designations found in Ansicht or Bewehrung.
 
 Check whether the section names are correct.
 For example, if sections 1-1, 2-2, and 3-3 are shown in the Ansicht or Bewehrung, the corresponding sections Schnitt 1-1, Schnitt 2-2, and Schnitt 3-3 must all be provided.
-
-## Reference Images
-
-![Section Name Completeness example 1](./img_001.png)
-
-![Section Name Completeness example 2](./img_002.png)
 
 ## Check Prompt
 

@@ -1,4 +1,4 @@
-# Bar Length vs Schedule
+﻿# Bar Length vs Schedule
 > **Domain:** Bending & Schedule | **Check key:** `bar_length`
 
 ## Display Name
@@ -20,12 +20,6 @@ Check each rebar schema to verify that the total length L is correct and match w
 Pos 102 = 41+16+16+41 = 114 (correct)
 
 Example:
-
-## Reference Images
-
-![Bar Length vs Schedule example 1](./img_001.png)
-
-![Bar Length vs Schedule example 2](./img_002.png)
 
 ## Check Prompt
 

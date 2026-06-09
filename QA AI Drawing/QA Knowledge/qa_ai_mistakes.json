@@ -80,13 +80,6 @@
       "correct": "Any view carrying the same designation number satisfies the requirement. \"Draufsicht 1-1\", \"Schnitt 1-1\", \"Detail 1-1\" — all count equally. Only flag if NO view of any type with that number exists on the sheet."
     },
     {
-      "id": "9436fdeb-f03f-443d-ba88-c15ab3afdef7",
-      "check_key": "parts_quantities",
-      "title": "Parts Label Consistency — Wrong NOT FOUND condition",
-      "wrong": "Marking parts_quantities as NOT FOUND just because one of the two tables (Einbauteilliste or Montageteilliste) is absent. A drawing does not need both tables.",
-      "correct": "Only mark parts_quantities as NOT FOUND when NEITHER Einbauteilliste NOR Montageteilliste is present on the sheet. If at least one table is present, perform the check against whichever table(s) exist. Cross-reference part labels visible in views only against the tables that are actually on the sheet."
-    },
-    {
       "id": "a1b2c3d4-0002-0002-0002-000000000001",
       "check_key": "spelling",
       "title": "Spelling — Flagging PDF font rendering artifacts as spelling errors",

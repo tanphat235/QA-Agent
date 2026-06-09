@@ -1,4 +1,4 @@
-# Drawing Title vs Title Block
+﻿# Drawing Title vs Title Block
 > **Domain:** Spelling & Title Block | **Check key:** `drawing_title`
 
 ## Display Name
@@ -16,10 +16,6 @@ NOT FOUND — Drawing Title or Title Block field not visible in the drawing.
 ## Description
 
 Check whether the Drawing Title matches the Title Block field in at least one language.
-
-## Reference Images
-
-![Drawing Title vs Title Block example 1](./img_001.png)
 
 ## Check Prompt
 

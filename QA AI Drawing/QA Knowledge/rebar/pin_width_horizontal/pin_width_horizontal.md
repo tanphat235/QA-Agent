@@ -1,4 +1,4 @@
-# Horizontal Pin Width
+﻿# Horizontal Pin Width
 > **Domain:** Rebar Labels & Dims | **Check key:** `pin_width_horizontal`
 
 ## Display Name
@@ -24,10 +24,6 @@ A horizontal pin is a horizontally placed pin that is usually shown in the botto
 Layer1 rebar diameter detect the label in the side section of the wall (example is position 12)
 
 Width_hor_pin = 30 – 2*2.5 – 2*1.2 = 22.6 ~ 22
-
-## Reference Images
-
-![Horizontal Pin Width example 1](./img_001.png)
 
 ## Check Prompt
 

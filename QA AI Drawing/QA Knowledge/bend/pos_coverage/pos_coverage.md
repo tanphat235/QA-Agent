@@ -1,4 +1,4 @@
-# Pos Coverage in Schemas
+﻿# Pos Coverage in Schemas
 > **Domain:** Bending & Schedule | **Check key:** `pos_coverage`
 
 ## Display Name
@@ -19,16 +19,6 @@ Check the Bewehrung sections and their sub-sections and count the created rebar 
 Each rebar type in the Stabliste must be represented by at least one schema. At least one scheme is required in the Bewehrung sections or their sub-sections.
 
 Example: in the Stabliste contains positions 1–19 and 100–104, each of these rebar positions must have at least one corresponding schema.
-
-## Reference Images
-
-![Pos Coverage in Schemas example 1](./img_001.png)
-
-![Pos Coverage in Schemas example 2](./img_002.png)
-
-![Pos Coverage in Schemas example 3](./img_003.png)
-
-![Pos Coverage in Schemas example 4](./img_004.png)
 
 ## Check Prompt
 

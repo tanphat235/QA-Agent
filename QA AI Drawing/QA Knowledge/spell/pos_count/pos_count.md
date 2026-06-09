@@ -1,4 +1,4 @@
-# Last Position Number vs Title Block
+﻿# Last Position Number vs Title Block
 > **Domain:** Spelling & Title Block | **Check key:** `pos_count`
 
 ## Display Name
@@ -16,10 +16,6 @@ NOT FOUND — 'letzte Stabstahlposition' field not visible in title block.
 ## Description
 
 Check whether the rebar positions on the drawing (excluding rebar positions greater than 100) match the positions in the detail drawings.
-
-## Reference Images
-
-![Last Position Number vs Title Block example 1](./img_001.png)
 
 ## Check Prompt
 
