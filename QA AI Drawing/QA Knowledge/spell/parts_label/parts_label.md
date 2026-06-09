@@ -1,5 +1,5 @@
 # Parts Label Consistency
-> **Domain:** Spelling & Title Block | **Check key:** `parts_quantities`
+> **Domain:** Spelling & Title Block | **Check key:** `parts_label`
 
 ## Display Name
 
@@ -7,7 +7,7 @@ Parts Label Consistency
 
 ## Pass
 
-PASS — all part labels in views match the present schedule table(s).
+PASS — all part label codes in views are present in the schedule table(s) and vice versa.
 
 ## Not Found
 
@@ -15,7 +15,7 @@ NOT FOUND — no schedule tables (Einbauteilliste / Montageteilliste) visible on
 
 ## Description
 
-Check whether the quantities of built-in parts and mounting parts in the Schnitt and Ansicht match the quantities in the schedules.
+Cross-reference part label codes between the views (Ansicht, Schnitt, Draufsicht) and the schedule table(s) (Einbauteilliste / Montageteilliste). Flag any label visible in a view but absent from the table, and any table entry with no corresponding label in any view. Does NOT check quantities or counts.
 
 ## Reference Images
 
@@ -23,7 +23,9 @@ Check whether the quantities of built-in parts and mounting parts in the Schnitt
 
 ## Check Prompt
 
-CHECK — Parts Label Consistency (parts_quantities)
+CHECK — Parts Label Consistency (parts_label)
+Verify that every part label code visible in the drawing views exists in the schedule table(s),
+and every table entry has at least one corresponding label visible somewhere in the views.
 Read ALL part codes, labels, and table entries directly from the submitted PDF drawing.
 All part numbers and descriptions in these instructions are examples only — do NOT use memory
 or training knowledge about part codes (e.g. "Halfen", "HTA", specific EBT numbers).
@@ -31,7 +33,7 @@ Every value used in this check must be visually read from the PDF.
 
 A drawing does NOT need to have both tables — check whichever table(s) are present.
 
-NOT FOUND conditions — add "parts_quantities" to not_found (do NOT silently pass) if ANY of:
+NOT FOUND conditions — add "parts_label" to not_found (do NOT silently pass) if ANY of:
   • Neither Einbauteilliste NOR Montageteilliste is visible on the sheet
   • The table area is not legible enough to read part codes
   • The Ansicht and Schnitt views are not visible or not legible

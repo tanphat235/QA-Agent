@@ -42,7 +42,7 @@ CHECKS: dict[str, list[tuple[str, str]]] = {
     "spell": [
         ("spelling",         "Spelling"),
         ("section_name",     "Section Name Completeness"),
-        ("parts_quantities", "Parts Quantities"),
+        ("parts_label", "Parts Label Consistency"),
         ("drawing_title",    "Drawing Title vs Title Block"),
         ("pos_count",        "Last Position Number vs Title Block"),
     ],
@@ -61,7 +61,7 @@ _keyword_map: list[tuple[str, str, str]] = [
     ("Last Position Number",     "spell", "pos_count"),
     ("letzte Stabstahlposition", "spell", "pos_count"),
     ("Section Name",             "spell", "section_name"),
-    ("Parts Quantities",         "spell", "parts_quantities"),
+    ("Parts Label",              "spell", "parts_label"),
     ("Spacer/Clamp Label",       "rebar", "spacer_label"),
     ("Pin/Spacer",               "rebar", "pin_width_vertical"),
     ("Vertical vs Horizontal",   "rebar", "pin_width_vertical"),

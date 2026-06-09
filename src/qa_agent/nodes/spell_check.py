@@ -55,7 +55,7 @@ _PASS_ITEM_RE = re.compile(
 )
 
 _SPELL_CHECKS = [
-    "spelling", "section_name", "parts_quantities", "drawing_title", "pos_count",
+    "spelling", "section_name", "parts_label", "drawing_title", "pos_count",
 ]
 _CHECK_PROMPTS: dict[str, str] = {k: get_check_prompt("spell", k) for k in _SPELL_CHECKS}
 _CHECK_META: dict[str, tuple[str, str, str]] = {k: get_check_meta("spell", k) for k in _SPELL_CHECKS}
@@ -113,7 +113,7 @@ class _UsageCallback(BaseCallbackHandler):
 
 
 class _SpellIssue(BaseModel):
-    check: str = Field(description="spelling | section_name | parts_quantities | drawing_title | pos_count")
+    check: str = Field(description="spelling | section_name | parts_label | drawing_title | pos_count")
     severity: str = Field(description="error | warning")
     description: str
     page: int

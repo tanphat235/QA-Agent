@@ -97,7 +97,7 @@ const NODE_SECTIONS = [
     checks: [
       { key: 'spelling',         title: 'Spelling' },
       { key: 'section_name',     title: 'Section Name Completeness' },
-      { key: 'parts_quantities', title: 'Parts Quantities' },
+      { key: 'parts_label',      title: 'Parts Label Consistency' },
       { key: 'drawing_title',    title: 'Drawing Title vs Title Block' },
       { key: 'pos_count',        title: 'Last Position Number vs Title Block' },
     ],
