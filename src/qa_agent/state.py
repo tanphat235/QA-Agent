@@ -18,11 +18,11 @@ class Issue(_IssueBase, total=False):
     not_found: bool     # True — only set when required drawing info was absent (check could not be performed)
 
 
-class PDFContent(TypedDict):
+class PDFContent(TypedDict, total=False):
     raw_text: str
-    tables: list[dict]
-    page_count: int
-    metadata: dict
+    tables: list          # raw tables from pdfplumber: list[list[list[str|None]]]
+    title_block: dict     # spatially extracted title block values
+    formatted: str        # formatted text representation for LLM prompts
 
 
 class _GraphStateRequired(TypedDict):
@@ -32,7 +32,8 @@ class _GraphStateRequired(TypedDict):
 class GraphState(_GraphStateRequired, total=False):
     enabled_checks: Optional[list[str]]             # subset of ["spell", "bend", "rebar"]
     enabled_sub_checks: Optional[dict[str, list[str]]]  # e.g. {"spell": ["spelling", ...]}
-    pdf_data: Optional[str]               # base64-encoded PDF, encoded once in preprocess
+    pdf_data: Optional[str]               # base64-encoded PDF, used only in preprocess validation
+    pdf_content: Optional[PDFContent]     # extracted content from pdfplumber, used by check nodes
     page_count: Optional[int]
     spell_issues: Optional[list[Issue]]
     bend_issues: Optional[list[Issue]]

@@ -4,6 +4,7 @@ from anthropic import Anthropic
 from pypdf import PdfReader
 
 from qa_agent.state import GraphState
+from qa_agent.nodes.pdf_extractor import extract_pdf_content
 
 logger = logging.getLogger(__name__)
 
@@ -90,4 +91,14 @@ def preprocess(state: GraphState) -> dict:
         reason = verdict.removeprefix("INVALID:").strip() if "INVALID:" in verdict else verdict
         raise ValueError(f"PDF rejected: {reason}")
 
-    return {"page_count": page_count, "pdf_data": pdf_data}
+    # ── pdfplumber extraction — provides structured data to check nodes ──
+    pdf_content = extract_pdf_content(pdf_path)
+    tb = pdf_content.get("title_block", {})
+    print(
+        f"[preprocess] letzte_stabstahlposition={tb.get('letzte_stabstahlposition')!r}"
+        f"  max_stabliste={tb.get('max_stabliste_pos')!r}"
+        f"  letzte_mattenposition={tb.get('letzte_mattenposition')!r}"
+        f"  max_mattenliste={tb.get('max_mattenliste_pos')!r}"
+    )
+
+    return {"page_count": page_count, "pdf_data": pdf_data, "pdf_content": pdf_content}

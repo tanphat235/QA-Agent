@@ -11,45 +11,33 @@ PASS — letzte Stabstahlposition and letzte Mattenposition match schedule table
 
 ## Not Found
 
-NOT FOUND — 'letzte Stabstahlposition' field not visible in title block.
+NOT FOUND — neither 'letzte Stabstahlposition' nor 'letzte Mattenposition' visible in title block.
 
 ## Description
 
-Check whether the rebar positions on the drawing (excluding rebar positions greater than 100) match the positions in the detail drawings.
+Check that the last position numbers declared in the title block match the actual highest Pos numbers found in the schedule tables on the same sheet.
 
 ## Check Prompt
 
-CHECK — Last Position Number vs Title Block (pos_count)
-The title block contains two fields that declare the last (highest) position number used:
-  • "letzte Stabstahlposition" — last regular bar position in the Stabliste
-  • "letzte Mattenposition"    — last mesh position in the Mattenstahlliste (if mesh is present)
+CHECK pos_count — Last Position Number vs Title Block
 
-PROCEDURE for Stabliste:
-  1. Scan the Stabliste and find the highest Pos number that is ≤ 99 (ignore Pos 100+ completely).
-  2. Read the value in the "letzte Stabstahlposition" field of the title block.
-  3. If highest_pos_≤99 == title_block_value → PASS, do NOT flag anything.
-  4. If highest_pos_≤99 ≠ title_block_value → flag as an issue.
+1. Search the PDF for the labels "letzte Stabstahlposition" and "letzte Mattenposition".
 
-PROCEDURE for Mattenstahlliste (only if the table is present on the sheet):
-  1. Find the highest Pos number listed in the Mattenstahlliste.
-  2. Read the value in the "letzte Mattenposition" field of the title block.
-  3. If highest_mesh_pos == title_block_value → PASS, do NOT flag anything.
-  4. If highest_mesh_pos ≠ title_block_value → flag as an issue.
+2. For each label found, extract the position number located immediately next to it.
+   The number is displayed inside a circle (for Stabstahlposition) or a square (for Mattenposition).
+   Use the visually associated number nearest to the label when multiple numbers are present.
+   Accept minor OCR variations in the label text.
+   → Save as: pos_count_title_stab / pos_count_title_matten (null if label absent or shape empty)
 
-IMPORTANT:
-  • Read ONLY from the submitted PDF drawing — do NOT use any values from reference/example images.
-    Any circled numbers or title blocks visible in the reference images are examples only and must
-    be completely ignored. Only values in the actual drawing PDF are valid inputs for this check.
-  • Read the Stabliste and title block from THE SAME SHEET in the PDF. Do not compare values
-    across different sheets or different drawings.
-  • The presence of Pos 100, 101, 102, … in the Stabliste is normal and expected.
-    These are special accessory bars. They do NOT affect letzte Stabstahlposition at all.
-    If the title block value equals the highest regular Pos (≤99), the check PASSES — period.
-  • Only flag when the numbers clearly and unambiguously differ on the same sheet.
+3. Search for the schedule tables "Stabliste" and "Mattenstahlliste".
 
-NOT FOUND conditions — add "pos_count" to not_found (do NOT silently pass) if ANY of:
-  • The Stabliste is not visible on the sheet
-  • The title block is not visible on the sheet
-  • The "letzte Stabstahlposition" field is not visible in the title block
+4. In "Stabliste": collect all Pos numbers. Ignore any Pos ≥ 100 (special accessory bars).
+   Find the maximum remaining Pos number.
+   → Save as: pos_count_max_stab (null if table absent)
 
-If Mattenstahlliste is absent, skip the mesh part of this check only (do NOT add to not_found for that).
+5. In "Mattenstahlliste": collect all Pos numbers. Ignore any Pos ≥ 100.
+   Find the maximum remaining Pos number.
+   → Save as: pos_count_max_matten (null if table absent)
+
+6. Report all four values in the dedicated output fields. Do NOT add pos_count to the issues list.
+   Add "pos_count" to not_found only if BOTH pos_count_title_stab AND pos_count_title_matten are null.

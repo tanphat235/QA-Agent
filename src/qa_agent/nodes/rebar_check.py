@@ -7,7 +7,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.outputs import LLMResult
 
 from qa_agent.state import GraphState, Issue
-from qa_agent.rag.retriever import get_node_images, get_check_prompt, get_check_meta
+from qa_agent.rag.retriever import get_check_prompt, get_check_meta
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +74,7 @@ _PASS_ITEM_RE = re.compile(
     r"[-–—]\s*pass(?:es)?\b"
     r"|^pass(?:es)?\b"
     r"|\bthis pass(?:es)?\b"
-    r"|\bno\b.{0,80}\bfound\b"
+    r"|\bno\s+(?:issues?|errors?|violations?|problems?|findings?|spelling\s+errors?)\s+(?:were\s+)?found\b"
     r"|\bno issue\b"
     r"|\bexactly meets\b"
     r"|\bdeclared\b.{0,30}\bmatches\b.{0,30}\bcalculated\b"
@@ -160,7 +160,7 @@ class _RebarResult(BaseModel):
 
 
 def rebar_check(state: GraphState) -> dict:
-    pdf_data: str = state["pdf_data"]  # type: ignore[assignment]
+    formatted: str = (state.get("pdf_content") or {}).get("formatted") or ""
     enabled_sub = (state.get("enabled_sub_checks") or {}).get("rebar")
 
     llm = ChatAnthropic(  # type: ignore[call-arg]
@@ -169,19 +169,14 @@ def rebar_check(state: GraphState) -> dict:
         max_tokens=4096,  # type: ignore[call-arg]
     ).with_structured_output(_RebarResult).with_retry(stop_after_attempt=2)
 
-    kb_images = get_node_images("rebar")
-    human_content: list[dict] = []
-    for i, img in enumerate(kb_images):
-        block = dict(img)
-        if i == len(kb_images) - 1:
-            block["cache_control"] = {"type": "ephemeral"}
-        human_content.append(block)
-    human_content.append({
-        "type": "document",
-        "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data},
-        "cache_control": {"type": "ephemeral"},
-    })
-    human_content.append({"type": "text", "text": _build_rebar_task(enabled_sub)})
+    human_content: list[dict] = [
+        {
+            "type": "text",
+            "text": formatted,
+            "cache_control": {"type": "ephemeral"},
+        },
+        {"type": "text", "text": _build_rebar_task(enabled_sub)},
+    ]
 
     result: _RebarResult = llm.invoke(  # type: ignore[assignment]
         [

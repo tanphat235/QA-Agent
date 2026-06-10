@@ -7,11 +7,11 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.outputs import LLMResult
 
 from qa_agent.state import GraphState, Issue
-from qa_agent.rag.retriever import get_node_images, get_check_prompt, get_check_meta
+from qa_agent.rag.retriever import get_check_prompt, get_check_meta
 
 logger = logging.getLogger(__name__)
 
-# Must be byte-for-byte identical across all nodes so Anthropic can share the cached PDF prefix.
+# Must be byte-for-byte identical across all nodes so Anthropic can share the cached text prefix.
 _COMMON_SYSTEM = """\
 You are a senior structural QA reviewer for precast concrete wall drawings. Inspect the PDF drawing visually and technically.
 
@@ -36,8 +36,8 @@ German terminology:
 """
 
 _TASK_INTRO = """\
-Inspect visible text, annotations, views, and tables in this precast wall structural drawing.
-Report ONLY issues you can directly observe in the PDF.\
+The drawing content below was extracted from a precast wall structural drawing PDF.
+Inspect the text and tables and report ONLY issues you can directly observe.\
 """
 
 # Drop LLM items that describe a passing result instead of an actual violation.
@@ -45,7 +45,7 @@ _PASS_ITEM_RE = re.compile(
     r"[-–—]\s*pass(?:es)?\b"
     r"|^pass(?:es)?\b"
     r"|\bthis pass(?:es)?\b"
-    r"|\bno\b.{0,80}\bfound\b"
+    r"|\bno\s+(?:issues?|errors?|violations?|problems?|findings?|spelling\s+errors?)\s+(?:were\s+)?found\b"
     r"|\bno issue\b"
     r"|\bexactly meets\b"
     r"|\bdeclared\b.{0,30}\bmatches\b.{0,30}\bcalculated\b"
@@ -54,11 +54,12 @@ _PASS_ITEM_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
-_SPELL_CHECKS = [
-    "spelling", "section_name", "parts_label", "drawing_title", "pos_count",
-]
-_CHECK_PROMPTS: dict[str, str] = {k: get_check_prompt("spell", k) for k in _SPELL_CHECKS}
-_CHECK_META: dict[str, tuple[str, str, str]] = {k: get_check_meta("spell", k) for k in _SPELL_CHECKS}
+# pos_count is handled entirely by Python (pdfplumber data) — not sent to LLM
+_LLM_CHECKS = ["spelling", "section_name", "parts_label", "drawing_title"]
+_ALL_CHECKS = _LLM_CHECKS + ["pos_count"]
+
+_CHECK_PROMPTS: dict[str, str] = {k: get_check_prompt("spell", k) for k in _LLM_CHECKS}
+_CHECK_META: dict[str, tuple[str, str, str]] = {k: get_check_meta("spell", k) for k in _ALL_CHECKS}
 
 _TASK_OUTRO_TPL = """\
 
@@ -71,12 +72,11 @@ OUTPUT FORMAT — one item per finding
   page:        1
   location:    specific location (e.g. "Wandansicht element label" or "title block drawing name field")
   confidence:  0.65–1.0 — omit the item entirely if confidence is below 0.65
-  not_found:   list of check keys where prerequisite drawing elements were absent, e.g. ["grid_lines"]
+  not_found:   list of check keys where prerequisite drawing elements were absent
 
 RULES:
   • OUTPUT ONLY actual problems — items that clearly do not comply.
   • Do NOT output any item to describe a passing check or a verified-correct result.
-    (e.g. "all section names present" or "no spelling errors found" → output nothing for that check)
   • An empty issues list means ALL enabled checks passed — that is the correct output when no problems exist.
   • Do NOT flag uncertain or marginally readable text.
   • If prerequisite drawing elements are absent, add the check key to not_found instead of skipping.\
@@ -84,12 +84,10 @@ RULES:
 
 
 def _build_spell_task(enabled_sub: list[str] | None) -> str:
-    active = list(_CHECK_PROMPTS.keys()) if enabled_sub is None else [k for k in enabled_sub if k in _CHECK_PROMPTS]
+    active = [k for k in _LLM_CHECKS if enabled_sub is None or k in (enabled_sub or [])]
     check_keys = " | ".join(f'"{k}"' for k in active)
     blocks = "\n\n".join(_CHECK_PROMPTS[k] for k in active)
     return _TASK_INTRO + "\n\n" + blocks + _TASK_OUTRO_TPL.format(check_keys=check_keys)
-
-
 
 
 class _UsageCallback(BaseCallbackHandler):
@@ -113,7 +111,7 @@ class _UsageCallback(BaseCallbackHandler):
 
 
 class _SpellIssue(BaseModel):
-    check: str = Field(description="spelling | section_name | parts_label | drawing_title | pos_count")
+    check: str = Field(description="spelling | section_name | parts_label | drawing_title")
     severity: str = Field(description="error | warning")
     description: str
     page: int
@@ -127,28 +125,33 @@ class _SpellResult(BaseModel):
 
 
 def spell_check(state: GraphState) -> dict:
-    pdf_data: str = state["pdf_data"]  # type: ignore[assignment]
+    pdf_content = state.get("pdf_content") or {}
+    formatted: str = pdf_content.get("formatted") or ""
+    title_block: dict = pdf_content.get("title_block") or {}
     enabled_sub = (state.get("enabled_sub_checks") or {}).get("spell")
 
+    # ── pos_count: fully Python-based, no LLM ───────────────────────────────
+    ts = str(title_block.get("letzte_stabstahlposition") or "").strip()
+    ms = str(title_block.get("max_stabliste_pos") or "").strip()
+    tm = str(title_block.get("letzte_mattenposition") or "").strip()
+    mm = str(title_block.get("max_mattenliste_pos") or "").strip()
+    print(f"[pos_count] TITLE_STAB={ts!r}  MAX_STAB={ms!r}  TITLE_MATTEN={tm!r}  MAX_MATTEN={mm!r}")
+
+    # ── LLM call for the other spell checks ─────────────────────────────────
     llm = ChatAnthropic(  # type: ignore[call-arg]
         model="claude-sonnet-4-6",  # type: ignore[call-arg]
         temperature=0,  # type: ignore[call-arg]
         max_tokens=4096,  # type: ignore[call-arg]
     ).with_structured_output(_SpellResult).with_retry(stop_after_attempt=2)
 
-    kb_images = get_node_images("spell")
-    human_content: list[dict] = []
-    for i, img in enumerate(kb_images):
-        block = dict(img)
-        if i == len(kb_images) - 1:
-            block["cache_control"] = {"type": "ephemeral"}
-        human_content.append(block)
-    human_content.append({
-        "type": "document",
-        "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data},
-        "cache_control": {"type": "ephemeral"},
-    })
-    human_content.append({"type": "text", "text": _build_spell_task(enabled_sub)})
+    human_content: list[dict] = [
+        {
+            "type": "text",
+            "text": formatted,
+            "cache_control": {"type": "ephemeral"},
+        },
+        {"type": "text", "text": _build_spell_task(enabled_sub)},
+    ]
 
     result: _SpellResult = llm.invoke(  # type: ignore[assignment]
         [
@@ -157,7 +160,7 @@ def spell_check(state: GraphState) -> dict:
         ],
         config={"callbacks": [_UsageCallback("spell_check")]},
     )
-    print(f"[usage][spell_check] raw items from LLM: {len(result.issues)}")
+    print(f"[spell_check] raw items from LLM: {len(result.issues)}")
 
     by_check: dict[str, list[_SpellIssue]] = {k: [] for k in _CHECK_META}
     for item in result.issues:
@@ -165,8 +168,27 @@ def spell_check(state: GraphState) -> dict:
             by_check[item.check].append(item)
 
     not_found_set = set(result.not_found or [])
-    issues: list[Issue] = []
 
+    # ── pos_count Python comparison ──────────────────────────────────────────
+    pos_enabled = enabled_sub is None or "pos_count" in (enabled_sub or [])
+    if pos_enabled:
+        if not ts and not tm:
+            not_found_set.add("pos_count")
+        else:
+            if ts and ms and ts != ms:
+                by_check["pos_count"].append(_SpellIssue(
+                    check="pos_count", severity="error",
+                    description=f"letzte Stabstahlposition: title block={ts}, Stabliste max={ms}",
+                    page=1, location="title block", confidence=1.0,
+                ))
+            if tm and mm and tm != mm:
+                by_check["pos_count"].append(_SpellIssue(
+                    check="pos_count", severity="error",
+                    description=f"letzte Mattenposition: title block={tm}, Mattenstahlliste max={mm}",
+                    page=1, location="title block", confidence=1.0,
+                ))
+
+    issues: list[Issue] = []
     for check_key, (check_name, pass_desc, nf_desc) in _CHECK_META.items():
         if enabled_sub is not None and check_key not in enabled_sub:
             continue
@@ -184,7 +206,10 @@ def spell_check(state: GraphState) -> dict:
             continue
         found = by_check[check_key]
         passed = len(found) == 0
-        summary_desc = pass_desc if passed else (f"FAIL — {found[0].description}" if len(found) == 1 else f"FAIL — {len(found)} issue(s) found.")
+        summary_desc = pass_desc if passed else (
+            f"FAIL — {found[0].description}" if len(found) == 1
+            else f"FAIL — {len(found)} issue(s) found."
+        )
         issues.append({
             "category": "spell",
             "check_name": check_name,
