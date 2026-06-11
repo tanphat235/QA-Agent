@@ -57,7 +57,7 @@ _PASS_ITEM_RE = re.compile(
 
 # pos_count and revision_check are handled entirely by Python — not sent to LLM
 _LLM_CHECKS = ["spelling", "section_name", "parts_label", "drawing_title"]
-_ALL_CHECKS = _LLM_CHECKS + ["pos_count", "revision_check", "drawing_status", "exposition_class"]
+_ALL_CHECKS = _LLM_CHECKS + ["pos_count", "revision_check", "drawing_status", "exposition_class", "steel_content"]
 
 # Expected concrete cover values per exposition class — BẢNG 3.1, φ10 default
 # (Cmin,dur, ΔCdev, Cv)
@@ -147,6 +147,9 @@ def spell_check(state: GraphState) -> dict:
     title_block: dict = pdf_content.get("title_block") or {}
     enabled_sub = (state.get("enabled_sub_checks") or {}).get("spell")
 
+    # Holds dynamically computed pass messages (only used for steel_content currently)
+    dynamic_pass_descs: dict[str, str] = {}
+
     # ── pos_count: fully Python-based, no LLM ───────────────────────────────
     ts = str(title_block.get("letzte_stabstahlposition") or "").strip()
     ms = str(title_block.get("max_stabliste_pos") or "").strip()
@@ -180,6 +183,11 @@ def spell_check(state: GraphState) -> dict:
     btd_dc       = str(title_block.get("betondeckung_delta_c") or "").strip()
     btd_cv       = str(title_block.get("betondeckung_cv") or "").strip()
     print(f"[exposition_class] XC={xc_code!r}  cmin_dur={btd_cmin!r}  delta_c={btd_dc!r}  cv={btd_cv!r}")
+
+    # ── steel_content: log pre-extracted values ──────────────────────────────
+    mass_str = str(title_block.get("gesamtmasse") or "").strip()
+    vol_str  = str(title_block.get("volumen") or "").strip()
+    print(f"[steel_content] gesamtmasse={mass_str!r}  volumen={vol_str!r}")
 
     # ── LLM call for the other spell checks ─────────────────────────────────
     llm = ChatAnthropic(  # type: ignore[call-arg]
@@ -328,6 +336,29 @@ def spell_check(state: GraphState) -> dict:
                     page=1, location="title block BETONDECKUNG", confidence=1.0,
                 ))
 
+    # ── steel_content Python computation ────────────────────────────────────
+    sc_enabled = enabled_sub is None or "steel_content" in (enabled_sub or [])
+    if sc_enabled:
+        if not mass_str or not vol_str:
+            not_found_set.add("steel_content")
+            print("[steel_content] NOT FOUND — mass or volume is empty")
+        else:
+            try:
+                mass = float(mass_str.replace(",", "."))
+                vol  = float(vol_str.replace(",", "."))
+                if vol > 0:
+                    ratio = mass / vol
+                    dynamic_pass_descs["steel_content"] = (
+                        f"PASS — Steel content: {mass:.2f} kg / {vol:.2f} m³ = {ratio:.1f} kg/m³"
+                    )
+                    print(f"[steel_content] {mass:.2f} / {vol:.2f} = {ratio:.1f} kg/m³")
+                else:
+                    not_found_set.add("steel_content")
+                    print("[steel_content] NOT FOUND — volume is zero")
+            except ValueError as exc:
+                not_found_set.add("steel_content")
+                print(f"[steel_content] NOT FOUND — parse error: {exc}")
+
     issues: list[Issue] = []
     for check_key, (check_name, pass_desc, nf_desc) in _CHECK_META.items():
         if enabled_sub is not None and check_key not in enabled_sub:
@@ -346,7 +377,7 @@ def spell_check(state: GraphState) -> dict:
             continue
         found = by_check[check_key]
         passed = len(found) == 0
-        summary_desc = pass_desc if passed else (
+        summary_desc = dynamic_pass_descs.get(check_key, pass_desc) if passed else (
             f"FAIL — {found[0].description}" if len(found) == 1
             else f"FAIL — {len(found)} issue(s) found."
         )

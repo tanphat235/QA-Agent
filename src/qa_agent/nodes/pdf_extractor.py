@@ -21,6 +21,8 @@ def extract_pdf_content(pdf_path: str) -> dict:
         title_block["drawing_no_value"] = _find_text_below_label(words, "Drawing No")
         title_block["drawing_name"] = _find_drawing_name(words, page.height)
         title_block["planfreigabe_text"] = _find_planfreigabe_text(raw_text)
+        title_block["gesamtmasse"] = _find_total_mass(raw_text)
+        title_block["volumen"] = _find_volumen(words)
 
         return {
             "raw_text": raw_text,
@@ -239,6 +241,66 @@ def _find_betondeckung_values(words: list[dict]) -> dict:
     return result
 
 
+# ── Steel content: total mass and element volume ─────────────────────────────
+
+def _find_total_mass(raw_text: str) -> str | None:
+    """Return the sum of all Gesamtmasse [kg] values found in the drawing text.
+
+    Uses raw-text regex so font colour or word-split variations don't matter.
+    Sums across both Stabliste and Mattenstahlliste if both are present.
+    """
+    # Matches: "Gesamtmasse [kg] : 392.29"  or  "Gesamtmasse[kg]:392,29"  etc.
+    matches = re.findall(
+        r"Gesamtmasse\s*\[?kg\]?\s*:?\s*([\d.,]+)",
+        raw_text,
+        re.IGNORECASE,
+    )
+    print(f"[steel_content] Gesamtmasse raw_text matches: {matches}")
+    if not matches:
+        print("[steel_content] Gesamtmasse: no match in raw_text — returning None")
+        return None
+    total = 0.0
+    for m in matches:
+        try:
+            total += float(m.replace(",", "."))
+            print(f"[steel_content] Gesamtmasse: parsed {m!r} → running total={total:.2f}")
+        except ValueError as exc:
+            print(f"[steel_content] Gesamtmasse: could not parse {m!r}: {exc}")
+    return f"{total:.2f}" if total > 0 else None
+
+
+def _find_volumen(words: list[dict]) -> str | None:
+    """Return the volume value from the title block 'Volumen' cell.
+
+    Strategy: find the 'Volumen' label word, then pick the first decimal number
+    directly below it.  No x-column constraint is applied because the displayed
+    number may be centred differently than the label text.
+    """
+    label_word = next(
+        (w for w in words if "volumen" in w["text"].lower()),
+        None,
+    )
+    if label_word is None:
+        print("[steel_content] Volumen: label not found in words")
+        return None
+    print(f"[steel_content] Volumen label: {label_word['text']!r} at x0={round(label_word['x0'])} bottom={round(label_word['bottom'])}")
+
+    # Collect all decimal numbers below the label within 100 pt (no x constraint)
+    below = [
+        w for w in words
+        if w["top"] > label_word["bottom"] + _BELOW_Y_MIN
+        and w["top"] <= label_word["bottom"] + 100
+        and re.fullmatch(r"\d+[.,]\d+", w["text"].strip())  # require decimal — avoids stray integers
+    ]
+    print(f"[steel_content] Volumen below candidates (±100pt, any x): {[(w['text'], round(w['x0']), round(w['top'])) for w in below]}")
+    if below:
+        result = min(below, key=lambda w: w["top"])["text"].strip()
+        print(f"[steel_content] Volumen: picked {result!r}")
+        return result
+    print("[steel_content] Volumen: no decimal found below label — returning None")
+    return None
+
+
 # ── Title block: pos_count labels ───────────────────────────────────────────
 
 def _extract_title_block(words: list[dict]) -> dict:
@@ -253,6 +315,7 @@ def _extract_title_block(words: list[dict]) -> dict:
         "betondeckung_cmin_dur":    btd["cmin_dur"],
         "betondeckung_delta_c":     btd["delta_c"],
         "betondeckung_cv":          btd["cv"],
+        # gesamtmasse and volumen are set in extract_pdf_content
         # planfreigabe_text is set in extract_pdf_content using raw_text
     }
 
@@ -445,6 +508,8 @@ def _format_for_llm(raw_text: str, title_block: dict) -> str:
         f"Betondeckung Cmin,dur:       {title_block.get('betondeckung_cmin_dur') or '(not found)'}",
         f"Betondeckung ΔCdev:          {title_block.get('betondeckung_delta_c') or '(not found)'}",
         f"Betondeckung Cv:             {title_block.get('betondeckung_cv') or '(not found)'}",
+        f"Gesamtmasse (total mass):    {title_block.get('gesamtmasse') or '(not found)'} kg",
+        f"Volumen (element volume):    {title_block.get('volumen') or '(not found)'} m³",
     ]
     parts.extend(tb_lines)
     return "\n".join(parts)

@@ -103,6 +103,7 @@ const NODE_SECTIONS = [
       { key: 'revision_check',   title: 'Revision Code Consistency' },
       { key: 'drawing_status',   title: 'Drawing Status' },
       { key: 'exposition_class', title: 'Exposition Class vs Concrete Cover' },
+      { key: 'steel_content',   title: 'Steel Content (kg/m³)' },
     ],
   },
   {
@@ -1672,6 +1673,11 @@ export default function App() {
                                   }`}>{group.displayName}</div>
                                   {gNotFound && group.overall && (
                                     <div className="text-[10px] text-gray-400 mt-0.5 leading-snug">
+                                      {group.overall.description.replace(/^(PASS|FAIL|NOT FOUND|N\/A)\s*[—–-]\s*/i, '')}
+                                    </div>
+                                  )}
+                                  {gPassed === true && group.overall && (
+                                    <div className="text-[10px] text-green-600 mt-0.5 leading-snug">
                                       {group.overall.description.replace(/^(PASS|FAIL|NOT FOUND|N\/A)\s*[—–-]\s*/i, '')}
                                     </div>
                                   )}
