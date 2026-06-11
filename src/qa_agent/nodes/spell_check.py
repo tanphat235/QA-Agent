@@ -55,9 +55,9 @@ _PASS_ITEM_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
-# pos_count is handled entirely by Python (pdfplumber data) — not sent to LLM
+# pos_count and revision_check are handled entirely by Python — not sent to LLM
 _LLM_CHECKS = ["spelling", "section_name", "parts_label", "drawing_title"]
-_ALL_CHECKS = _LLM_CHECKS + ["pos_count"]
+_ALL_CHECKS = _LLM_CHECKS + ["pos_count", "revision_check"]
 
 _CHECK_PROMPTS: dict[str, str] = {k: get_check_prompt("spell", k) for k in _LLM_CHECKS}
 _CHECK_META: dict[str, tuple[str, str, str]] = {k: get_check_meta("spell", k) for k in _ALL_CHECKS}
@@ -151,6 +151,11 @@ def spell_check(state: GraphState) -> dict:
     dname  = str(title_block.get("drawing_name") or "").strip()
     print(f"[drawing_title] drawing_title_value={dt_val!r}  drawing_no_value={dn_val!r}  drawing_name={dname!r}")
 
+    # ── revision_check: log pre-extracted values for debugging ───────────────
+    rev_tb  = str(title_block.get("revision_title_block") or "").strip().upper()
+    rev_tbl = str(title_block.get("revision_table_last") or "").strip().upper()
+    print(f"[revision_check] TITLE_BLOCK={rev_tb!r}  TABLE_LAST={rev_tbl!r}")
+
     # ── LLM call for the other spell checks ─────────────────────────────────
     llm = ChatAnthropic(  # type: ignore[call-arg]
         model="claude-sonnet-4-6",  # type: ignore[call-arg]
@@ -203,6 +208,18 @@ def spell_check(state: GraphState) -> dict:
                     description=f"letzte Mattenposition: title block={tm}, Mattenstahlliste max={mm}",
                     page=1, location="title block", confidence=1.0,
                 ))
+
+    # ── revision_check Python comparison ────────────────────────────────────
+    rev_enabled = enabled_sub is None or "revision_check" in (enabled_sub or [])
+    if rev_enabled:
+        if not rev_tb or not rev_tbl:
+            not_found_set.add("revision_check")
+        elif rev_tb != rev_tbl:
+            by_check["revision_check"].append(_SpellIssue(
+                check="revision_check", severity="error",
+                description=f"Revision mismatch: title block={rev_tb}, last revision in table={rev_tbl}",
+                page=1, location="title block / revision history table", confidence=1.0,
+            ))
 
     issues: list[Issue] = []
     for check_key, (check_name, pass_desc, nf_desc) in _CHECK_META.items():

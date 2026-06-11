@@ -146,10 +146,15 @@ def _extract_title_block(words: list[dict]) -> dict:
     return {
         "letzte_stabstahlposition": _find_number_right_of_label(words, "Stabstahlposition"),
         "letzte_mattenposition":    _find_number_right_of_label(words, "Mattenposition"),
+        "revision_title_block":     _find_revision_in_title_block(words),
+        "revision_table_last":      _find_last_revision_in_table(words),
     }
 
 
 # ── Schedule max-position: spatial column search ────────────────────────────
+
+_REV_CODE_RE = re.compile(r"[A-Z]{1,2}\d{1,3}", re.IGNORECASE)
+_REV_COL_MARGIN = 15  # pt — column width tolerance around "Rev" header
 
 _POS_X_MARGIN = 8  # pt — column width tolerance around "Pos." header
 
@@ -189,6 +194,60 @@ def _max_pos_in_schedule(words: list[dict], schedule_keyword: str) -> str | None
     return str(max(values)) if values else None
 
 
+# ── Revision: title block field and history table ───────────────────────────
+
+def _find_revision_in_title_block(words: list[dict]) -> str | None:
+    """Return the revision code in the cell below the 'Revision' label in the title block."""
+    label_word = next(
+        (w for w in words if re.fullmatch(r"Revision:?", w["text"].strip(), re.IGNORECASE)),
+        None,
+    )
+    if label_word is None:
+        return None
+
+    # Constrain x to the Revision cell column so we don't bleed into the Status column.
+    col_x0 = label_word["x0"] - 8
+    col_x1 = label_word["x1"] + 8
+
+    below = [
+        w for w in words
+        if w["top"] > label_word["bottom"] + _BELOW_Y_MIN
+        and w["top"] <= label_word["bottom"] + _BELOW_Y_MAX
+        and w["x0"] >= col_x0
+        and w["x0"] <= col_x1
+        and _REV_CODE_RE.fullmatch(w["text"].strip())
+    ]
+    if below:
+        return min(below, key=lambda w: w["top"])["text"].strip()
+
+    return None
+
+
+def _find_last_revision_in_table(words: list[dict]) -> str | None:
+    """Return the topmost (most recent) revision code in the revision history table."""
+    rev_header = next(
+        (w for w in words if re.fullmatch(r"Rev\.?", w["text"].strip(), re.IGNORECASE)),
+        None,
+    )
+    if rev_header is None:
+        return None
+
+    col_x0 = rev_header["x0"] - _REV_COL_MARGIN
+    col_x1 = rev_header["x1"] + _REV_COL_MARGIN
+
+    entries = [
+        w for w in words
+        if w["top"] > rev_header["bottom"]
+        and w["x0"] >= col_x0
+        and w["x1"] <= col_x1
+        and _REV_CODE_RE.fullmatch(w["text"].strip())
+    ]
+    if not entries:
+        return None
+
+    return min(entries, key=lambda w: w["top"])["text"].strip()
+
+
 # ── LLM text formatter ───────────────────────────────────────────────────────
 
 def _format_for_llm(raw_text: str, title_block: dict) -> str:
@@ -200,6 +259,8 @@ def _format_for_llm(raw_text: str, title_block: dict) -> str:
         f"Drawing Title: {title_block.get('drawing_title_value') or '(empty)'}",
         f"Drawing No.:   {title_block.get('drawing_no_value') or '(empty)'}",
         f"Drawing Name (top of sheet): {title_block.get('drawing_name') or '(not found)'}",
+        f"Revision (title block):      {title_block.get('revision_title_block') or '(empty)'}",
+        f"Revision (last in table):    {title_block.get('revision_table_last') or '(not found)'}",
     ]
     parts.extend(tb_lines)
     return "\n".join(parts)

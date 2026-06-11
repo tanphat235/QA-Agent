@@ -100,6 +100,7 @@ const NODE_SECTIONS = [
       { key: 'parts_label',      title: 'Parts Label Consistency' },
       { key: 'drawing_title',    title: 'Drawing Title vs Title Block' },
       { key: 'pos_count',        title: 'Last Position Number vs Title Block' },
+      { key: 'revision_check',   title: 'Revision Code Consistency' },
     ],
   },
   {
