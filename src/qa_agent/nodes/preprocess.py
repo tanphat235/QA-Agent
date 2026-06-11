@@ -100,5 +100,10 @@ def preprocess(state: GraphState) -> dict:
         f"  letzte_mattenposition={tb.get('letzte_mattenposition')!r}"
         f"  max_mattenliste={tb.get('max_mattenliste_pos')!r}"
     )
+    print(
+        f"[preprocess] drawing_title_value={tb.get('drawing_title_value')!r}"
+        f"  drawing_no_value={tb.get('drawing_no_value')!r}"
+        f"  drawing_name={tb.get('drawing_name')!r}"
+    )
 
     return {"page_count": page_count, "pdf_data": pdf_data, "pdf_content": pdf_content}

@@ -15,12 +15,13 @@ logger = logging.getLogger(__name__)
 _COMMON_SYSTEM = """\
 You are a senior structural QA reviewer for precast concrete wall drawings. Inspect the PDF drawing visually and technically.
 
-CRITICAL — READ FROM PDF ONLY:
+CRITICAL — READ FROM EXTRACTED TEXT ONLY:
   Every value you use (numbers, labels, part codes, Pos numbers, dimensions, names) MUST be read
-  directly from the submitted PDF drawing. Never use memorized data, training knowledge, or cached
-  information from prior runs. Never apply product knowledge (e.g. manufacturer names, part
-  descriptions) from memory — read only what is visibly printed in the drawing.
-  Any number or label not visible in the PDF must not be referenced.
+  directly from the extracted drawing text provided below. Never use memorized data, training
+  knowledge, or information from any previous run or previously seen drawing.
+  If a piece of text in the extraction appears fragmented, garbled, or unclear, do NOT reconstruct
+  or infer its intended value — report it as unreadable and add the check to not_found instead.
+  Never "imply", "infer", or "reconstruct" a value. If you cannot read it directly, it is not_found.
 
 CRITICAL — NEVER SILENTLY PASS:
   If any information required by a check is missing, not visible, or not readable in the drawing,
@@ -159,42 +160,28 @@ class _RebarResult(BaseModel):
     not_found: list[str] = Field(default_factory=list, description="Check keys where required drawing dimensions were not visible")
 
 
-def rebar_check(state: GraphState) -> dict:
-    formatted: str = (state.get("pdf_content") or {}).get("formatted") or ""
-    enabled_sub = (state.get("enabled_sub_checks") or {}).get("rebar")
-
-    llm = ChatAnthropic(  # type: ignore[call-arg]
-        model="claude-sonnet-4-6",  # type: ignore[call-arg]
-        temperature=0,  # type: ignore[call-arg]
-        max_tokens=4096,  # type: ignore[call-arg]
-    ).with_structured_output(_RebarResult).with_retry(stop_after_attempt=2)
-
-    human_content: list[dict] = [
-        {
-            "type": "text",
-            "text": formatted,
-            "cache_control": {"type": "ephemeral"},
-        },
-        {"type": "text", "text": _build_rebar_task(enabled_sub)},
-    ]
-
-    result: _RebarResult = llm.invoke(  # type: ignore[assignment]
-        [
-            SystemMessage(content=_COMMON_SYSTEM),
-            HumanMessage(content=human_content),
-        ],
-        config={"callbacks": [_UsageCallback("rebar_check")]},
-    )
-    print(f"[usage][rebar_check] raw items from LLM: {len(result.issues)}")
-
+def _filter_items(result: _RebarResult) -> dict[str, list[_RebarIssue]]:
     by_check: dict[str, list[_RebarIssue]] = {k: [] for k in _CHECK_META}
     for item in result.issues:
         if item.confidence >= 0.60 and item.check in by_check and not _PASS_ITEM_RE.search(item.description):
             by_check[item.check].append(item)
+    return by_check
 
-    not_found_set = set(result.not_found or [])
+
+def _summary_desc(pass_desc: str, found: list[_RebarIssue]) -> str:
+    if not found:
+        return pass_desc
+    if len(found) == 1:
+        return f"FAIL — {found[0].description}"
+    return f"FAIL — {len(found)} issue(s) found."
+
+
+def _build_issues(
+    by_check: dict[str, list[_RebarIssue]],
+    not_found_set: set[str],
+    enabled_sub: list[str] | None,
+) -> list[Issue]:
     issues: list[Issue] = []
-
     for check_key, (check_name, pass_desc, nf_desc) in _CHECK_META.items():
         if enabled_sub is not None and check_key not in enabled_sub:
             continue
@@ -212,13 +199,12 @@ def rebar_check(state: GraphState) -> dict:
             continue
         found = by_check[check_key]
         passed = len(found) == 0
-        summary_desc = pass_desc if passed else (f"FAIL — {found[0].description}" if len(found) == 1 else f"FAIL — {len(found)} issue(s) found.")
         issues.append({
             "category": "rebar",
             "check_name": check_name,
             "passed": passed,
             "severity": "info" if passed else "error",
-            "description": summary_desc,
+            "description": _summary_desc(pass_desc, found),
             "page": 1,
             "location": "drawing",
             "confidence": 1.0,
@@ -232,5 +218,30 @@ def rebar_check(state: GraphState) -> dict:
                 "location": item.location,
                 "confidence": item.confidence,
             })
+    return issues
 
-    return {"rebar_issues": issues}
+
+def rebar_check(state: GraphState) -> dict:
+    formatted: str = (state.get("pdf_content") or {}).get("formatted") or ""
+    enabled_sub = (state.get("enabled_sub_checks") or {}).get("rebar")
+
+    llm = ChatAnthropic(  # type: ignore[call-arg]
+        model="claude-sonnet-4-6",  # type: ignore[call-arg]
+        temperature=0,  # type: ignore[call-arg]
+        max_tokens=4096,  # type: ignore[call-arg]
+    ).with_structured_output(_RebarResult).with_retry(stop_after_attempt=2)
+
+    human_content: list[dict] = [
+        {"type": "text", "text": formatted, "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": _build_rebar_task(enabled_sub)},
+    ]
+
+    result: _RebarResult = llm.invoke(  # type: ignore[assignment]
+        [SystemMessage(content=_COMMON_SYSTEM), HumanMessage(content=human_content)],
+        config={"callbacks": [_UsageCallback("rebar_check")]},
+    )
+    print(f"[usage][rebar_check] raw items from LLM: {len(result.issues)}")
+
+    by_check = _filter_items(result)
+    not_found_set = set(result.not_found or [])
+    return {"rebar_issues": _build_issues(by_check, not_found_set, enabled_sub)}

@@ -15,12 +15,13 @@ logger = logging.getLogger(__name__)
 _COMMON_SYSTEM = """\
 You are a senior structural QA reviewer for precast concrete wall drawings. Inspect the PDF drawing visually and technically.
 
-CRITICAL — READ FROM PDF ONLY:
+CRITICAL — READ FROM EXTRACTED TEXT ONLY:
   Every value you use (numbers, labels, part codes, Pos numbers, dimensions, names) MUST be read
-  directly from the submitted PDF drawing. Never use memorized data, training knowledge, or cached
-  information from prior runs. Never apply product knowledge (e.g. manufacturer names, part
-  descriptions) from memory — read only what is visibly printed in the drawing.
-  Any number or label not visible in the PDF must not be referenced.
+  directly from the extracted drawing text provided below. Never use memorized data, training
+  knowledge, or information from any previous run or previously seen drawing.
+  If a piece of text in the extraction appears fragmented, garbled, or unclear, do NOT reconstruct
+  or infer its intended value — report it as unreadable and add the check to not_found instead.
+  Never "imply", "infer", or "reconstruct" a value. If you cannot read it directly, it is not_found.
 
 CRITICAL — NEVER SILENTLY PASS:
   If any information required by a check is missing, not visible, or not readable in the drawing,
@@ -74,6 +75,12 @@ OUTPUT FORMAT — one item per finding
   confidence:  0.65–1.0 — omit the item entirely if confidence is below 0.65
   not_found:   list of check keys where prerequisite drawing elements were absent
 
+DEBUG NOTES — always populate one entry per active check, regardless of pass/fail:
+  spelling:      "spelling: scanned=[<areas checked>] | misspellings=[<word: correction>,...] | overlap/truncated=[<locations>]"
+  section_name:  "section_name: MARKERS=[<list from Ansicht/Bewehrung>] | VIEWS=[<list of Schnitt/Draufsicht titles>] | unmatched_markers=[...] | unmatched_views=[...]"
+  parts_label:   "parts_label: EBT found=[<part codes>] | MT found=[<part codes>] | missing_label=[...] | wrong_label=[...]"
+  drawing_title: "drawing_title: TITLE_DE=[<value or empty>] | TITLE_EN=[<value or empty>] | Drawing_No=[<value or empty>] | drawing_name=[<sheet header>] | lang_match=[PASS/FAIL] | name_match=[PASS/FAIL]"
+
 RULES:
   • OUTPUT ONLY actual problems — items that clearly do not comply.
   • Do NOT output any item to describe a passing check or a verified-correct result.
@@ -122,6 +129,7 @@ class _SpellIssue(BaseModel):
 class _SpellResult(BaseModel):
     issues: list[_SpellIssue]
     not_found: list[str] = Field(default_factory=list, description="Check keys where prerequisite drawing elements were absent")
+    debug_notes: list[str] = Field(default_factory=list, description="One debug entry per active check showing extracted values")
 
 
 def spell_check(state: GraphState) -> dict:
@@ -136,6 +144,12 @@ def spell_check(state: GraphState) -> dict:
     tm = str(title_block.get("letzte_mattenposition") or "").strip()
     mm = str(title_block.get("max_mattenliste_pos") or "").strip()
     print(f"[pos_count] TITLE_STAB={ts!r}  MAX_STAB={ms!r}  TITLE_MATTEN={tm!r}  MAX_MATTEN={mm!r}")
+
+    # ── drawing_title: log pre-extracted values for debugging ────────────────
+    dt_val = str(title_block.get("drawing_title_value") or "").strip()
+    dn_val = str(title_block.get("drawing_no_value") or "").strip()
+    dname  = str(title_block.get("drawing_name") or "").strip()
+    print(f"[drawing_title] drawing_title_value={dt_val!r}  drawing_no_value={dn_val!r}  drawing_name={dname!r}")
 
     # ── LLM call for the other spell checks ─────────────────────────────────
     llm = ChatAnthropic(  # type: ignore[call-arg]
@@ -161,6 +175,8 @@ def spell_check(state: GraphState) -> dict:
         config={"callbacks": [_UsageCallback("spell_check")]},
     )
     print(f"[spell_check] raw items from LLM: {len(result.issues)}")
+    for note in result.debug_notes:
+        print(f"[debug][spell_check] {note}")
 
     by_check: dict[str, list[_SpellIssue]] = {k: [] for k in _CHECK_META}
     for item in result.issues:

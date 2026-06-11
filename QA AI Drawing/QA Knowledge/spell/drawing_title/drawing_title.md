@@ -1,4 +1,4 @@
-﻿# Drawing Title vs Title Block
+# Drawing Title vs Title Block
 > **Domain:** Spelling & Title Block | **Check key:** `drawing_title`
 
 ## Display Name
@@ -11,27 +11,47 @@ PASS — Drawing Title matches the Title Block field in either German or English
 
 ## Not Found
 
-NOT FOUND — Drawing Title or Title Block field not visible in the drawing.
+NOT FOUND — Drawing Title or Drawing No. field is empty or not found in the title block.
 
 ## Description
 
-Check whether the Drawing Title matches the Title Block field in at least one language.
+Check whether the Drawing Title and Drawing No. are present and match the drawing name at the top of the sheet.
 
 ## Check Prompt
 
-CHECK — Drawing Title vs Title Block (drawing_title)
-Find the Drawing Title field inside the title block (Schriftfeld / title block area, usually
-in the lower-right corner of the sheet).
-The field may contain a bilingual entry separated by "/" (e.g. "Schalung und Bewehrung ... /
-Formwork and reinforcement ..."), or a single-language entry.
+CHECK drawing_title — Drawing Title, Drawing No., and Drawing Name consistency
 
-PASS if the Drawing Title matches the Title Block field in German OR in English.
-If the field is bilingual, a match with either the German part (before "/") or the English part
-(after "/") is sufficient to pass.
-Minor punctuation differences (trailing period, dash spacing) are acceptable — flag only if the
-semantic content clearly differs (e.g. different element name, wrong axis label).
+PRE-EXTRACTED VALUES:
+  The section "=== PRE-EXTRACTED TITLE BLOCK VALUES (from coordinate analysis) ===" in the
+  drawing text contains the exact values already extracted by coordinate analysis.
+  Use ONLY these pre-extracted values for this check. Do NOT search the raw drawing text
+  for these fields yourself — the coordinate extraction is more accurate than text scanning.
 
-NOT FOUND conditions — add "drawing_title" to not_found (do NOT silently pass) if ANY of:
-  • The title block is not visible on the sheet
-  • The Drawing Title field inside the title block is not visible or not readable
-  • The drawing title shown on the sheet (outside the title block) is not visible or not readable
+  The section contains:
+    Drawing Title: <value or "(empty)">
+    Drawing No.:   <value or "(empty)">
+    Drawing Name (top of sheet): <value or "(not found)">
+
+1. Read "Drawing Title" from the PRE-EXTRACTED section:
+   If the value is "(empty)" → add "drawing_title" to not_found and stop all remaining steps.
+   The value may contain two lines: one German (TITLE_DE) and one English (TITLE_EN).
+
+2. Read "Drawing No." from the PRE-EXTRACTED section:
+   If the value is "(empty)" → add "drawing_title" to not_found and stop all remaining steps.
+
+3. Drawing Title language check (only if both TITLE_DE and TITLE_EN are present):
+   Compare by meaning. Acceptable differences: language, capitalization, punctuation, abbreviations.
+   Flag as error if they refer to different elements, axes, levels, or drawing types.
+
+4. Drawing Name extraction:
+   Read "Drawing Name (top of sheet)" from the PRE-EXTRACTED section.
+   If "(not found)" → skip step 5.
+
+5. Drawing Name vs Drawing Title:
+   Compare drawing_name with the Drawing Title value (either language line).
+   Semantic comparison only — ignore language, capitalization, spacing.
+   If same drawing → PASS. If clearly different → flag as error.
+
+NOT FOUND — add "drawing_title" to not_found if:
+  • "Drawing Title" value is "(empty)", OR
+  • "Drawing No." value is "(empty)"
