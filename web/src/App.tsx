@@ -102,6 +102,7 @@ const NODE_SECTIONS = [
       { key: 'pos_count',        title: 'Last Position Number vs Title Block' },
       { key: 'revision_check',   title: 'Revision Code Consistency' },
       { key: 'drawing_status',   title: 'Drawing Status' },
+      { key: 'exposition_class', title: 'Exposition Class vs Concrete Cover' },
     ],
   },
   {

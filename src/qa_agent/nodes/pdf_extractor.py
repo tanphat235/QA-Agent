@@ -141,15 +141,118 @@ def _find_drawing_name(words: list[dict], page_height: float) -> str | None:
     return lines[0] if lines else None
 
 
+# ── Exposition class and BETONDECKUNG concrete cover ────────────────────────
+
+# Lookup table: Cmin,dur = Cnom(φ10), ΔCdev = ΔC, Cv = Cnom(φ10) + ΔC
+# Source: BẢNG 3.1 – BÊ TÔNG BẢO VỆ (Vietnamese standard)
+_EXPOSITION_COVER_TABLE: dict[str, tuple[int, int, int]] = {
+    #         (Cmin,dur, ΔCdev, Cv)
+    "XC1": (20, 10, 30),
+    "XC2": (35, 15, 50),
+    "XC3": (35, 15, 50),
+    "XC4": (40, 15, 55),
+}
+
+
+def _find_exposition_class(words: list[dict]) -> str | None:
+    """Return the exposition class code (XC1–XC4) found anywhere in the drawing."""
+    matches = [
+        w["text"].strip().upper()
+        for w in words
+        if re.fullmatch(r"XC[1-4]", w["text"].strip(), re.IGNORECASE)
+    ]
+    if not matches:
+        return None
+    codes = set(matches)
+    if len(codes) > 1:
+        print(f"[exposition_class] multiple XC codes found: {codes} — using first")
+    return matches[0]
+
+
+def _find_betondeckung_values(words: list[dict]) -> dict:
+    """Extract Cmin,dur, ΔCdev and Cv from the BETONDECKUNG section.
+
+    Strategy: anchor on the ΔCdev header (most reliably detected via the delta
+    character), find the numeric value below it, then scan the same value-row for
+    the adjacent numbers — Cmin,dur is the closest number to the LEFT and Cv is
+    the closest number to the RIGHT.  This avoids depending on 'Cmin' or 'Cv'
+    being a single pdfplumber word (they are often split into 'C'+'min,' and 'C'+'v').
+    """
+    # ── Step 1: locate ΔCdev header ─────────────────────────────────────────
+    dev_h = next(
+        (w for w in words
+         if "cdev" in w["text"].lower()
+         or re.search(r"[△▲Δ∆]", w["text"])),
+        None,
+    )
+    if dev_h is None:
+        dev_h = next(
+            (w for w in words
+             if "dev" in w["text"].lower() and "deckung" not in w["text"].lower()),
+            None,
+        )
+    if dev_h is None:
+        print("[exposition_class] ΔCdev header not found — cannot locate BETONDECKUNG values")
+        return {"cmin_dur": None, "delta_c": None, "cv": None}
+
+    print(f"[exposition_class] ΔCdev header: {dev_h['text']!r} at x0={round(dev_h['x0'])} top={round(dev_h['top'])}")
+
+    # ── Step 2: find the number directly below the ΔCdev header ─────────────
+    dev_below = [
+        w for w in words
+        if w["top"] > dev_h["bottom"]
+        and w["top"] <= dev_h["bottom"] + _BELOW_Y_MAX
+        and w["x0"] >= dev_h["x0"] - 15
+        and w["x1"] <= dev_h["x1"] + 15
+        and re.fullmatch(r"\d+", w["text"].strip())
+    ]
+    if not dev_below:
+        print("[exposition_class] no value found below ΔCdev header")
+        return {"cmin_dur": None, "delta_c": None, "cv": None}
+
+    dev_val_word = min(dev_below, key=lambda w: w["top"])
+    dev_val      = dev_val_word["text"].strip()
+    val_y        = (dev_val_word["top"] + dev_val_word["bottom"]) / 2
+    dev_x_center = (dev_val_word["x0"] + dev_val_word["x1"]) / 2
+
+    # ── Step 3: collect all integers in the same row within ±150 pt ──────────
+    row_nums = sorted(
+        [
+            w for w in words
+            if re.fullmatch(r"\d+", w["text"].strip())
+            and abs((w["top"] + w["bottom"]) / 2 - val_y) <= _Y_BAND
+            and abs((w["x0"] + w["x1"]) / 2 - dev_x_center) <= 150
+        ],
+        key=lambda w: w["x0"],
+    )
+    print(f"[exposition_class] values row (±150 pt, ±{_Y_BAND} pt y): {[(w['text'], round(w['x0'])) for w in row_nums]}")
+
+    # ── Step 4: assign left → Cmin,dur, center → ΔCdev, right → Cv ──────────
+    left  = [w for w in row_nums if w["x0"] < dev_val_word["x0"]]
+    right = [w for w in row_nums if w["x0"] > dev_val_word["x1"]]
+
+    cmin_val = left[-1]["text"].strip()  if left  else None  # rightmost of the left group
+    cv_val   = right[0]["text"].strip()  if right else None  # leftmost of the right group
+
+    result = {"cmin_dur": cmin_val, "delta_c": dev_val, "cv": cv_val}
+    print(f"[exposition_class] values  — cmin_dur={cmin_val!r}  delta_c={dev_val!r}  cv={cv_val!r}")
+    return result
+
+
 # ── Title block: pos_count labels ───────────────────────────────────────────
 
 def _extract_title_block(words: list[dict]) -> dict:
+    btd = _find_betondeckung_values(words)
     return {
         "letzte_stabstahlposition": _find_number_right_of_label(words, "Stabstahlposition"),
         "letzte_mattenposition":    _find_number_right_of_label(words, "Mattenposition"),
         "revision_title_block":     _find_revision_in_title_block(words),
         "revision_table_last":      _find_last_revision_in_table(words),
         "status_title_block":       _find_status_in_title_block(words),
+        "exposition_class":         _find_exposition_class(words),
+        "betondeckung_cmin_dur":    btd["cmin_dur"],
+        "betondeckung_delta_c":     btd["delta_c"],
+        "betondeckung_cv":          btd["cv"],
         # planfreigabe_text is set in extract_pdf_content using raw_text
     }
 
@@ -338,6 +441,10 @@ def _format_for_llm(raw_text: str, title_block: dict) -> str:
         f"Revision (last in table):    {title_block.get('revision_table_last') or '(not found)'}",
         f"Status (title block):        {title_block.get('status_title_block') or '(empty)'}",
         f"Planfreigabe:                {title_block.get('planfreigabe_text') or '(not found)'}",
+        f"Exposition class:            {title_block.get('exposition_class') or '(not found)'}",
+        f"Betondeckung Cmin,dur:       {title_block.get('betondeckung_cmin_dur') or '(not found)'}",
+        f"Betondeckung ΔCdev:          {title_block.get('betondeckung_delta_c') or '(not found)'}",
+        f"Betondeckung Cv:             {title_block.get('betondeckung_cv') or '(not found)'}",
     ]
     parts.extend(tb_lines)
     return "\n".join(parts)

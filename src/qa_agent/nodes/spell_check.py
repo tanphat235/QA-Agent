@@ -57,7 +57,16 @@ _PASS_ITEM_RE = re.compile(
 
 # pos_count and revision_check are handled entirely by Python — not sent to LLM
 _LLM_CHECKS = ["spelling", "section_name", "parts_label", "drawing_title"]
-_ALL_CHECKS = _LLM_CHECKS + ["pos_count", "revision_check", "drawing_status"]
+_ALL_CHECKS = _LLM_CHECKS + ["pos_count", "revision_check", "drawing_status", "exposition_class"]
+
+# Expected concrete cover values per exposition class — BẢNG 3.1, φ10 default
+# (Cmin,dur, ΔCdev, Cv)
+_EXPOSITION_COVER: dict[str, tuple[int, int, int]] = {
+    "XC1": (20, 10, 30),
+    "XC2": (35, 15, 50),
+    "XC3": (35, 15, 50),
+    "XC4": (40, 15, 55),
+}
 
 _CHECK_PROMPTS: dict[str, str] = {k: get_check_prompt("spell", k) for k in _LLM_CHECKS}
 _CHECK_META: dict[str, tuple[str, str, str]] = {k: get_check_meta("spell", k) for k in _ALL_CHECKS}
@@ -165,6 +174,13 @@ def spell_check(state: GraphState) -> dict:
     if not planfreigabe:
         print("[drawing_status] → NOT FOUND reason: planfreigabe_text is empty")
 
+    # ── exposition_class: log pre-extracted values ───────────────────────────
+    xc_code      = str(title_block.get("exposition_class") or "").strip().upper()
+    btd_cmin     = str(title_block.get("betondeckung_cmin_dur") or "").strip()
+    btd_dc       = str(title_block.get("betondeckung_delta_c") or "").strip()
+    btd_cv       = str(title_block.get("betondeckung_cv") or "").strip()
+    print(f"[exposition_class] XC={xc_code!r}  cmin_dur={btd_cmin!r}  delta_c={btd_dc!r}  cv={btd_cv!r}")
+
     # ── LLM call for the other spell checks ─────────────────────────────────
     llm = ChatAnthropic(  # type: ignore[call-arg]
         model="claude-sonnet-4-6",  # type: ignore[call-arg]
@@ -254,6 +270,63 @@ def spell_check(state: GraphState) -> dict:
                     ))
             else:
                 not_found_set.add("drawing_status")
+
+    # ── exposition_class Python comparison ───────────────────────────────────
+    ec_enabled = enabled_sub is None or "exposition_class" in (enabled_sub or [])
+    if ec_enabled:
+        if not xc_code or xc_code not in _EXPOSITION_COVER:
+            not_found_set.add("exposition_class")
+            print(f"[exposition_class] NOT FOUND — xc_code={xc_code!r} not in lookup table")
+        elif not btd_cmin and not btd_dc and not btd_cv:
+            not_found_set.add("exposition_class")
+            print("[exposition_class] NOT FOUND — all betondeckung values are empty")
+        else:
+            exp_cmin, exp_dc, exp_cv = _EXPOSITION_COVER[xc_code]
+
+            def _safe_int(v: str) -> int | None:
+                try:
+                    return int(v)
+                except (ValueError, TypeError):
+                    return None
+
+            act_cmin = _safe_int(btd_cmin)
+            act_dc   = _safe_int(btd_dc)
+            act_cv   = _safe_int(btd_cv)
+
+            print(
+                f"[exposition_class] {xc_code} | "
+                f"Cmin,dur: actual={act_cmin} expected={exp_cmin} {'✓' if act_cmin == exp_cmin else '✗'} | "
+                f"ΔCdev: actual={act_dc} expected={exp_dc} {'✓' if act_dc == exp_dc else '✗'} | "
+                f"Cv: actual={act_cv} expected={exp_cv} {'✓' if act_cv == exp_cv else '✗'}"
+            )
+
+            if act_cmin is not None and act_cmin != exp_cmin:
+                by_check["exposition_class"].append(_SpellIssue(
+                    check="exposition_class", severity="error",
+                    description=(
+                        f"Cmin,dur mismatch for {xc_code}: "
+                        f"drawing={act_cmin}, expected={exp_cmin} (Cnom φ10)"
+                    ),
+                    page=1, location="title block BETONDECKUNG", confidence=1.0,
+                ))
+            if act_dc is not None and act_dc != exp_dc:
+                by_check["exposition_class"].append(_SpellIssue(
+                    check="exposition_class", severity="error",
+                    description=(
+                        f"ΔCdev mismatch for {xc_code}: "
+                        f"drawing={act_dc}, expected={exp_dc}"
+                    ),
+                    page=1, location="title block BETONDECKUNG", confidence=1.0,
+                ))
+            if act_cv is not None and act_cv != exp_cv:
+                by_check["exposition_class"].append(_SpellIssue(
+                    check="exposition_class", severity="error",
+                    description=(
+                        f"Cv mismatch for {xc_code}: "
+                        f"drawing={act_cv}, expected={exp_cmin}+{exp_dc}={exp_cv}"
+                    ),
+                    page=1, location="title block BETONDECKUNG", confidence=1.0,
+                ))
 
     issues: list[Issue] = []
     for check_key, (check_name, pass_desc, nf_desc) in _CHECK_META.items():
