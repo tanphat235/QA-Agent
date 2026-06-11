@@ -101,6 +101,7 @@ const NODE_SECTIONS = [
       { key: 'drawing_title',    title: 'Drawing Title vs Title Block' },
       { key: 'pos_count',        title: 'Last Position Number vs Title Block' },
       { key: 'revision_check',   title: 'Revision Code Consistency' },
+      { key: 'drawing_status',   title: 'Drawing Status' },
     ],
   },
   {

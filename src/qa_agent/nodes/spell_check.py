@@ -57,7 +57,7 @@ _PASS_ITEM_RE = re.compile(
 
 # pos_count and revision_check are handled entirely by Python — not sent to LLM
 _LLM_CHECKS = ["spelling", "section_name", "parts_label", "drawing_title"]
-_ALL_CHECKS = _LLM_CHECKS + ["pos_count", "revision_check"]
+_ALL_CHECKS = _LLM_CHECKS + ["pos_count", "revision_check", "drawing_status"]
 
 _CHECK_PROMPTS: dict[str, str] = {k: get_check_prompt("spell", k) for k in _LLM_CHECKS}
 _CHECK_META: dict[str, tuple[str, str, str]] = {k: get_check_meta("spell", k) for k in _ALL_CHECKS}
@@ -156,6 +156,15 @@ def spell_check(state: GraphState) -> dict:
     rev_tbl = str(title_block.get("revision_table_last") or "").strip().upper()
     print(f"[revision_check] TITLE_BLOCK={rev_tb!r}  TABLE_LAST={rev_tbl!r}")
 
+    # ── drawing_status: log pre-extracted values for debugging ───────────────
+    status_code  = str(title_block.get("status_title_block") or "").strip().upper()
+    planfreigabe = str(title_block.get("planfreigabe_text") or "").strip()
+    print(f"[drawing_status] STATUS={status_code!r}  PLANFREIGABE={planfreigabe!r}")
+    if not status_code:
+        print("[drawing_status] → NOT FOUND reason: status_title_block is empty")
+    if not planfreigabe:
+        print("[drawing_status] → NOT FOUND reason: planfreigabe_text is empty")
+
     # ── LLM call for the other spell checks ─────────────────────────────────
     llm = ChatAnthropic(  # type: ignore[call-arg]
         model="claude-sonnet-4-6",  # type: ignore[call-arg]
@@ -220,6 +229,31 @@ def spell_check(state: GraphState) -> dict:
                 description=f"Revision mismatch: title block={rev_tb}, last revision in table={rev_tbl}",
                 page=1, location="title block / revision history table", confidence=1.0,
             ))
+
+    # ── drawing_status Python comparison ─────────────────────────────────────
+    ds_enabled = enabled_sub is None or "drawing_status" in (enabled_sub or [])
+    if ds_enabled:
+        if not status_code or not planfreigabe:
+            not_found_set.add("drawing_status")
+        else:
+            pf_upper = planfreigabe.upper()
+            first = status_code[0]
+            if first == "P":
+                if "PRÜFUNG" not in pf_upper and "PRUFUNG" not in pf_upper:
+                    by_check["drawing_status"].append(_SpellIssue(
+                        check="drawing_status", severity="error",
+                        description=f"Status={status_code} (Prüfung) but Planfreigabe shows: {planfreigabe!r}",
+                        page=1, location="title block / Planfreigabe", confidence=1.0,
+                    ))
+            elif first in ("A", "F"):
+                if "AUSFÜHRUNG" not in pf_upper and "AUSFUHRUNG" not in pf_upper:
+                    by_check["drawing_status"].append(_SpellIssue(
+                        check="drawing_status", severity="error",
+                        description=f"Status={status_code} (Ausführung) but Planfreigabe shows: {planfreigabe!r}",
+                        page=1, location="title block / Planfreigabe", confidence=1.0,
+                    ))
+            else:
+                not_found_set.add("drawing_status")
 
     issues: list[Issue] = []
     for check_key, (check_name, pass_desc, nf_desc) in _CHECK_META.items():
