@@ -51,9 +51,17 @@ STEP 3 — Cross-check both directions, one error item per issue:
      If no section marker in MARKERS carries the same designation → flag as error.
 
 OUTPUT RULES:
-  • Report only missing links — do not describe matched pairs.
-  • One error item per unmatched designation.
+  • Do ALL cross-checking and re-verification silently BEFORE writing any output.
+  • Output an item ONLY for a designation that still has no counterpart after re-checking.
+    If a suspected mismatch resolves on re-check, output NOTHING for it.
+  • NEVER narrate the verification process. The description must not contain phrases like
+    "matched", "re-evaluating", "cross-checking confirms", "after full review", or lists of
+    pairs that are correct.
+  • One error item per unmatched designation. Description format:
+    "Section marker 'x-x' has no corresponding Schnitt/Draufsicht view" or
+    "View 'Schnitt x-x' has no corresponding section marker".
   • Use only designations actually read from the drawing in descriptions.
+  • All matched pairs → mention them ONLY in debug_notes, never in issues.
 
 NOT FOUND — add "section_name" to not_found if:
   • The Ansicht or Bewehrung area is not visible on the sheet, OR

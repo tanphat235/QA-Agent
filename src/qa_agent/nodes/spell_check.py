@@ -51,7 +51,11 @@ _PASS_ITEM_RE = re.compile(
     r"|\bexactly meets\b"
     r"|\bdeclared\b.{0,30}\bmatches\b.{0,30}\bcalculated\b"
     r"|\bmatches?\b.{0,30}\brequired\b"
-    r"|\bvalues?\s+matches?\b",
+    r"|\bvalues?\s+matches?\b"
+    r"|\bno unmatched\b"
+    r"|\bre-?evaluat"
+    r"|\bcross-?check(?:ing)?\s+confirms\b"
+    r"|\bafter\s+(?:full|complete)\s+review\b",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -92,6 +96,9 @@ DEBUG NOTES — always populate one entry per active check, regardless of pass/f
 RULES:
   • OUTPUT ONLY actual problems — items that clearly do not comply.
   • Do NOT output any item to describe a passing check or a verified-correct result.
+  • Reason SILENTLY. The description field states only the violation itself — never your
+    verification steps, re-evaluations, or lists of items that turned out to be correct.
+    If re-checking resolves a suspected issue, omit the item entirely.
   • An empty issues list means ALL enabled checks passed — that is the correct output when no problems exist.
   • Do NOT flag uncertain or marginally readable text.
   • If prerequisite drawing elements are absent, add the check key to not_found instead of skipping.\

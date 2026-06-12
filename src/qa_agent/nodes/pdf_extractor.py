@@ -8,9 +8,27 @@ import re
 import pdfplumber
 
 
+def _not_mirrored(obj: dict) -> bool:
+    """Filter test: drop chars rendered with a reflected transformation matrix.
+
+    Mirrored view labels (e.g. 'Schwerpunkt / Center of gravity' on a flipped
+    element) extract as reversed strings ('ytivarg fo retneC') and break the
+    spelling check. A reflection has a negative matrix determinant.
+    """
+    if obj.get("object_type") != "char":
+        return True
+    m = obj.get("matrix")
+    if m and (m[0] * m[3] - m[1] * m[2]) < 0:
+        return False
+    return True
+
+
 def extract_pdf_content(pdf_path: str) -> dict:
     with pdfplumber.open(pdf_path) as pdf:
-        page = pdf.pages[0]
+        # dedupe_chars removes overprinted duplicate chars (fake-bold rendering
+        # that otherwise extracts 'Laubholz' as 'LLaauubbhhoollzz'); the filter
+        # removes mirrored text that extracts backwards.
+        page = pdf.pages[0].dedupe_chars(tolerance=1).filter(_not_mirrored)
         words = page.extract_words(x_tolerance=3, y_tolerance=3, keep_blank_chars=False)
         raw_text = page.extract_text(x_tolerance=3, y_tolerance=3) or ""
 
@@ -326,25 +344,30 @@ def _find_total_mass(raw_text: str) -> str | None:
 
     Uses raw-text regex so font colour or word-split variations don't matter.
     Sums across both Stabliste and Mattenstahlliste if both are present.
+    Falls back to the section-aware Stabliste search when no direct label matches.
     """
-    # Matches: "Gesamtmasse [kg] : 392.29"  or  "Gesamtmasse[kg]:392,29"  etc.
+    # Matches: "Gesamtmasse [kg] : 392.29", "Gesamtmasse[kg]:392,29",
+    # and the bilingual "Gesamtmasse/ Total mass [kg] : 442.15".
     matches = re.findall(
-        r"Gesamtmasse\s*\[?kg\]?\s*:?\s*([\d.,]+)",
+        r"Gesamtmasse\s*(?:/\s*Total\s+mass\s*)?\[?\s*kg\s*\]?\s*:?\s*([\d.,]+)",
         raw_text,
         re.IGNORECASE,
     )
     print(f"[steel_content] Gesamtmasse raw_text matches: {matches}")
-    if not matches:
-        print("[steel_content] Gesamtmasse: no match in raw_text — returning None")
-        return None
-    total = 0.0
-    for m in matches:
-        try:
-            total += float(m.replace(",", "."))
-            print(f"[steel_content] Gesamtmasse: parsed {m!r} → running total={total:.2f}")
-        except ValueError as exc:
-            print(f"[steel_content] Gesamtmasse: could not parse {m!r}: {exc}")
-    return f"{total:.2f}" if total > 0 else None
+    if matches:
+        total = 0.0
+        for m in matches:
+            try:
+                total += float(m.replace(",", "."))
+                print(f"[steel_content] Gesamtmasse: parsed {m!r} → running total={total:.2f}")
+            except ValueError as exc:
+                print(f"[steel_content] Gesamtmasse: could not parse {m!r}: {exc}")
+        if total > 0:
+            return f"{total:.2f}"
+    # Fallback: locate the Stabliste table and take its closing total
+    val = _find_stabliste_total(raw_text)
+    print(f"[steel_content] Gesamtmasse fallback via Stabliste section: {val!r}")
+    return val
 
 
 def _find_drawing_title_raw(raw_text: str) -> str | None:
