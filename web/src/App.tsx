@@ -104,6 +104,7 @@ const NODE_SECTIONS = [
       { key: 'drawing_status',   title: 'Drawing Status' },
       { key: 'exposition_class', title: 'Exposition Class vs Concrete Cover' },
       { key: 'steel_content',   title: 'Steel Content (kg/m³)' },
+      { key: 'lastausgleich',   title: 'Lastausgleichgehänge Note' },
     ],
   },
   {

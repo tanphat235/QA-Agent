@@ -57,7 +57,7 @@ _PASS_ITEM_RE = re.compile(
 
 # pos_count and revision_check are handled entirely by Python — not sent to LLM
 _LLM_CHECKS = ["spelling", "section_name", "parts_label", "drawing_title"]
-_ALL_CHECKS = _LLM_CHECKS + ["pos_count", "revision_check", "drawing_status", "exposition_class", "steel_content"]
+_ALL_CHECKS = _LLM_CHECKS + ["pos_count", "revision_check", "drawing_status", "exposition_class", "steel_content", "lastausgleich"]
 
 # Expected concrete cover values per exposition class — BẢNG 3.1, φ10 default
 # (Cmin,dur, ΔCdev, Cv)
@@ -188,6 +188,12 @@ def spell_check(state: GraphState) -> dict:
     mass_str = str(title_block.get("gesamtmasse") or "").strip()
     vol_str  = str(title_block.get("volumen") or "").strip()
     print(f"[steel_content] gesamtmasse={mass_str!r}  volumen={vol_str!r}")
+
+    # ── lastausgleich: log pre-extracted values ───────────────────────────────
+    la_ebt_found   = bool(title_block.get("rd_ebt_table_found"))
+    la_rd_qty      = int(title_block.get("rd_ebt_max_qty") or 0)
+    la_text_present = bool(title_block.get("lastausgleich_present"))
+    print(f"[lastausgleich] ebt_table_found={la_ebt_found}  rd_max_qty={la_rd_qty}  text_present={la_text_present}")
 
     # ── LLM call for the other spell checks ─────────────────────────────────
     llm = ChatAnthropic(  # type: ignore[call-arg]
@@ -358,6 +364,39 @@ def spell_check(state: GraphState) -> dict:
             except ValueError as exc:
                 not_found_set.add("steel_content")
                 print(f"[steel_content] NOT FOUND — parse error: {exc}")
+
+    # ── lastausgleich Python check ────────────────────────────────────────────
+    la_enabled = enabled_sub is None or "lastausgleich" in (enabled_sub or [])
+    if la_enabled:
+        if not la_ebt_found:
+            not_found_set.add("lastausgleich")
+            print("[lastausgleich] NOT FOUND — Einbauteilliste not in drawing")
+        elif la_rd_qty >= 4:
+            if not la_text_present:
+                by_check["lastausgleich"].append(_SpellIssue(
+                    check="lastausgleich", severity="error",
+                    description=(
+                        f"RD-type EBT (max Menge={la_rd_qty}) requires 'Lastausgleichgehänge' "
+                        f"note in the drawing — not found"
+                    ),
+                    page=1, location="drawing / Einbauteilliste", confidence=1.0,
+                ))
+                print(f"[lastausgleich] FAIL — qty={la_rd_qty} >= 4 but Lastausgleichgehänge missing")
+            else:
+                print(f"[lastausgleich] PASS — qty={la_rd_qty} >= 4 and Lastausgleichgehänge present")
+        else:  # la_rd_qty < 4 (includes 0 = no RD EBTs)
+            if la_text_present:
+                by_check["lastausgleich"].append(_SpellIssue(
+                    check="lastausgleich", severity="error",
+                    description=(
+                        f"'Lastausgleichgehänge' note is present but RD-type EBT "
+                        f"max Menge ({la_rd_qty}) is below 4 — note not required"
+                    ),
+                    page=1, location="drawing", confidence=1.0,
+                ))
+                print(f"[lastausgleich] FAIL — qty={la_rd_qty} < 4 but Lastausgleichgehänge present")
+            else:
+                print(f"[lastausgleich] PASS — qty={la_rd_qty} < 4 and Lastausgleichgehänge absent")
 
     issues: list[Issue] = []
     for check_key, (check_name, pass_desc, nf_desc) in _CHECK_META.items():

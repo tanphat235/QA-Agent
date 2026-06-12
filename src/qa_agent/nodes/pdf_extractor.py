@@ -23,6 +23,16 @@ def extract_pdf_content(pdf_path: str) -> dict:
         title_block["planfreigabe_text"] = _find_planfreigabe_text(raw_text)
         title_block["gesamtmasse"] = _find_total_mass(raw_text)
         title_block["volumen"] = _find_volumen(words)
+        _rd_found, _rd_max_qty = _find_rd_ebt_data(raw_text)
+        title_block["rd_ebt_table_found"] = _rd_found
+        title_block["rd_ebt_max_qty"] = _rd_max_qty
+        # Match just the stem "lastausgleich" — covers both spellings
+        # (Lastausgleichgehänge / Lastausgleichsgehänge) and tolerates pdfplumber
+        # encoding variations for the umlaut ä.
+        _la_match = re.search(r"lastausgleich", raw_text, re.IGNORECASE)
+        _la_matched_txt = _la_match.group(0) if _la_match else None
+        title_block["lastausgleich_present"] = bool(_la_match)
+        print(f"[lastausgleich] text_present={bool(_la_match)}  matched={_la_matched_txt!r}")
 
         return {
             "raw_text": raw_text,
@@ -239,6 +249,61 @@ def _find_betondeckung_values(words: list[dict]) -> dict:
     result = {"cmin_dur": cmin_val, "delta_c": dev_val, "cv": cv_val}
     print(f"[exposition_class] values  — cmin_dur={cmin_val!r}  delta_c={dev_val!r}  cv={cv_val!r}")
     return result
+
+
+# ── Lastausgleichgehänge: RD-type EBT quantities in Einbauteilliste ──────────
+
+def _find_rd_ebt_data(raw_text: str) -> tuple[bool, int]:
+    """Return (einbauteilliste_found, max_menge_of_RD_type_EBTs).
+
+    Detection uses multiple fallback markers so that bold-font extraction
+    failures for the compound title word don't cause false NOT FOUND.
+    RD-type rows are scanned across the full raw_text (the EBT table is the
+    only place in a structural drawing where RD\\d+ product codes appear).
+    """
+    # ── Step 1: detect Einbauteilliste via any identifiable marker ────────────
+    _MARKERS = [
+        (r"einbauteilliste", "full title"),
+        (r"einbauteil",      "title prefix (split word)"),
+        (r"\bEBT\b",         "EBT column header"),
+        (r"EBT.{0,10}Nummer","EBT-Nummer header"),
+    ]
+    detected_by = None
+    for pattern, label in _MARKERS:
+        if re.search(pattern, raw_text, re.IGNORECASE):
+            detected_by = label
+            break
+
+    if detected_by is None:
+        print("[lastausgleich] Einbauteilliste: no marker found in raw_text")
+        # Print first 800 chars of raw_text so we can inspect what pdfplumber gave us
+        preview = raw_text[:800].replace("\n", "↵")
+        print(f"[lastausgleich] raw_text (first 800 chars):\n{preview}")
+        return (False, 0)
+
+    print(f"[lastausgleich] Einbauteilliste detected via: {detected_by!r} ✓")
+
+    # ── Step 2: scan ALL lines for RD\d+ codes ───────────────────────────────
+    # \b\d+\b = standalone integer (word-boundary on both sides):
+    #   "RD42"  → no \b before '4' (D is also a word char) → "42" NOT matched
+    #   "385mm" → no \b after  '5' (m is also a word char) → "385" NOT matched
+    #   " 4 "   → \b on both sides → "4" IS matched
+    # So the last element of standalone_nums is always the Menge.
+    max_qty = 0
+    for line in raw_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not re.search(r"RD\d+", stripped, re.IGNORECASE):
+            continue
+        standalone_nums = re.findall(r"\b\d+\b", stripped)
+        print(f"[lastausgleich]   RD line  : {stripped!r}")
+        print(f"[lastausgleich]   numbers  : {standalone_nums}  → Menge={standalone_nums[-1] if standalone_nums else 'none'}")
+        if standalone_nums:
+            max_qty = max(max_qty, int(standalone_nums[-1]))
+
+    print(f"[lastausgleich] max RD-type Menge={max_qty}")
+    return (True, max_qty)
 
 
 # ── Steel content: total mass and element volume ─────────────────────────────
