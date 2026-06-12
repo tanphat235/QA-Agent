@@ -8,3 +8,4 @@ build/
 settings.local.json
 poetry.lock
 .langgraph_api/
+.claude/worktrees/
