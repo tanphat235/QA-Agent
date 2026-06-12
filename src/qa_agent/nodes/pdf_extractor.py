@@ -17,12 +17,18 @@ def extract_pdf_content(pdf_path: str) -> dict:
         title_block = _extract_title_block(words)
         title_block["max_stabliste_pos"] = _max_pos_in_schedule(words, "Stabliste")
         title_block["max_mattenliste_pos"] = _max_pos_in_schedule(words, "Mattenstahlliste")
-        title_block["drawing_title_value"] = _find_text_below_label(words, "Drawing Title")
-        title_block["drawing_no_value"] = _find_text_below_label(words, "Drawing No")
+        # Use raw-text regex exclusively for these two fields.
+        # Word-coordinate approach fails: "Bezeichnung" / "Plan-Nr." are positioned
+        # mid-label so the x-constraint collects neighbouring Revision/Status values
+        # instead of the actual drawing title / drawing number.
+        title_block["drawing_title_value"] = _find_drawing_title_raw(raw_text)
+        title_block["drawing_no_value"]    = _find_drawing_no_raw(raw_text)
         title_block["drawing_name"] = _find_drawing_name(words, page.height)
         title_block["planfreigabe_text"] = _find_planfreigabe_text(raw_text)
         title_block["gesamtmasse"] = _find_total_mass(raw_text)
-        title_block["volumen"] = _find_volumen(words)
+        title_block["volumen"]     = _find_volumen(words, raw_text)
+        title_block["gewicht"]     = _find_gewicht(words, raw_text)
+        title_block["anzahl"]      = _find_anzahl(words, raw_text)
         _rd_found, _rd_max_qty = _find_rd_ebt_data(raw_text)
         title_block["rd_ebt_table_found"] = _rd_found
         title_block["rd_ebt_max_qty"] = _rd_max_qty
@@ -334,36 +340,192 @@ def _find_total_mass(raw_text: str) -> str | None:
     return f"{total:.2f}" if total > 0 else None
 
 
-def _find_volumen(words: list[dict]) -> str | None:
-    """Return the volume value from the title block 'Volumen' cell.
+def _find_drawing_title_raw(raw_text: str) -> str | None:
+    """Extract drawing title from raw text.
 
-    Strategy: find the 'Volumen' label word, then pick the first decimal number
-    directly below it.  No x-column constraint is applied because the displayed
-    number may be centred differently than the label text.
+    Looks for the text on the line(s) immediately after the
+    'Bezeichnung' or 'Drawing Title' label.  Returns up to two lines joined
+    with a space so callers can search the full bilingual title string.
     """
-    label_word = next(
-        (w for w in words if "volumen" in w["text"].lower()),
-        None,
-    )
-    if label_word is None:
-        print("[steel_content] Volumen: label not found in words")
-        return None
-    print(f"[steel_content] Volumen label: {label_word['text']!r} at x0={round(label_word['x0'])} bottom={round(label_word['bottom'])}")
-
-    # Collect all decimal numbers below the label within 100 pt (no x constraint)
-    below = [
-        w for w in words
-        if w["top"] > label_word["bottom"] + _BELOW_Y_MIN
-        and w["top"] <= label_word["bottom"] + 100
-        and re.fullmatch(r"\d+[.,]\d+", w["text"].strip())  # require decimal — avoids stray integers
-    ]
-    print(f"[steel_content] Volumen below candidates (±100pt, any x): {[(w['text'], round(w['x0']), round(w['top'])) for w in below]}")
-    if below:
-        result = min(below, key=lambda w: w["top"])["text"].strip()
-        print(f"[steel_content] Volumen: picked {result!r}")
-        return result
-    print("[steel_content] Volumen: no decimal found below label — returning None")
+    for label_pat in (
+        r"Bezeichnung[^:\n]*:\s*\n\s*(.+)",    # German label + next line
+        r"Drawing Title[^:\n]*:\s*\n\s*(.+)",   # English label + next line
+        r"Bezeichnung[^:\n]*:\s*([^\n:]{5,})",  # same-line value
+    ):
+        m = re.search(label_pat, raw_text, re.IGNORECASE)
+        if m:
+            rest = m.group(1).strip()
+            lines = [l.strip() for l in rest.split("\n") if l.strip() and len(l.strip()) > 3]
+            result = " ".join(lines[:2]) if lines else rest
+            print(f"[drawing_title_raw] found: {result[:80]!r}")
+            return result or None
+    print("[drawing_title_raw] no match in raw_text")
     return None
+
+
+def _find_drawing_no_raw(raw_text: str) -> str | None:
+    """Extract drawing number from raw text.
+
+    Tries three strategies in order:
+    1. Value on the line AFTER a 'Drawing No' or 'Plan-Nr' label
+    2. Value on the SAME line after the label
+    3. First occurrence of the project drawing-number format anywhere
+       (≥5 dash-separated alphanumeric segments, e.g. FRA31-LUP-ZZ-03-DR-S-8850)
+    """
+    # Strategy 1: next-line value
+    m = re.search(
+        r"(?:Drawing No|Plan-Nr)[^\n]*\n\s*([A-Z]{2,}[A-Z0-9]*(?:-[A-Z0-9]+){4,})",
+        raw_text, re.IGNORECASE,
+    )
+    if m:
+        val = m.group(1).split()[0].strip().upper()   # take just the first token
+        print(f"[drawing_no_raw] found (next-line): {val!r}")
+        return val
+    # Strategy 2: same-line value (label and number on one line after ":")
+    m = re.search(
+        r"(?:Drawing No|Plan-Nr)[^:\n]*:\s*([A-Z]{2,}[A-Z0-9]*(?:-[A-Z0-9]+){4,})",
+        raw_text, re.IGNORECASE,
+    )
+    if m:
+        val = m.group(1).split()[0].strip().upper()
+        print(f"[drawing_no_raw] found (same-line): {val!r}")
+        return val
+    # Strategy 3: any drawing-number-like string (≥6 dash-separated segments)
+    m = re.search(r"\b([A-Z]{2,}[0-9]+(?:-[A-Z0-9]+){5,})\b", raw_text)
+    if m:
+        val = m.group(1).strip().upper()
+        print(f"[drawing_no_raw] found (pattern): {val!r}")
+        return val
+    print("[drawing_no_raw] no match in raw_text")
+    return None
+
+
+def _find_numeric_right_of(words: list[dict], label_fragment: str) -> str | None:
+    """Find the first numeric value to the RIGHT of the title-block label word.
+
+    The title block is always at the BOTTOM of the drawing, so we take the
+    LAST (bottommost / highest `top` coordinate) occurrence of the label to
+    avoid matching identically-named columns in rebar or position tables
+    higher on the page.  A ±15 pt vertical tolerance handles cell centering.
+    """
+    matches = [w for w in words if label_fragment.lower() in w["text"].lower()]
+    if not matches:
+        print(f"[right_of_label] '{label_fragment}' not found in words")
+        return None
+    # Title block = bottommost label on the page
+    label_word = max(matches, key=lambda w: w["top"])
+    candidates = sorted(
+        [
+            w for w in words
+            if abs(w["top"] - label_word["top"]) <= 15   # same row ±15 pt
+            and w["x0"] > label_word["x1"]               # strictly to the right
+            and re.search(r"\d", w["text"])               # contains at least one digit
+        ],
+        key=lambda w: w["x0"],
+    )
+    if candidates:
+        val = candidates[0]["text"].strip().replace(",", ".")
+        print(f"[right_of_label] '{label_fragment}' (bottom occ. top={round(label_word['top'])}) → {val!r}")
+        return val
+    print(f"[right_of_label] '{label_fragment}': no numeric word to the right (±15 pt)")
+    return None
+
+
+def _find_bilingual_value(raw_text: str, german: str, english: str, integer_only: bool = False) -> str | None:
+    """Extract the numeric value from a bilingual title-block label.
+
+    Recognises two pdfplumber raw-text layouts:
+      Same-line  : 'Volumen / Volume: 4 m³ Gewicht / Weight: …'
+      Split-line : 'Volumen / Volume: Gewicht / Weight:\\n4 m³ 10 to'
+
+    Requiring BOTH the German and English words makes the pattern specific to the
+    title block and avoids false matches on 'Anzahl:' columns in rebar tables.
+    """
+    num_pat = r"\d+" if integer_only else r"[\d.,]+"
+    # Dump the raw-text context around the German label for diagnostics
+    ctx = re.search(rf".{{0,10}}{german}.{{0,80}}", raw_text, re.IGNORECASE)
+    print(f"[bilingual_raw] '{german}' context: {ctx.group()!r}" if ctx else f"[bilingual_raw] '{german}' not found in raw_text")
+
+    # Same-line: 'German / English: <value>'
+    m = re.search(
+        rf"{german}[^:\n]*/[^:\n]*{english}[^:\n]*:\s*({num_pat})",
+        raw_text, re.IGNORECASE,
+    )
+    if m:
+        val = m.group(1).replace(",", ".")
+        print(f"[bilingual_raw] '{german}/{english}' same-line → {val!r}")
+        return val
+    # Split-line: 'German / English: <other label>\n<value>'
+    m = re.search(
+        rf"{german}[^:\n]*/[^:\n]*{english}[^:\n]*:[^\d\n]*\n\s*({num_pat})",
+        raw_text, re.IGNORECASE,
+    )
+    if m:
+        val = m.group(1).replace(",", ".")
+        print(f"[bilingual_raw] '{german}/{english}' next-line → {val!r}")
+        return val
+    # Last resort: just find the first number after the German label anywhere on its line
+    m = re.search(rf"{german}[^\n]*?({num_pat})", raw_text, re.IGNORECASE)
+    if m:
+        val = m.group(1).replace(",", ".")
+        print(f"[bilingual_raw] '{german}' inline search → {val!r}")
+        return val
+    print(f"[bilingual_raw] '{german}/{english}': no match")
+    return None
+
+
+def _find_volumen(words: list[dict], raw_text: str) -> str | None:
+    return _find_numeric_right_of(words, "Volumen") or _find_bilingual_value(raw_text, "Volumen", "Volume")
+
+
+def _find_gewicht(words: list[dict], raw_text: str) -> str | None:
+    """Gewicht / Weight — anchored to the same row as 'Volumen / Volume'.
+
+    'Volumen' and 'Gewicht' share the same title-block row.  By finding 'Volumen'
+    first we get the exact y-coordinate of that row and can then look for the
+    'Gewicht' label *on that specific row only*, avoiding false hits from steel-list
+    table headers ('Gewicht' column with a total like 144.51 kg) that may appear at
+    a higher top-coordinate on the same page.
+    """
+    vol_matches = [w for w in words if "volumen" in w["text"].lower()]
+    if vol_matches:
+        vol_word = max(vol_matches, key=lambda w: w["top"])   # bottommost = title block
+        vol_y = vol_word["top"]
+        # Find "Gewicht" on the SAME ROW as "Volumen" (strict ±8 pt)
+        gwt_matches = [
+            w for w in words
+            if "gewicht" in w["text"].lower()
+            and abs(w["top"] - vol_y) <= 8
+        ]
+        if gwt_matches:
+            gwt_word = max(gwt_matches, key=lambda w: w["x0"])  # rightmost if multiple
+            candidates = sorted(
+                [
+                    w for w in words
+                    if abs(w["top"] - gwt_word["top"]) <= 8
+                    and w["x0"] > gwt_word["x1"]
+                    and re.search(r"\d", w["text"])
+                ],
+                key=lambda w: w["x0"],
+            )
+            if candidates:
+                val = candidates[0]["text"].strip().replace(",", ".")
+                print(f"[gewicht] same-row-as-volumen (y≈{round(vol_y)}) → {val!r}")
+                return val
+            print("[gewicht] Gewicht found on vol-row but no numeric word to its right")
+        else:
+            print(f"[gewicht] no 'Gewicht' word on Volumen row (y≈{round(vol_y)} ±8pt)")
+    # Fallback: bilingual raw-text search
+    return _find_bilingual_value(raw_text, "Gewicht", "Weight")
+
+
+def _find_anzahl(words: list[dict], raw_text: str) -> str | None:
+    val = _find_numeric_right_of(words, "Anzahl") or _find_bilingual_value(raw_text, "Anzahl", "Quantity", integer_only=True)
+    if val:
+        m = re.match(r"(\d+)", val)
+        return m.group(1) if m else val
+    return None
+
 
 
 # ── Title block: pos_count labels ───────────────────────────────────────────
@@ -579,11 +741,19 @@ def extract_steel_list_pdf(pdf_path: str) -> dict:
     }
 
 
-def extract_overview_plan_pdf(pdf_path: str) -> dict:
-    """Extract basic text content from an overview plan PDF.
+_OVERVIEW_ROW_RE = re.compile(
+    # element code        volume           weight           qty    drawing-number (≥5 dash-parts)
+    r"^(\d+[A-Z]{0,2}-\d+)\s+([\d.,]+)\s+([\d.,]+)\s+(\d+)\s+([A-Z0-9]+(?:-[A-Z0-9]+){4,})",
+    re.MULTILINE | re.IGNORECASE,
+)
 
-    The result is passed as `overview_plan_data` in GraphState to provide
-    layout and element context to AI check nodes.
+
+def extract_overview_plan_pdf(pdf_path: str) -> dict:
+    """Extract text content and the element statistics table from an overview plan PDF.
+
+    The result is passed as `overview_plan_data` in GraphState.
+    `element_rows` contains one dict per table row with keys:
+        code, volume, weight, quantity, drawing_no
     """
     with pdfplumber.open(pdf_path) as pdf:
         page_count = len(pdf.pages)
@@ -592,10 +762,24 @@ def extract_overview_plan_pdf(pdf_path: str) -> dict:
             raw = page.extract_text(x_tolerance=3, y_tolerance=3) or ""
             parts.append(raw)
     raw_text = "\n".join(parts)
-    print(f"[overview_plan] pages={page_count}  chars={len(raw_text)}")
+
+    element_rows: list[dict] = []
+    for m in _OVERVIEW_ROW_RE.finditer(raw_text):
+        element_rows.append({
+            "code":       m.group(1),
+            "volume":     m.group(2).replace(",", "."),
+            "weight":     m.group(3).replace(",", "."),
+            "quantity":   m.group(4),
+            "drawing_no": m.group(5).upper(),
+        })
+
+    print(f"[overview_plan] pages={page_count}  chars={len(raw_text)}  rows={len(element_rows)}")
+    if element_rows:
+        print(f"[overview_plan] first row: {element_rows[0]}  last row: {element_rows[-1]}")
     return {
         "raw_text": raw_text.strip(),
         "page_count": page_count,
+        "element_rows": element_rows,
     }
 
 
@@ -620,6 +804,8 @@ def _format_for_llm(raw_text: str, title_block: dict) -> str:
         f"Betondeckung Cv:             {title_block.get('betondeckung_cv') or '(not found)'}",
         f"Gesamtmasse (total mass):    {title_block.get('gesamtmasse') or '(not found)'} kg",
         f"Volumen (element volume):    {title_block.get('volumen') or '(not found)'} m³",
+        f"Gewicht (element weight):    {title_block.get('gewicht') or '(not found)'} to",
+        f"Anzahl (element quantity):   {title_block.get('anzahl') or '(not found)'}",
     ]
     parts.extend(tb_lines)
     return "\n".join(parts)

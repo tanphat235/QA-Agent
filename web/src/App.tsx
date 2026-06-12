@@ -103,8 +103,9 @@ const NODE_SECTIONS = [
       { key: 'revision_check',   title: 'Revision Code Consistency' },
       { key: 'drawing_status',   title: 'Drawing Status' },
       { key: 'exposition_class', title: 'Exposition Class vs Concrete Cover' },
-      { key: 'steel_content',   title: 'Steel Content (kg/m³)' },
-      { key: 'lastausgleich',   title: 'Lastausgleichgehänge Note' },
+      { key: 'steel_content',        title: 'Steel Content (kg/m³)' },
+      { key: 'lastausgleich',        title: 'Lastausgleichgehänge Note' },
+      { key: 'overview_plan_check',  title: 'Overview Plan vs Title Block', requiresOverviewPlan: true },
     ],
   },
   {
@@ -364,7 +365,9 @@ export default function App() {
   const [enabledSubChecks, setEnabledSubChecks] = useState<Record<string, string[]>>(() =>
     Object.fromEntries(NODE_SECTIONS.map(s => [
       s.key,
-      CHECK_OPTIONS.find(o => o.key === s.key)?.comingSoon ? [] : s.checks.map(c => c.key),
+      CHECK_OPTIONS.find(o => o.key === s.key)?.comingSoon
+        ? []
+        : s.checks.filter(c => c.key !== 'overview_plan_check').map(c => c.key),
     ]))
   )
   const [expandedCheckCategories, setExpandedCheckCategories] = useState<Set<string>>(new Set())
@@ -417,6 +420,20 @@ export default function App() {
     }
     setExpandedGroups(expandKeys)
   }, [result])
+
+  // Auto-enable / disable overview_plan_check when the overview plan file changes
+  useEffect(() => {
+    setEnabledSubChecks(prev => {
+      const spell = prev.spell ?? []
+      if (overviewPlanFile && !spell.includes('overview_plan_check')) {
+        return { ...prev, spell: [...spell, 'overview_plan_check'] }
+      }
+      if (!overviewPlanFile && spell.includes('overview_plan_check')) {
+        return { ...prev, spell: spell.filter(k => k !== 'overview_plan_check') }
+      }
+      return prev
+    })
+  }, [overviewPlanFile])
 
   // Save completed analysis to localStorage history
   useEffect(() => {
@@ -1387,27 +1404,34 @@ export default function App() {
                       <div className="bg-white px-3 py-2.5 grid grid-cols-2 gap-x-2 gap-y-0.5">
                         {section.checks.map(check => {
                           const subOn = enabledSubs.includes(check.key)
+                          const noFile = check.key === 'overview_plan_check' && !overviewPlanFile
                           return (
                             <button
                               key={check.key}
-                              onClick={() => !disabled && toggleSubCheck(key, check.key)}
-                              disabled={disabled}
+                              onClick={() => !disabled && !noFile && toggleSubCheck(key, check.key)}
+                              disabled={disabled || noFile}
+                              title={noFile ? 'Upload an Overview Plan to enable' : undefined}
                               className={`flex items-center gap-2 px-2 py-1.5 rounded-lg text-left transition-colors ${
-                                subOn
-                                  ? 'text-blue-700 hover:bg-blue-50'
-                                  : 'text-gray-400 hover:bg-gray-50 hover:text-gray-500'
+                                noFile
+                                  ? 'opacity-40 cursor-not-allowed text-gray-300'
+                                  : subOn
+                                    ? 'text-blue-700 hover:bg-blue-50'
+                                    : 'text-gray-400 hover:bg-gray-50 hover:text-gray-500'
                               }`}
                             >
                               <span className={`w-3.5 h-3.5 rounded border-[1.5px] flex-shrink-0 flex items-center justify-center transition-colors ${
-                                subOn ? 'bg-blue-500 border-blue-500' : 'border-gray-300 bg-white'
+                                noFile    ? 'border-gray-200 bg-white'
+                                : subOn  ? 'bg-blue-500 border-blue-500'
+                                          : 'border-gray-300 bg-white'
                               }`}>
-                                {subOn && (
+                                {subOn && !noFile && (
                                   <svg viewBox="0 0 10 8" className="w-2 h-1.5" fill="none">
                                     <path d="M1 4L3.5 6.5L9 1" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
                                   </svg>
                                 )}
                               </span>
                               <span className="text-[10px] font-medium leading-tight truncate">{check.title}</span>
+                              {noFile && <Paperclip size={9} className="text-gray-300 flex-shrink-0 ml-auto" />}
                             </button>
                           )
                         })}

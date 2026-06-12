@@ -57,7 +57,7 @@ _PASS_ITEM_RE = re.compile(
 
 # pos_count and revision_check are handled entirely by Python — not sent to LLM
 _LLM_CHECKS = ["spelling", "section_name", "parts_label", "drawing_title"]
-_ALL_CHECKS = _LLM_CHECKS + ["pos_count", "revision_check", "drawing_status", "exposition_class", "steel_content", "lastausgleich"]
+_ALL_CHECKS = _LLM_CHECKS + ["pos_count", "revision_check", "drawing_status", "exposition_class", "steel_content", "lastausgleich", "overview_plan_check"]
 
 # Expected concrete cover values per exposition class — BẢNG 3.1, φ10 default
 # (Cmin,dur, ΔCdev, Cv)
@@ -193,6 +193,17 @@ def spell_check(state: GraphState) -> dict:
     la_ebt_found   = bool(title_block.get("rd_ebt_table_found"))
     la_rd_qty      = int(title_block.get("rd_ebt_max_qty") or 0)
     la_text_present = bool(title_block.get("lastausgleich_present"))
+
+    # ── overview_plan_check: log pre-extracted values ─────────────────────────
+    overview_plan_data: dict = state.get("overview_plan_data") or {}  # type: ignore[assignment]
+    raw_text_main: str = pdf_content.get("raw_text") or ""
+    op_vol_str    = str(title_block.get("volumen") or "").strip()
+    op_wt_str     = str(title_block.get("gewicht") or "").strip()
+    op_qty_str    = str(title_block.get("anzahl") or "").strip()
+    op_drawing_no = str(title_block.get("drawing_no_value") or "").strip()
+    op_title      = str(title_block.get("drawing_title_value") or "").strip()
+    print(f"[overview_plan_check] vol={op_vol_str!r}  wt={op_wt_str!r}  qty={op_qty_str!r}  drawing_no={op_drawing_no!r}")
+    print(f"[overview_plan_check] title={op_title[:60]!r}  rows={len(overview_plan_data.get('element_rows', []))}")
     print(f"[lastausgleich] ebt_table_found={la_ebt_found}  rd_max_qty={la_rd_qty}  text_present={la_text_present}")
 
     # ── LLM call for the other spell checks ─────────────────────────────────
@@ -397,6 +408,144 @@ def spell_check(state: GraphState) -> dict:
                 print(f"[lastausgleich] FAIL — qty={la_rd_qty} < 4 but Lastausgleichgehänge present")
             else:
                 print(f"[lastausgleich] PASS — qty={la_rd_qty} < 4 and Lastausgleichgehänge absent")
+
+    # ── overview_plan_check: compare title block with overview plan table ──────
+    op_enabled = enabled_sub is None or "overview_plan_check" in (enabled_sub or [])
+    if op_enabled:
+        if not overview_plan_data or not overview_plan_data.get("element_rows"):
+            not_found_set.add("overview_plan_check")
+            print("[overview_plan_check] NOT FOUND — no overview plan or table rows extracted")
+        else:
+            # Extract element code from drawing title (e.g. "Pr.- TT-Plate-202-850" → "202-850")
+            # Fall back to scanning the raw text near the Bezeichnung / Drawing Title label.
+            el_codes = re.findall(r"\d+[A-Z]{0,2}-\d+", op_title)
+            if not el_codes:
+                # Raw-text fallback: find element code in the title-block area
+                title_area_m = re.search(
+                    r"(?:Bezeichnung|Drawing Title)[^\n]*\n?(.*)",
+                    raw_text_main, re.IGNORECASE | re.DOTALL,
+                )
+                if title_area_m:
+                    # Only look in the first ~200 chars after the label
+                    el_codes = re.findall(r"\d+[A-Z]{0,2}-\d+", title_area_m.group(1)[:200])
+            element_code = el_codes[-1] if el_codes else None
+            print(f"[overview_plan_check] element_code={element_code!r}  drawing_no={op_drawing_no!r}")
+
+            # If drawing_no is still empty, extract from raw text directly
+            if not op_drawing_no:
+                dn_m = re.search(
+                    r"(?:Drawing No|Plan-Nr)[^\n]*\n?\s*([A-Z]{2,}[A-Z0-9]*(?:-[A-Z0-9]+){4,})",
+                    raw_text_main, re.IGNORECASE,
+                )
+                if not dn_m:
+                    dn_m = re.search(r"\b([A-Z]{2,}[0-9]+(?:-[A-Z0-9]+){5,})\b", raw_text_main)
+                if dn_m:
+                    op_drawing_no = dn_m.group(1).strip().upper()
+                    print(f"[overview_plan_check] drawing_no from raw_text fallback: {op_drawing_no!r}")
+
+            # Find matching row: prefer Drawing No. match, fallback to element code match
+            element_rows: list[dict] = overview_plan_data["element_rows"]
+            matched: dict | None = None
+            for row in element_rows:
+                if op_drawing_no and row.get("drawing_no", "").upper() == op_drawing_no.upper():
+                    matched = row
+                    break
+            if not matched and element_code:
+                for row in element_rows:
+                    if row.get("code", "").upper() == element_code.upper():
+                        matched = row
+                        break
+
+            if not matched:
+                not_found_set.add("overview_plan_check")
+                print(f"[overview_plan_check] NOT FOUND — element {element_code!r}/{op_drawing_no!r} not in plan ({len(element_rows)} rows)")
+            else:
+                _TOL_PCT = 0.01  # 1 % relative tolerance
+
+                plan_vol = matched.get("volume", "")
+                plan_wt  = matched.get("weight",  "")
+                plan_qty = matched.get("quantity", "")
+                plan_dn  = matched.get("drawing_no", "")
+
+                print(f"[overview_plan_check] ── Comparison ──────────────────────────────────")
+                print(f"[overview_plan_check]   Volumen  : drawing={op_vol_str!r:12}  plan={plan_vol!r}")
+                print(f"[overview_plan_check]   Gewicht  : drawing={op_wt_str!r:12}  plan={plan_wt!r}")
+                print(f"[overview_plan_check]   Anzahl   : drawing={op_qty_str!r:12}  plan={plan_qty!r}")
+                print(f"[overview_plan_check]   Drawing# : drawing={op_drawing_no!r}  plan={plan_dn!r}")
+                print(f"[overview_plan_check] ────────────────────────────────────────────────")
+
+                def _cmp_float(label: str, drawing_val: str, plan_val: str, unit: str) -> None:
+                    if not drawing_val:
+                        print(f"[overview_plan_check]   ERROR {label}: could not extract from drawing PDF")
+                        by_check["overview_plan_check"].append(_SpellIssue(
+                            check="overview_plan_check", severity="error",
+                            description=f"{label}: could not extract value from drawing PDF (overview plan has {plan_val} {unit})",
+                            page=1, location=f"title block {label}", confidence=1.0,
+                        ))
+                        return
+                    if not plan_val:
+                        print(f"[overview_plan_check]   SKIP {label}: plan value missing")
+                        return
+                    try:
+                        d = float(drawing_val.replace(",", "."))
+                        p = float(plan_val.replace(",", "."))
+                        ref = max(abs(d), abs(p), 1e-9)
+                        diff_pct = abs(d - p) / ref * 100
+                        if diff_pct > _TOL_PCT * 100:
+                            print(f"[overview_plan_check]   MISMATCH {label}: drawing={d} vs plan={p}  diff={diff_pct:.2f}%")
+                            by_check["overview_plan_check"].append(_SpellIssue(
+                                check="overview_plan_check", severity="error",
+                                description=f"{label} mismatch: drawing={d} {unit}, overview plan={p} {unit} (diff {diff_pct:.2f}%)",
+                                page=1, location=f"title block {label}", confidence=1.0,
+                            ))
+                        else:
+                            print(f"[overview_plan_check]   OK {label}: drawing={d} vs plan={p}  diff={diff_pct:.2f}%")
+                    except ValueError:
+                        print(f"[overview_plan_check]   ERROR {label}: could not parse drawing={drawing_val!r} or plan={plan_val!r}")
+
+                _cmp_float("Volumen", op_vol_str, plan_vol, "m³")
+                _cmp_float("Gewicht", op_wt_str,  plan_wt,  "to")
+
+                # Quantity: integer comparison
+                if not op_qty_str:
+                    print(f"[overview_plan_check]   ERROR Anzahl: could not extract from drawing PDF")
+                    by_check["overview_plan_check"].append(_SpellIssue(
+                        check="overview_plan_check", severity="error",
+                        description=f"Anzahl: could not extract value from drawing PDF (overview plan has {plan_qty})",
+                        page=1, location="title block Anzahl", confidence=1.0,
+                    ))
+                elif not plan_qty:
+                    print(f"[overview_plan_check]   SKIP Anzahl: plan value missing")
+                else:
+                    try:
+                        dq, pq = int(op_qty_str), int(plan_qty)
+                        if dq != pq:
+                            print(f"[overview_plan_check]   MISMATCH Anzahl: drawing={dq} vs plan={pq}")
+                            by_check["overview_plan_check"].append(_SpellIssue(
+                                check="overview_plan_check", severity="error",
+                                description=f"Anzahl mismatch: drawing={dq}, overview plan={pq}",
+                                page=1, location="title block Anzahl", confidence=1.0,
+                            ))
+                        else:
+                            print(f"[overview_plan_check]   OK Anzahl: drawing={dq} vs plan={pq}")
+                    except ValueError:
+                        print(f"[overview_plan_check]   ERROR Anzahl: could not parse drawing={op_qty_str!r} or plan={plan_qty!r}")
+
+                # Drawing No.: exact string match
+                if not op_drawing_no:
+                    print(f"[overview_plan_check]   SKIP Drawing#: drawing value not extracted")
+                elif op_drawing_no.upper() != plan_dn.upper():
+                    print(f"[overview_plan_check]   MISMATCH Drawing#: drawing={op_drawing_no!r} vs plan={plan_dn!r}")
+                    by_check["overview_plan_check"].append(_SpellIssue(
+                        check="overview_plan_check", severity="error",
+                        description=f"Drawing No. mismatch: drawing={op_drawing_no!r}, overview plan={plan_dn!r}",
+                        page=1, location="title block Drawing No.", confidence=1.0,
+                    ))
+                else:
+                    print(f"[overview_plan_check]   OK Drawing#: {op_drawing_no!r}")
+
+                n = len(by_check["overview_plan_check"])
+                print(f"[overview_plan_check] {'PASS' if n == 0 else f'FAIL — {n} mismatch(es)'}")
 
     issues: list[Issue] = []
     for check_key, (check_name, pass_desc, nf_desc) in _CHECK_META.items():
