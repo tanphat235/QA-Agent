@@ -3,7 +3,7 @@ import {
   LayoutDashboard, History, HelpCircle,
   FileText, CheckCircle, AlertTriangle,
   Download, Loader2, ChevronLeft, ChevronRight, ChevronDown,
-  XCircle, BookOpen, Save, Pencil, Database,
+  XCircle, BookOpen, Save, Pencil, Database, Paperclip,
 } from 'lucide-react'
 
 // ── Types ────────────────────────────────────────────────────
@@ -353,6 +353,8 @@ function normalizeAnalyzeJsonToResult(body: unknown): AnalysisResult | null {
 export default function App() {
   const [appState, setAppState]         = useState<AppState>('idle')
   const [file, setFile]                 = useState<File | null>(null)
+  const [steelListFile,    setSteelListFile]    = useState<File | null>(null)
+  const [overviewPlanFile, setOverviewPlanFile] = useState<File | null>(null)
   const [result, setResult]             = useState<AnalysisResult | null>(null)
   const [errorMsg, setErrorMsg]         = useState('')
   const [isDragging, setIsDragging]     = useState(false)
@@ -382,7 +384,9 @@ export default function App() {
   const [cardErrors,             setCardErrors]             = useState<Record<string, string>>({})
   const [kbSaving,               setKbSaving]               = useState(false)
   const [kbSaveOk,               setKbSaveOk]               = useState(false)
-  const inputRef = useRef<HTMLInputElement>(null)
+  const inputRef           = useRef<HTMLInputElement>(null)
+  const steelListInputRef  = useRef<HTMLInputElement>(null)
+  const overviewPlanInputRef = useRef<HTMLInputElement>(null)
 
   const toggleSection = (cat: string) =>
     setCollapsedSections(prev => {
@@ -586,6 +590,8 @@ export default function App() {
       enabledChecks.map(cat => [cat, enabledSubChecks[cat] ?? []])
     )
     form.append('sub_checks', JSON.stringify(subChecksPayload))
+    if (steelListFile)    form.append('steel_list',    steelListFile)
+    if (overviewPlanFile) form.append('overview_plan', overviewPlanFile)
 
     try {
       const res = await fetch('/api/analyze', { method: 'POST', body: form })
@@ -684,9 +690,12 @@ export default function App() {
   }
 
   const clearFile = () => {
-    setFile(null); setResult(null); setDoneNodes([]); setActiveNode(null)
+    setFile(null); setSteelListFile(null); setOverviewPlanFile(null)
+    setResult(null); setDoneNodes([]); setActiveNode(null)
     setViewingEntry(null); setErrorMsg(''); setAppState('idle')
     if (inputRef.current) inputRef.current.value = ''
+    if (steelListInputRef.current) steelListInputRef.current.value = ''
+    if (overviewPlanInputRef.current) overviewPlanInputRef.current.value = ''
   }
 
   const downloadReport = () => {
@@ -1178,30 +1187,80 @@ export default function App() {
           {/* Upload + Active checks */}
           <div className="grid grid-cols-2 gap-5">
 
-            {/* Drop zone */}
-            <div
-              onClick={() => inputRef.current?.click()}
-              onDragOver={e => { e.preventDefault(); setIsDragging(true) }}
-              onDragLeave={() => setIsDragging(false)}
-              onDrop={onDrop}
-              className={`relative rounded-2xl p-10 text-center cursor-pointer transition-all duration-200 select-none border-2 border-dashed ${
-                isDragging
-                  ? 'border-blue-400 bg-blue-50/70 scale-[1.01]'
-                  : 'border-gray-200 bg-white hover:border-blue-300 hover:bg-blue-50/20'
-              }`}
-            >
-              <input ref={inputRef} type="file" accept=".pdf" className="hidden"
-                onChange={e => e.target.files?.[0] && pickFile(e.target.files[0])} />
+            {/* Drop zone + Supplementary Files */}
+            <div className="flex flex-col gap-3">
 
-              <div className="w-16 h-16 mx-auto mb-5 rounded-2xl bg-gradient-to-br from-blue-50 to-slate-50 border border-blue-100/80 flex items-center justify-center shadow-sm">
-                <FileText size={28} className="text-blue-400" />
+              {/* Drop zone */}
+              <div
+                onClick={() => inputRef.current?.click()}
+                onDragOver={e => { e.preventDefault(); setIsDragging(true) }}
+                onDragLeave={() => setIsDragging(false)}
+                onDrop={onDrop}
+                className={`relative rounded-2xl p-10 text-center cursor-pointer transition-all duration-200 select-none border-2 border-dashed ${
+                  isDragging
+                    ? 'border-blue-400 bg-blue-50/70 scale-[1.01]'
+                    : 'border-gray-200 bg-white hover:border-blue-300 hover:bg-blue-50/20'
+                }`}
+              >
+                <input ref={inputRef} type="file" accept=".pdf" className="hidden"
+                  onChange={e => e.target.files?.[0] && pickFile(e.target.files[0])} />
+
+                <div className="w-16 h-16 mx-auto mb-5 rounded-2xl bg-gradient-to-br from-blue-50 to-slate-50 border border-blue-100/80 flex items-center justify-center shadow-sm">
+                  <FileText size={28} className="text-blue-400" />
+                </div>
+                <p className="font-bold text-gray-800 text-sm tracking-wide">Drop your rebar detailing drawing here</p>
+                <p className="text-xs text-gray-400 mt-1.5 tracking-wide">Single PDF · Structural Rebar Detailing · DIN / EN</p>
+                <button onClick={e => { e.stopPropagation(); inputRef.current?.click() }}
+                  className="mt-6 px-6 py-2.5 bg-slate-900 text-white text-xs font-bold rounded-xl hover:bg-slate-700 transition-colors tracking-wide shadow-sm">
+                  Upload PDF File
+                </button>
               </div>
-              <p className="font-bold text-gray-800 text-sm tracking-wide">Drop your rebar detailing drawing here</p>
-              <p className="text-xs text-gray-400 mt-1.5 tracking-wide">Single PDF · Structural Rebar Detailing · DIN / EN</p>
-              <button onClick={e => { e.stopPropagation(); inputRef.current?.click() }}
-                className="mt-6 px-6 py-2.5 bg-slate-900 text-white text-xs font-bold rounded-xl hover:bg-slate-700 transition-colors tracking-wide shadow-sm">
-                Upload PDF File
-              </button>
+
+              {/* Supplementary Files */}
+              <div className="bg-white rounded-2xl border border-gray-200/70 p-4 flex flex-col gap-2.5 shadow-sm">
+                <h2 className="text-[9px] font-bold text-gray-400 uppercase tracking-[0.12em]">Supplementary Files</h2>
+
+                {/* Steel List */}
+                <div>
+                  <input ref={steelListInputRef} type="file" accept=".pdf" className="hidden"
+                    onChange={e => { const f = e.target.files?.[0]; if (f) setSteelListFile(f) }} />
+                  {steelListFile ? (
+                    <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-green-50 border border-green-100">
+                      <FileText size={11} className="text-green-500 flex-shrink-0" />
+                      <span className="text-[11px] text-green-700 truncate flex-1">{steelListFile.name}</span>
+                      <button onClick={() => { setSteelListFile(null); if (steelListInputRef.current) steelListInputRef.current.value = '' }}
+                        className="text-green-300 hover:text-red-400 text-sm font-bold leading-none ml-1">×</button>
+                    </div>
+                  ) : (
+                    <button onClick={() => steelListInputRef.current?.click()}
+                      className="w-full flex items-center gap-2 px-3 py-1.5 rounded-lg border border-dashed border-gray-200 hover:border-blue-200 hover:bg-blue-50/20 transition-colors text-left">
+                      <Paperclip size={11} className="text-gray-300 flex-shrink-0" />
+                      <span className="text-[11px] text-gray-400">Attach Steel List (PDF)</span>
+                    </button>
+                  )}
+                </div>
+
+                {/* Overview Plan */}
+                <div>
+                  <input ref={overviewPlanInputRef} type="file" accept=".pdf" className="hidden"
+                    onChange={e => { const f = e.target.files?.[0]; if (f) setOverviewPlanFile(f) }} />
+                  {overviewPlanFile ? (
+                    <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-green-50 border border-green-100">
+                      <FileText size={11} className="text-green-500 flex-shrink-0" />
+                      <span className="text-[11px] text-green-700 truncate flex-1">{overviewPlanFile.name}</span>
+                      <button onClick={() => { setOverviewPlanFile(null); if (overviewPlanInputRef.current) overviewPlanInputRef.current.value = '' }}
+                        className="text-green-300 hover:text-red-400 text-sm font-bold leading-none ml-1">×</button>
+                    </div>
+                  ) : (
+                    <button onClick={() => overviewPlanInputRef.current?.click()}
+                      className="w-full flex items-center gap-2 px-3 py-1.5 rounded-lg border border-dashed border-gray-200 hover:border-blue-200 hover:bg-blue-50/20 transition-colors text-left">
+                      <Paperclip size={11} className="text-gray-300 flex-shrink-0" />
+                      <span className="text-[11px] text-gray-400">Attach Overview Plan (PDF)</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+
             </div>
 
             {/* Active checks panel */}

@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from langgraph_sdk import get_client
 
 from qa_agent.mistakes_store import load_structured, save_structured
+from qa_agent.nodes.pdf_extractor import extract_steel_list_pdf, extract_overview_plan_pdf
 
 LANGGRAPH_URL = os.getenv("LANGGRAPH_URL", "http://127.0.0.1:2024")
 
@@ -88,6 +89,8 @@ async def _run_graph(
     tmp_path: str,
     enabled_checks: list[str],
     enabled_sub_checks: dict[str, list[str]] | None = None,
+    steel_list_data: dict | None = None,
+    overview_plan_data: dict | None = None,
 ) -> AsyncIterator[str]:
     """Stream SSE events by routing graph execution through LangGraph API."""
     lg = get_client(url=LANGGRAPH_URL)
@@ -102,6 +105,10 @@ async def _run_graph(
     graph_input: dict = {"pdf_path": tmp_path, "enabled_checks": enabled_checks}
     if enabled_sub_checks:
         graph_input["enabled_sub_checks"] = enabled_sub_checks
+    if steel_list_data:
+        graph_input["steel_list_data"] = steel_list_data
+    if overview_plan_data:
+        graph_input["overview_plan_data"] = overview_plan_data
 
     async for chunk in lg.runs.stream(
         thread_id,
@@ -127,6 +134,8 @@ async def analyze(
     file: Annotated[UploadFile, File()],
     checks: Annotated[str, Form()] = "spell,bend,rebar",
     sub_checks: Annotated[str, Form()] = "{}",
+    steel_list: Annotated[UploadFile | None, File()] = None,
+    overview_plan: Annotated[UploadFile | None, File()] = None,
 ):
     enabled_checks = [c.strip() for c in checks.split(",") if c.strip() in _ALL_CHECKS] or _ALL_CHECKS[:]
 
@@ -141,10 +150,42 @@ async def analyze(
     print(f"\n[server] === New analysis: {file.filename} → {tmp_path} | checks: {enabled_checks} | sub_checks: {enabled_sub_checks} ===")
     print(f"[server] Routing to LangGraph API at {LANGGRAPH_URL}")
 
+    # ── pdfplumber pre-extraction for supplementary files ───────────────────
+    steel_list_data: dict | None = None
+    overview_plan_data: dict | None = None
+
+    if steel_list and steel_list.filename:
+        sl_bytes = await steel_list.read()
+        sl_tmp = await _save_upload(sl_bytes)
+        try:
+            steel_list_data = await asyncio.to_thread(extract_steel_list_pdf, sl_tmp)
+            print(f"[server] steel_list extracted: gesamtmasse={steel_list_data.get('gesamtmasse')!r}  pages={steel_list_data.get('page_count')}")
+        except Exception as exc:
+            print(f"[server] ✗ steel_list extraction failed: {exc}")
+        finally:
+            try:
+                os.unlink(sl_tmp)
+            except OSError:
+                pass
+
+    if overview_plan and overview_plan.filename:
+        op_bytes = await overview_plan.read()
+        op_tmp = await _save_upload(op_bytes)
+        try:
+            overview_plan_data = await asyncio.to_thread(extract_overview_plan_pdf, op_tmp)
+            print(f"[server] overview_plan extracted: pages={overview_plan_data.get('page_count')}  chars={len(overview_plan_data.get('raw_text', ''))}")
+        except Exception as exc:
+            print(f"[server] ✗ overview_plan extraction failed: {exc}")
+        finally:
+            try:
+                os.unlink(op_tmp)
+            except OSError:
+                pass
+
     async def stream():
         yield _sse({"type": "ack"})
         try:
-            async for event in _run_graph(tmp_path, enabled_checks, enabled_sub_checks):
+            async for event in _run_graph(tmp_path, enabled_checks, enabled_sub_checks, steel_list_data, overview_plan_data):
                 yield event
         except Exception as exc:
             print(f"[server] ✗ EXCEPTION: {exc}")

@@ -40,3 +40,5 @@ class GraphState(_GraphStateRequired, total=False):
     rebar_issues: Optional[list[Issue]]
     validation_results: Optional[dict]
     ui_response: Optional[dict]
+    steel_list_data: Optional[dict]      # pdfplumber-extracted data from supplementary steel list PDF
+    overview_plan_data: Optional[dict]   # pdfplumber-extracted data from supplementary overview plan PDF

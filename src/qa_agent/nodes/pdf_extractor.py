@@ -554,6 +554,51 @@ def _find_last_revision_in_table(words: list[dict]) -> str | None:
     return min(entries, key=lambda w: w["top"])["text"].strip()
 
 
+# ── Supplementary file extractors ────────────────────────────────────────────
+
+def extract_steel_list_pdf(pdf_path: str) -> dict:
+    """Extract steel schedule data from a supplementary Stabliste PDF.
+
+    Reads all pages, collects raw text, and sums Gesamtmasse values.
+    The result is passed as `steel_list_data` in GraphState so check nodes
+    have access to it without re-reading the file.
+    """
+    with pdfplumber.open(pdf_path) as pdf:
+        page_count = len(pdf.pages)
+        parts: list[str] = []
+        for page in pdf.pages:
+            raw = page.extract_text(x_tolerance=3, y_tolerance=3) or ""
+            parts.append(raw)
+    raw_text = "\n".join(parts)
+    gesamtmasse = _find_total_mass(raw_text)
+    print(f"[steel_list] pages={page_count}  gesamtmasse={gesamtmasse!r}  chars={len(raw_text)}")
+    return {
+        "raw_text": raw_text.strip(),
+        "gesamtmasse": gesamtmasse,
+        "page_count": page_count,
+    }
+
+
+def extract_overview_plan_pdf(pdf_path: str) -> dict:
+    """Extract basic text content from an overview plan PDF.
+
+    The result is passed as `overview_plan_data` in GraphState to provide
+    layout and element context to AI check nodes.
+    """
+    with pdfplumber.open(pdf_path) as pdf:
+        page_count = len(pdf.pages)
+        parts: list[str] = []
+        for page in pdf.pages:
+            raw = page.extract_text(x_tolerance=3, y_tolerance=3) or ""
+            parts.append(raw)
+    raw_text = "\n".join(parts)
+    print(f"[overview_plan] pages={page_count}  chars={len(raw_text)}")
+    return {
+        "raw_text": raw_text.strip(),
+        "page_count": page_count,
+    }
+
+
 # ── LLM text formatter ───────────────────────────────────────────────────────
 
 def _format_for_llm(raw_text: str, title_block: dict) -> str:
