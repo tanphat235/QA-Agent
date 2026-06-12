@@ -43,7 +43,6 @@ CHECKS: dict[str, list[tuple[str, str]]] = {
         ("spelling",         "Spelling"),
         ("section_name",     "Section Name Completeness"),
         ("parts_label", "Parts Label Consistency"),
-        ("drawing_title",    "Drawing Title vs Title Block"),
         ("pos_count",        "Last Position Number vs Title Block"),
     ],
     "rebar": [

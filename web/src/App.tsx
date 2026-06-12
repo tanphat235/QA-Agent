@@ -98,7 +98,6 @@ const NODE_SECTIONS = [
       { key: 'spelling',         title: 'Spelling' },
       { key: 'section_name',     title: 'Section Name Completeness' },
       { key: 'parts_label',      title: 'Parts Label Consistency' },
-      { key: 'drawing_title',    title: 'Drawing Title vs Title Block' },
       { key: 'pos_count',        title: 'Last Position Number vs Title Block' },
       { key: 'revision_check',   title: 'Revision Code Consistency' },
       { key: 'drawing_status',   title: 'Drawing Status' },
@@ -106,6 +105,7 @@ const NODE_SECTIONS = [
       { key: 'steel_content',        title: 'Steel Content (kg/m³)' },
       { key: 'lastausgleich',        title: 'Lastausgleichgehänge Note' },
       { key: 'overview_plan_check',  title: 'Overview Plan vs Title Block', requiresOverviewPlan: true },
+      { key: 'steel_list_check',     title: 'Steel List vs Drawing',        requiresSteelList: true },
     ],
   },
   {
@@ -367,7 +367,7 @@ export default function App() {
       s.key,
       CHECK_OPTIONS.find(o => o.key === s.key)?.comingSoon
         ? []
-        : s.checks.filter(c => c.key !== 'overview_plan_check').map(c => c.key),
+        : s.checks.filter(c => c.key !== 'overview_plan_check' && c.key !== 'steel_list_check').map(c => c.key),
     ]))
   )
   const [expandedCheckCategories, setExpandedCheckCategories] = useState<Set<string>>(new Set())
@@ -434,6 +434,20 @@ export default function App() {
       return prev
     })
   }, [overviewPlanFile])
+
+  // Auto-enable / disable steel_list_check when the steel list file changes
+  useEffect(() => {
+    setEnabledSubChecks(prev => {
+      const spell = prev.spell ?? []
+      if (steelListFile && !spell.includes('steel_list_check')) {
+        return { ...prev, spell: [...spell, 'steel_list_check'] }
+      }
+      if (!steelListFile && spell.includes('steel_list_check')) {
+        return { ...prev, spell: spell.filter(k => k !== 'steel_list_check') }
+      }
+      return prev
+    })
+  }, [steelListFile])
 
   // Save completed analysis to localStorage history
   useEffect(() => {
@@ -1404,13 +1418,17 @@ export default function App() {
                       <div className="bg-white px-3 py-2.5 grid grid-cols-2 gap-x-2 gap-y-0.5">
                         {section.checks.map(check => {
                           const subOn = enabledSubs.includes(check.key)
-                          const noFile = check.key === 'overview_plan_check' && !overviewPlanFile
+                          const noFile = (check.key === 'overview_plan_check' && !overviewPlanFile)
+                            || (check.key === 'steel_list_check' && !steelListFile)
+                          const noFileTitle = check.key === 'steel_list_check' && !steelListFile
+                            ? 'Upload a Steel List to enable'
+                            : noFile ? 'Upload an Overview Plan to enable' : undefined
                           return (
                             <button
                               key={check.key}
                               onClick={() => !disabled && !noFile && toggleSubCheck(key, check.key)}
                               disabled={disabled || noFile}
-                              title={noFile ? 'Upload an Overview Plan to enable' : undefined}
+                              title={noFileTitle}
                               className={`flex items-center gap-2 px-2 py-1.5 rounded-lg text-left transition-colors ${
                                 noFile
                                   ? 'opacity-40 cursor-not-allowed text-gray-300'

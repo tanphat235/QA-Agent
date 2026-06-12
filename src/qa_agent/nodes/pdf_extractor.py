@@ -40,10 +40,17 @@ def extract_pdf_content(pdf_path: str) -> dict:
         title_block["lastausgleich_present"] = bool(_la_match)
         print(f"[lastausgleich] text_present={bool(_la_match)}  matched={_la_matched_txt!r}")
 
+        stabliste_total         = _find_stabliste_total(raw_text)
+        mattenstahlliste_total  = _find_mattenstahlliste_total(raw_text)
+        einbauteilliste_items   = _find_einbauteilliste_items(raw_text)
+        print(f"[steel_list_check] drawing: stab={stabliste_total!r}  matt={mattenstahlliste_total!r}  ebt_count={len(einbauteilliste_items)}")
         return {
-            "raw_text": raw_text,
-            "title_block": title_block,
-            "formatted": _format_for_llm(raw_text, title_block),
+            "raw_text":              raw_text,
+            "title_block":           title_block,
+            "formatted":             _format_for_llm(raw_text, title_block),
+            "stabliste_total":       stabliste_total,
+            "mattenstahlliste_total": mattenstahlliste_total,
+            "einbauteilliste_items": einbauteilliste_items,
         }
 
 
@@ -716,6 +723,233 @@ def _find_last_revision_in_table(words: list[dict]) -> str | None:
     return min(entries, key=lambda w: w["top"])["text"].strip()
 
 
+# ── Steel list cross-check extractors ────────────────────────────────────────
+
+def _find_stabliste_total(raw_text: str) -> str | None:
+    """Gesamtgewicht/Gesamtmasse from the Stabliste section.
+
+    Drawing PDF: bilingual 'Gesamtmasse / Total mass [kg]: value' label.
+    Steel list PDF: 'Gesamtgewicht value' inside a 'Stabliste - Biegeformen' section.
+    Always takes the LAST occurrence — the final total, not per-page subtotals.
+
+    The loose 'Gesamtmasse ...' fallback is intentionally absent: the steel list PDF
+    prints an intermediate per-page subtotal also labelled 'Gesamtmasse' which would
+    be matched instead of the correct final 'Gesamtgewicht' on the last page.
+    """
+    # Strategy 1 — drawing PDF only: very specific bilingual label with English counterpart
+    matches = re.findall(
+        r"Gesamtmasse[^:\n]*/?\s*Total\s+mass[^:\n]*:?\s*([\d.,]+)",
+        raw_text, re.IGNORECASE,
+    )
+    if matches:
+        val = matches[-1].replace(",", ".")
+        print(f"[steel_list_check] Stabliste Gesamtmasse (drawing bilingual): {val!r}")
+        return val
+
+    # Strategy 2 — steel list PDF: find 'Stabliste' section header, take LAST Gesamtgewicht
+    # Page order in steel list: Mattenstahlliste → Stabliste → Einbauteilliste
+    stab_m = re.search(r"\bStabliste\b", raw_text, re.IGNORECASE)
+    if stab_m:
+        # Clip at next major section following Stabliste
+        next_m = re.search(
+            r"\b(?:Mattenstahlliste|Einbauteilliste)\b",
+            raw_text[stab_m.end():], re.IGNORECASE,
+        )
+        end = stab_m.end() + (next_m.start() if next_m else len(raw_text))
+        section = raw_text[stab_m.start():end]
+        print(f"[steel_list_check] Stabliste section: {len(section)} chars, "
+              f"clipped_at={next_m.group(0) if next_m else 'EOF'}")
+        gw = re.findall(r"Gesamtgewicht\s*:?\s*([\d.,]+)", section, re.IGNORECASE)
+        print(f"[steel_list_check] Stabliste Gesamtgewicht candidates: {gw}")
+        if gw:
+            val = gw[-1].replace(",", ".")
+            print(f"[steel_list_check] Stabliste Gesamtgewicht (last in section): {val!r}")
+            return val
+
+    print("[steel_list_check] Stabliste total: not found")
+    return None
+
+
+def _find_mattenstahlliste_total(raw_text: str) -> str | None:
+    """Gesamtgewicht from the Mattenstahlliste section.
+
+    Drawing PDF uses bilingual 'Gesamtgewicht / Total weight [kg]' label.
+    Steel list PDF uses 'Gesamtgewicht' inside a 'Mattenstahlliste' section header.
+    Always takes the LAST occurrence to skip intermediate per-storey subtotals.
+    """
+    # Drawing PDF style: bilingual label with English part — very specific
+    matches = re.findall(
+        r"Gesamtgewicht[^:\n]*/?\s*Total\s+weight[^:\n]*:?\s*([\d.,]+)",
+        raw_text, re.IGNORECASE,
+    )
+    if matches:
+        val = matches[-1].replace(",", ".")
+        print(f"[steel_list_check] Mattenstahlliste Gesamtgewicht (drawing): {val!r}")
+        return val
+
+    # Strategy 2 — steel list PDF: find 'Mattenstahlliste' section header, take LAST Gesamtgewicht.
+    # Page order in steel list: Mattenstahlliste → Stabliste → Einbauteilliste,
+    # so clip at the next 'Stabliste' section that follows it.
+    matt_m = re.search(r"\bMattenstahlliste\b", raw_text, re.IGNORECASE)
+    if matt_m:
+        next_m = re.search(r"\bStabliste\b", raw_text[matt_m.end():], re.IGNORECASE)
+        end = matt_m.end() + (next_m.start() if next_m else len(raw_text))
+        section = raw_text[matt_m.start():end]
+        print(f"[steel_list_check] Mattenstahlliste section: {len(section)} chars, "
+              f"clipped_at={'Stabliste' if next_m else 'EOF'}")
+        gw = re.findall(r"Gesamtgewicht\s*:?\s*([\d.,]+)", section, re.IGNORECASE)
+        print(f"[steel_list_check] Mattenstahlliste Gesamtgewicht candidates: {gw}")
+        if gw:
+            val = gw[-1].replace(",", ".")
+            print(f"[steel_list_check] Mattenstahlliste Gesamtgewicht (last in section): {val!r}")
+            return val
+
+    print("[steel_list_check] Mattenstahlliste Gesamtgewicht: not found")
+    return None
+
+
+# Known Korrosionsschutz (corrosion protection) terms used in German construction.
+# FV = feuerverzinkt abbreviation used in Einbauteilliste tables.
+_KS_PATTERN = re.compile(
+    r"\b(feuerverzinkt[e]?|feuerverz\.|FV|verzinkt[e]?|galvanisiert[e]?"
+    r"|thermisch\s+verzinkt|keine|Edelstahl|rostfrei|KTL|blank|Zink"
+    r"|Zinklamellen|V2A|V4A|A2|A4|Aluminium|unbeschichtet|beschichtet|Korund)\b",
+    re.IGNORECASE,
+)
+
+
+def _parse_ebt_row(line: str) -> dict | None:
+    """Parse one Einbauteilliste row into {ebt_nr, hersteller, bezeichnung, korrosionsschutz, qty}."""
+    stripped = line.strip()
+    if not stripped:
+        return None
+
+    # EBT-Nummer: 4+ digit numeric codes (03009, 15011) OR 2-4 letter prefix codes (RD3001).
+    # Single-letter patterns like Q335A (steel mesh grade) are intentionally excluded.
+    nr_m = re.match(r"(\d{4,}[A-Z\d-]*|[A-Z]{2,4}\d+[A-Z\d-]*)\s+(.*)", stripped, re.IGNORECASE)
+    if not nr_m:
+        return None
+    ebt_nr = nr_m.group(1).strip().upper()
+    rest = nr_m.group(2).strip()
+
+    # Menge (Stück): last integer on the line
+    qty_m = re.search(r"\b(\d+)\s*$", rest)
+    if not qty_m:
+        return None
+    qty = qty_m.group(1)
+    rest_no_qty = rest[: qty_m.start()].strip()
+
+    # Korrosionsschutz: first known protection term found
+    ks_m = _KS_PATTERN.search(rest_no_qty)
+    if ks_m:
+        korrosionsschutz = ks_m.group(0)
+        before_ks = rest_no_qty[: ks_m.start()].strip()
+    else:
+        korrosionsschutz = ""
+        before_ks = rest_no_qty
+
+    # Split remaining into Hersteller (first token) and Bezeichnung (rest)
+    parts = before_ks.split(None, 1)
+    hersteller = parts[0] if parts else ""
+    bezeichnung = parts[1].strip() if len(parts) > 1 else ""
+
+    return {
+        "ebt_nr": ebt_nr,
+        "hersteller": hersteller,
+        "bezeichnung": bezeichnung,
+        "korrosionsschutz": korrosionsschutz,
+        "qty": qty,
+    }
+
+
+_EBT_START_RE = re.compile(r"^(\d{4,}|[A-Z]{2,4}\d+)", re.IGNORECASE)
+_EBT_HEADER_RE = re.compile(
+    r"Einbauteilliste|EBT.{0,15}Nummer|Hersteller|Korrosionsschutz"
+    r"|Bezeichnung|Menge|Bauteil|je\s+Fertigteil|Stück",
+    re.IGNORECASE,
+)
+
+
+def _find_einbauteilliste_items(raw_text: str) -> list[dict]:
+    """Parse EBT rows from the Einbauteilliste section.
+
+    Returns a list of dicts with keys: ebt_nr, hersteller, bezeichnung, korrosionsschutz, qty.
+    """
+    # Find the start of the Einbauteilliste section
+    section_m = re.search(
+        r"(?:Einbauteilliste|einbauteil|\bEBT[-\s]Nummer\b)[^\n]*\n",
+        raw_text, re.IGNORECASE,
+    )
+    if not section_m:
+        print("[steel_list_check] Einbauteilliste section not found")
+        return []
+
+    # Clip section at next major table header so Q335A-style mesh rows aren't captured
+    next_section_m = re.search(
+        r"\b(?:Stabliste|Mattenstahlliste)\b",
+        raw_text[section_m.end():], re.IGNORECASE,
+    )
+    section_end = section_m.end() + (
+        next_section_m.start() if next_section_m else 6000
+    )
+    section_text = raw_text[section_m.start():section_end]
+
+    # Collect non-blank, post-header data lines
+    data_lines: list[str] = []
+    header_passed = False
+    for line in section_text.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if _EBT_HEADER_RE.search(stripped):
+            header_passed = True
+            continue
+        if not header_passed:
+            continue
+        data_lines.append(stripped)
+
+    # Process lines with look-behind and look-ahead for Bezeichnung overflow.
+    # pdfplumber can split a multi-line table cell across 3 extractions:
+    #   non-EBT line (first part)  →  EBT row (empty bezeichnung)  →  non-EBT line (last part)
+    # Overflow only applies when the EBT row's own Bezeichnung cell is EMPTY —
+    # rows with a full Bezeichnung (03009 etc.) must ignore surrounding metadata
+    # lines (Projekt:, zu Plan:, wrapped header fragments) entirely.
+    items: list[dict] = []
+    pending_before: str = ""  # the single non-EBT line immediately before the row
+    i = 0
+    while i < len(data_lines):
+        line = data_lines[i]
+        if not _EBT_START_RE.match(line):
+            # Keep only the most recent non-EBT line as potential overflow
+            pending_before = line
+            i += 1
+            continue
+        item = _parse_ebt_row(line)
+        if item:
+            wrapped = not item["bezeichnung"]
+            if wrapped:
+                if pending_before:
+                    item["bezeichnung"] = pending_before
+                # Look-ahead for the trailing overflow part
+                if i + 1 < len(data_lines) and not _EBT_START_RE.match(data_lines[i + 1]):
+                    item["bezeichnung"] = (item["bezeichnung"] + " " + data_lines[i + 1]).strip()
+                    i += 1  # consume the trailing line
+            items.append(item)
+        pending_before = ""
+        i += 1
+
+    print(f"[steel_list_check] Einbauteilliste: {len(items)} items")
+    for it in items:
+        print(
+            f"[steel_list_check]   EBT {it['ebt_nr']}: "
+            f"hersteller={it['hersteller']!r}  "
+            f"bezeichnung={it['bezeichnung'][:30]!r}  "
+            f"ks={it['korrosionsschutz']!r}  "
+            f"qty={it['qty']}"
+        )
+    return items
+
+
 # ── Supplementary file extractors ────────────────────────────────────────────
 
 def extract_steel_list_pdf(pdf_path: str) -> dict:
@@ -728,16 +962,42 @@ def extract_steel_list_pdf(pdf_path: str) -> dict:
     with pdfplumber.open(pdf_path) as pdf:
         page_count = len(pdf.pages)
         parts: list[str] = []
-        for page in pdf.pages:
+        for i, page in enumerate(pdf.pages):
             raw = page.extract_text(x_tolerance=3, y_tolerance=3) or ""
             parts.append(raw)
+            # Print first 300 chars of each page so we can see what pdfplumber extracts
+            preview = raw[:300].replace("\n", "↵")
+            print(f"[steel_list_debug] page {i+1}/{page_count}: {len(raw)} chars | {preview!r}")
     raw_text = "\n".join(parts)
-    gesamtmasse = _find_total_mass(raw_text)
-    print(f"[steel_list] pages={page_count}  gesamtmasse={gesamtmasse!r}  chars={len(raw_text)}")
+
+    # Write full raw text to a debug file next to the PDF for manual inspection
+    import os as _os
+    _debug_path = _os.path.splitext(pdf_path)[0] + "_debug_raw.txt"
+    try:
+        with open(_debug_path, "w", encoding="utf-8") as _f:
+            _f.write(raw_text)
+        print(f"[steel_list_debug] raw text written to: {_debug_path}")
+    except Exception as _e:
+        print(f"[steel_list_debug] could not write debug file: {_e}")
+
+    # Check which section headers are present
+    for _hdr in ("Stabliste", "Mattenstahlliste", "Einbauteilliste", "Gesamtgewicht", "Gesamtmasse"):
+        _m = re.search(rf"\b{_hdr}\b", raw_text, re.IGNORECASE)
+        print(f"[steel_list_debug] header '{_hdr}': {'found at pos ' + str(_m.start()) if _m else 'NOT FOUND'}")
+
+    gesamtmasse            = _find_total_mass(raw_text)
+    stabliste_total        = _find_stabliste_total(raw_text)
+    mattenstahlliste_total = _find_mattenstahlliste_total(raw_text)
+    einbauteilliste_items  = _find_einbauteilliste_items(raw_text)
+    print(f"[steel_list] pages={page_count}  stab={stabliste_total!r}  matt={mattenstahlliste_total!r}"
+          f"  ebt_count={len(einbauteilliste_items)}  chars={len(raw_text)}")
     return {
-        "raw_text": raw_text.strip(),
-        "gesamtmasse": gesamtmasse,
-        "page_count": page_count,
+        "raw_text":              raw_text.strip(),
+        "gesamtmasse":           gesamtmasse,
+        "stabliste_total":       stabliste_total,
+        "mattenstahlliste_total": mattenstahlliste_total,
+        "einbauteilliste_items": einbauteilliste_items,
+        "page_count":            page_count,
     }
 
 

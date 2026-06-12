@@ -56,8 +56,8 @@ _PASS_ITEM_RE = re.compile(
 )
 
 # pos_count and revision_check are handled entirely by Python — not sent to LLM
-_LLM_CHECKS = ["spelling", "section_name", "parts_label", "drawing_title"]
-_ALL_CHECKS = _LLM_CHECKS + ["pos_count", "revision_check", "drawing_status", "exposition_class", "steel_content", "lastausgleich", "overview_plan_check"]
+_LLM_CHECKS = ["spelling", "section_name", "parts_label"]
+_ALL_CHECKS = _LLM_CHECKS + ["pos_count", "revision_check", "drawing_status", "exposition_class", "steel_content", "lastausgleich", "overview_plan_check", "steel_list_check"]
 
 # Expected concrete cover values per exposition class — BẢNG 3.1, φ10 default
 # (Cmin,dur, ΔCdev, Cv)
@@ -88,7 +88,6 @@ DEBUG NOTES — always populate one entry per active check, regardless of pass/f
   spelling:      "spelling: scanned=[<areas checked>] | misspellings=[<word: correction>,...] | overlap/truncated=[<locations>]"
   section_name:  "section_name: MARKERS=[<list from Ansicht/Bewehrung>] | VIEWS=[<list of Schnitt/Draufsicht titles>] | unmatched_markers=[...] | unmatched_views=[...]"
   parts_label:   "parts_label: EBT found=[<part codes>] | MT found=[<part codes>] | missing_label=[...] | wrong_label=[...]"
-  drawing_title: "drawing_title: TITLE_DE=[<value or empty>] | TITLE_EN=[<value or empty>] | Drawing_No=[<value or empty>] | drawing_name=[<sheet header>] | lang_match=[PASS/FAIL] | name_match=[PASS/FAIL]"
 
 RULES:
   • OUTPUT ONLY actual problems — items that clearly do not comply.
@@ -127,7 +126,7 @@ class _UsageCallback(BaseCallbackHandler):
 
 
 class _SpellIssue(BaseModel):
-    check: str = Field(description="spelling | section_name | parts_label | drawing_title")
+    check: str = Field(description="spelling | section_name | parts_label")
     severity: str = Field(description="error | warning")
     description: str
     page: int
@@ -156,12 +155,6 @@ def spell_check(state: GraphState) -> dict:
     tm = str(title_block.get("letzte_mattenposition") or "").strip()
     mm = str(title_block.get("max_mattenliste_pos") or "").strip()
     print(f"[pos_count] TITLE_STAB={ts!r}  MAX_STAB={ms!r}  TITLE_MATTEN={tm!r}  MAX_MATTEN={mm!r}")
-
-    # ── drawing_title: log pre-extracted values for debugging ────────────────
-    dt_val = str(title_block.get("drawing_title_value") or "").strip()
-    dn_val = str(title_block.get("drawing_no_value") or "").strip()
-    dname  = str(title_block.get("drawing_name") or "").strip()
-    print(f"[drawing_title] drawing_title_value={dt_val!r}  drawing_no_value={dn_val!r}  drawing_name={dname!r}")
 
     # ── revision_check: log pre-extracted values for debugging ───────────────
     rev_tb  = str(title_block.get("revision_title_block") or "").strip().upper()
@@ -546,6 +539,116 @@ def spell_check(state: GraphState) -> dict:
 
                 n = len(by_check["overview_plan_check"])
                 print(f"[overview_plan_check] {'PASS' if n == 0 else f'FAIL — {n} mismatch(es)'}")
+
+    # ── steel_list_check ────────────────────────────────────────────────────
+    sl_enabled = enabled_sub is None or "steel_list_check" in (enabled_sub or [])
+    if sl_enabled:
+        sl_data: dict = state.get("steel_list_data") or {}  # type: ignore[assignment]
+        if not sl_data:
+            not_found_set.add("steel_list_check")
+            print("[steel_list_check] steel list not uploaded — skipping")
+        else:
+            pdf_c: dict = state.get("pdf_content") or {}  # type: ignore[assignment]
+            dr_stab  = str(pdf_c.get("stabliste_total")       or "").strip()
+            dr_matt  = str(pdf_c.get("mattenstahlliste_total") or "").strip()
+            dr_ebt: list[dict] = pdf_c.get("einbauteilliste_items") or []
+
+            sl_stab  = str(sl_data.get("stabliste_total")       or "").strip()
+            sl_matt  = str(sl_data.get("mattenstahlliste_total") or "").strip()
+            sl_ebt: list[dict] = sl_data.get("einbauteilliste_items") or []
+
+            print(f"[steel_list_check] ── Comparison ──────────────────────────────────")
+            print(f"[steel_list_check]   Stabliste Gesamtmasse   : drawing={dr_stab!r}  steel_list={sl_stab!r}")
+            print(f"[steel_list_check]   Mattenstahl Gesamtgewicht: drawing={dr_matt!r}  steel_list={sl_matt!r}")
+            print(f"[steel_list_check]   EBT items               : drawing={len(dr_ebt)}  steel_list={len(sl_ebt)}")
+            print(f"[steel_list_check] ────────────────────────────────────────────────")
+
+            _SL_TOL = 0.01  # 1% relative tolerance
+
+            def _sl_cmp_float(label: str, dr_val: str, sl_val: str, unit: str = "kg") -> None:
+                if not dr_val:
+                    print(f"[steel_list_check]   ERROR {label}: could not extract from drawing PDF")
+                    by_check["steel_list_check"].append(_SpellIssue(
+                        check="steel_list_check", severity="error",
+                        description=f"{label}: could not extract value from drawing PDF (steel list has {sl_val} {unit})",
+                        page=1, location=f"drawing {label}", confidence=1.0,
+                    ))
+                    return
+                if not sl_val:
+                    print(f"[steel_list_check]   SKIP {label}: steel list value missing")
+                    return
+                try:
+                    d, s = float(dr_val.replace(",", ".")), float(sl_val.replace(",", "."))
+                    ref = max(abs(d), abs(s), 1e-9)
+                    diff_pct = abs(d - s) / ref * 100
+                    if diff_pct > _SL_TOL * 100:
+                        print(f"[steel_list_check]   MISMATCH {label}: drawing={d} vs steel_list={s}  diff={diff_pct:.2f}%")
+                        by_check["steel_list_check"].append(_SpellIssue(
+                            check="steel_list_check", severity="error",
+                            description=f"{label} mismatch: drawing={d} {unit}, steel list={s} {unit} (diff {diff_pct:.2f}%)",
+                            page=1, location=f"drawing {label}", confidence=1.0,
+                        ))
+                    else:
+                        print(f"[steel_list_check]   OK {label}: drawing={d} vs steel_list={s}  diff={diff_pct:.2f}%")
+                except ValueError:
+                    print(f"[steel_list_check]   ERROR {label}: parse error drawing={dr_val!r} sl={sl_val!r}")
+
+            _sl_cmp_float("Stabliste Gesamtmasse",       dr_stab, sl_stab)
+            _sl_cmp_float("Mattenstahlliste Gesamtgewicht", dr_matt, sl_matt)
+
+            # EBT comparison — all 5 fields must match exactly
+            dr_ebt_map = {item["ebt_nr"]: item for item in dr_ebt}
+            sl_ebt_map = {item["ebt_nr"]: item for item in sl_ebt}
+
+            _EBT_FIELDS = [
+                ("hersteller",       "Hersteller"),
+                ("bezeichnung",      "Bezeichnung"),
+                ("korrosionsschutz", "Korrosionsschutz"),
+                ("qty",              "Menge (Stück)"),
+            ]
+
+            for ebt_nr, dr_item in dr_ebt_map.items():
+                if ebt_nr not in sl_ebt_map:
+                    print(f"[steel_list_check]   MISSING in steel_list: EBT {ebt_nr}")
+                    by_check["steel_list_check"].append(_SpellIssue(
+                        check="steel_list_check", severity="error",
+                        description=f"EBT {ebt_nr} ({dr_item.get('bezeichnung','')}) found in drawing but missing in steel list",
+                        page=1, location="Einbauteilliste", confidence=1.0,
+                    ))
+                else:
+                    sl_item = sl_ebt_map[ebt_nr]
+                    mismatches = []
+                    for field_key, field_label in _EBT_FIELDS:
+                        dr_val = dr_item.get(field_key, "")
+                        sl_val = sl_item.get(field_key, "")
+                        if dr_val != sl_val:
+                            mismatches.append(
+                                f"{field_label}: drawing={dr_val!r} vs steel list={sl_val!r}"
+                            )
+                            print(
+                                f"[steel_list_check]   MISMATCH EBT {ebt_nr} "
+                                f"{field_label}: drawing={dr_val!r} vs steel_list={sl_val!r}"
+                            )
+                    if mismatches:
+                        by_check["steel_list_check"].append(_SpellIssue(
+                            check="steel_list_check", severity="error",
+                            description=f"EBT {ebt_nr} field mismatch — " + "; ".join(mismatches),
+                            page=1, location="Einbauteilliste", confidence=1.0,
+                        ))
+                    else:
+                        print(f"[steel_list_check]   OK EBT {ebt_nr}")
+
+            for ebt_nr in sl_ebt_map:
+                if ebt_nr not in dr_ebt_map:
+                    print(f"[steel_list_check]   EXTRA in steel_list: EBT {ebt_nr}")
+                    by_check["steel_list_check"].append(_SpellIssue(
+                        check="steel_list_check", severity="error",
+                        description=f"EBT {ebt_nr} found in steel list but missing in drawing Einbauteilliste",
+                        page=1, location="Einbauteilliste", confidence=1.0,
+                    ))
+
+            n_sl = len(by_check["steel_list_check"])
+            print(f"[steel_list_check] {'PASS' if n_sl == 0 else f'FAIL — {n_sl} mismatch(es)'}")
 
     issues: list[Issue] = []
     for check_key, (check_name, pass_desc, nf_desc) in _CHECK_META.items():
