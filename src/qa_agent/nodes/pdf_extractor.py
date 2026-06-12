@@ -8,29 +8,112 @@ import re
 import pdfplumber
 
 
-def _not_mirrored(obj: dict) -> bool:
-    """Filter test: drop chars rendered with a reflected transformation matrix.
+def _char_category(obj: dict) -> str:
+    """Classify a char by its transformation matrix.
 
-    Mirrored view labels (e.g. 'Schwerpunkt / Center of gravity' on a flipped
-    element) extract as reversed strings ('ytivarg fo retneC') and break the
-    spelling check. A reflection has a negative matrix determinant.
+    normal   — upright text, standard extraction order is correct
+    mirrored — reflected (negative determinant); reads backwards and cannot be
+               recovered reliably → dropped
+    rot180   — rotated 180°; chars extract left-to-right but read right-to-left
+    vertical — rotated ±90° (labels on vertical parts); chars extract top-down
+               but may read bottom-up depending on rotation direction
     """
+    m = obj.get("matrix")
+    if not m:
+        return "normal"
+    a, b, c, d = m[0], m[1], m[2], m[3]
+    if a * d - b * c < 0:
+        return "mirrored"
+    if b == 0 and c == 0:
+        return "normal" if a > 0 else "rot180"
+    return "vertical"
+
+
+def _is_normal_char(obj: dict) -> bool:
     if obj.get("object_type") != "char":
         return True
-    m = obj.get("matrix")
-    if m and (m[0] * m[3] - m[1] * m[2]) < 0:
-        return False
-    return True
+    return _char_category(obj) == "normal"
+
+
+def _rebuild_rotated_words(chars: list[dict]) -> list[dict]:
+    """Rebuild correct reading order for rotated (vertical / 180°) chars.
+
+    pdfplumber orders chars by page position, which reverses the string for
+    text rotated 90° CCW or 180° (e.g. vertical EBT label '07162' extracts as
+    '26170'). Reading direction is recovered from the matrix advance vector:
+    (a,b) points along the baseline — b>0 advances up the page, b<0 down,
+    a<0 advances right-to-left.
+    Returns word dicts with text/x0/x1/top/bottom compatible with extract_words.
+    """
+    groups: dict[tuple, list[dict]] = {}
+    for ch in chars:
+        cat = _char_category(ch)
+        if cat in ("normal", "mirrored"):
+            continue
+        if cat == "vertical":
+            b_sign = 1 if ch["matrix"][1] > 0 else -1
+            # One column of vertical text = one group (bucket x-center by 3 pt)
+            key = (cat, b_sign, round((ch["x0"] + ch["x1"]) / 2 / 3))
+        else:  # rot180 — one row = one group (bucket y-center by 3 pt)
+            key = (cat, 0, round((ch["top"] + ch["bottom"]) / 2 / 3))
+        groups.setdefault(key, []).append(ch)
+
+    def _flush(out: list[dict], chs: list[dict]) -> None:
+        text = "".join(c["text"] for c in chs)
+        if not text.strip():
+            return
+        out.append({
+            "text":   text,
+            "x0":     min(c["x0"] for c in chs),
+            "x1":     max(c["x1"] for c in chs),
+            "top":    min(c["top"] for c in chs),
+            "bottom": max(c["bottom"] for c in chs),
+            "upright": False,
+        })
+
+    words: list[dict] = []
+    for (cat, b_sign, _), chs in groups.items():
+        if cat == "vertical":
+            # b>0 (90° CCW): reads bottom-to-top → sort by descending top
+            chs.sort(key=lambda c: c["top"], reverse=(b_sign > 0))
+            axis = "top"
+        else:
+            # rot180: reads right-to-left → sort by descending x
+            chs.sort(key=lambda c: c["x0"], reverse=True)
+            axis = "x0"
+        current: list[dict] = []
+        for ch in chs:
+            if current:
+                gap = abs(ch[axis] - current[-1][axis])
+                if gap > max(current[-1].get("size", 8) * 1.6, 3) or ch["text"].isspace():
+                    _flush(words, current)
+                    current = []
+            if not ch["text"].isspace():
+                current.append(ch)
+        if current:
+            _flush(words, current)
+    return words
 
 
 def extract_pdf_content(pdf_path: str) -> dict:
     with pdfplumber.open(pdf_path) as pdf:
         # dedupe_chars removes overprinted duplicate chars (fake-bold rendering
-        # that otherwise extracts 'Laubholz' as 'LLaauubbhhoollzz'); the filter
-        # removes mirrored text that extracts backwards.
-        page = pdf.pages[0].dedupe_chars(tolerance=1).filter(_not_mirrored)
+        # that otherwise extracts 'Laubholz' as 'LLaauubbhhoollzz').
+        deduped = pdf.pages[0].dedupe_chars(tolerance=1)
+        # Rotated text extracts in reversed reading order — pull those chars out
+        # of the main flow and re-add them with corrected order; drop mirrored.
+        rotated_words = _rebuild_rotated_words(deduped.chars)
+        page = deduped.filter(_is_normal_char)
         words = page.extract_words(x_tolerance=3, y_tolerance=3, keep_blank_chars=False)
         raw_text = page.extract_text(x_tolerance=3, y_tolerance=3) or ""
+        if rotated_words:
+            print(f"[pdf_extract] rotated/vertical words (reading-order corrected): "
+                  f"{[w['text'] for w in rotated_words][:20]}")
+            words.extend(rotated_words)
+            raw_text += (
+                "\n=== ROTATED / VERTICAL LABELS (reading-order corrected) ===\n"
+                + "\n".join(w["text"] for w in rotated_words)
+            )
 
         title_block = _extract_title_block(words)
         title_block["max_stabliste_pos"] = _max_pos_in_schedule(words, "Stabliste")

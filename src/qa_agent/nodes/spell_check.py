@@ -59,6 +59,13 @@ _PASS_ITEM_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
+# section_name checks only marker → view. View-without-marker items are false
+# positives (marker labels are often unreadable in extracted text) — drop them.
+_VIEW_TO_MARKER_RE = re.compile(
+    r"\bview\b.{0,60}\bno\s+correspond\w*\b.{0,40}\bmarker\b",
+    re.IGNORECASE,
+)
+
 # pos_count and revision_check are handled entirely by Python — not sent to LLM
 _LLM_CHECKS = ["spelling", "section_name", "parts_label"]
 _ALL_CHECKS = _LLM_CHECKS + ["pos_count", "revision_check", "drawing_status", "exposition_class", "steel_content", "lastausgleich", "overview_plan_check", "steel_list_check"]
@@ -90,7 +97,7 @@ OUTPUT FORMAT — one item per finding
 
 DEBUG NOTES — always populate one entry per active check, regardless of pass/fail:
   spelling:      "spelling: scanned=[<areas checked>] | misspellings=[<word: correction>,...] | overlap/truncated=[<locations>]"
-  section_name:  "section_name: MARKERS=[<list from Ansicht/Bewehrung>] | VIEWS=[<list of Schnitt/Draufsicht titles>] | unmatched_markers=[...] | unmatched_views=[...]"
+  section_name:  "section_name: MARKERS=[<list from Ansicht/Bewehrung>] | VIEWS=[<list of Schnitt/Draufsicht titles>] | unmatched_markers=[...]"
   parts_label:   "parts_label: EBT found=[<part codes>] | MT found=[<part codes>] | missing_label=[...] | wrong_label=[...]"
 
 RULES:
@@ -235,8 +242,12 @@ def spell_check(state: GraphState) -> dict:
 
     by_check: dict[str, list[_SpellIssue]] = {k: [] for k in _CHECK_META}
     for item in result.issues:
-        if item.confidence >= 0.60 and item.check in by_check and not _PASS_ITEM_RE.search(item.description):
-            by_check[item.check].append(item)
+        if item.confidence < 0.60 or item.check not in by_check or _PASS_ITEM_RE.search(item.description):
+            continue
+        if item.check == "section_name" and _VIEW_TO_MARKER_RE.search(item.description):
+            print(f"[section_name] dropped view→marker item: {item.description[:80]!r}")
+            continue
+        by_check[item.check].append(item)
 
     not_found_set = set(result.not_found or [])
 
