@@ -730,16 +730,6 @@ export default function App() {
     if (overviewPlanInputRef.current) overviewPlanInputRef.current.value = ''
   }
 
-  const downloadReport = () => {
-    if (!result) return
-    const blob = new Blob([JSON.stringify(result, null, 2)], { type: 'application/json' })
-    const a = Object.assign(document.createElement('a'), {
-      href:     URL.createObjectURL(blob),
-      download: `drawing_report_${file?.name ?? 'result'}.json`,
-    })
-    a.click(); URL.revokeObjectURL(a.href)
-  }
-
   // Send the original PDF + result to the backend, which anchors each failed
   // finding in the drawing as a highlight/comment, and download the result.
   const downloadAnnotatedPdf = async () => {
@@ -1706,14 +1696,6 @@ export default function App() {
                 </div>
 
                 <div className="flex items-center gap-2 flex-shrink-0">
-                  {file && appState !== 'analyzing' && (
-                    <button onClick={analyze}
-                      disabled={enabledChecks.length === 0}
-                      title={enabledChecks.length === 0 ? 'Select at least one check' : 'Run the analysis again'}
-                      className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white text-xs font-bold rounded-xl hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors tracking-wide shadow-sm">
-                      <RefreshCw size={13} />Re-Analyze
-                    </button>
-                  )}
                   {file && (
                     <button onClick={downloadAnnotatedPdf}
                       disabled={annotating}
@@ -1723,10 +1705,6 @@ export default function App() {
                       {annotating ? 'Building…' : 'Annotated PDF'}
                     </button>
                   )}
-                  <button onClick={downloadReport}
-                    className="flex items-center gap-2 px-4 py-2 bg-slate-900 text-white text-xs font-bold rounded-xl hover:bg-slate-700 transition-colors tracking-wide shadow-sm">
-                    <Download size={13} />Download Report
-                  </button>
                 </div>
               </div>
 
