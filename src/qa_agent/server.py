@@ -13,7 +13,7 @@ import docx as python_docx
 
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
@@ -21,6 +21,7 @@ from langgraph_sdk import get_client
 
 from qa_agent.mistakes_store import load_structured, save_structured
 from qa_agent.nodes.pdf_extractor import extract_steel_list_pdf, extract_overview_plan_pdf
+from qa_agent.pdf_annotator import annotate_pdf
 
 LANGGRAPH_URL = os.getenv("LANGGRAPH_URL", "http://127.0.0.1:2024")
 
@@ -204,6 +205,63 @@ async def analyze(
             print("[server] === Analysis done ===\n")
 
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@app.post("/api/annotate")
+async def annotate_report(
+    file: Annotated[UploadFile, File()],
+    result: Annotated[str, Form()],
+):
+    """Return the uploaded PDF annotated with the failed findings from `result`.
+
+    `result` is the analysis-result JSON the frontend already holds. Only real
+    findings (ERROR/WARNING, not per-check summaries or not-found items) are
+    annotated — each anchored where its offending text appears in the drawing.
+    """
+    pdf_bytes = await file.read()
+    try:
+        parsed = json.loads(result) if result else {}
+    except (json.JSONDecodeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid result JSON")
+
+    sections = parsed.get("sections") if isinstance(parsed, dict) else None
+    issues: list[dict] = []
+    for section in (sections or []):
+        if not isinstance(section, dict):
+            continue
+        current_check = section.get("title")
+        for it in (section.get("issues") or []):
+            if not isinstance(it, dict):
+                continue
+            # Per-check summary / not-found item — remember its name, don't annotate.
+            if "passed" in it or it.get("not_found") is True:
+                current_check = it.get("check_name") or current_check
+                continue
+            sev = str(it.get("severity", "")).upper()
+            if sev not in ("ERROR", "WARNING"):
+                continue
+            issues.append({
+                "page":        it.get("page", 1),
+                "description": it.get("description", ""),
+                "location":    it.get("location", ""),
+                "severity":    sev,
+                "check_name":  it.get("check_name") or current_check or it.get("category"),
+                "category":    it.get("category"),
+            })
+
+    print(f"[annotate] {len(issues)} failed finding(s) → annotating {file.filename!r}")
+    try:
+        annotated = await asyncio.to_thread(annotate_pdf, pdf_bytes, issues)
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Annotation failed: {exc}")
+
+    base = (file.filename or "drawing.pdf").rsplit(".", 1)[0]
+    return Response(
+        content=annotated,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{base}_annotated.pdf"'},
+    )
 
 
 @app.get("/api/mistakes-structured")

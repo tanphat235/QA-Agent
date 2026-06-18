@@ -3,7 +3,7 @@ import {
   LayoutDashboard, History, HelpCircle,
   FileText, CheckCircle, AlertTriangle,
   Download, Loader2, ChevronLeft, ChevronRight, ChevronDown,
-  XCircle, BookOpen, Save, Pencil, Database, Paperclip, RefreshCw,
+  XCircle, BookOpen, Save, Pencil, Database, Paperclip, RefreshCw, Highlighter,
 } from 'lucide-react'
 
 // ── Types ────────────────────────────────────────────────────
@@ -387,6 +387,7 @@ export default function App() {
   const [cardErrors,             setCardErrors]             = useState<Record<string, string>>({})
   const [kbSaving,               setKbSaving]               = useState(false)
   const [kbSaveOk,               setKbSaveOk]               = useState(false)
+  const [annotating,             setAnnotating]             = useState(false)
   const inputRef           = useRef<HTMLInputElement>(null)
   const steelListInputRef  = useRef<HTMLInputElement>(null)
   const overviewPlanInputRef = useRef<HTMLInputElement>(null)
@@ -737,6 +738,35 @@ export default function App() {
       download: `drawing_report_${file?.name ?? 'result'}.json`,
     })
     a.click(); URL.revokeObjectURL(a.href)
+  }
+
+  // Send the original PDF + result to the backend, which anchors each failed
+  // finding in the drawing as a highlight/comment, and download the result.
+  const downloadAnnotatedPdf = async () => {
+    if (!file || !result || annotating) return
+    setAnnotating(true)
+    try {
+      const form = new FormData()
+      form.append('file', file)
+      form.append('result', JSON.stringify(result))
+      const res = await fetch('/api/annotate', { method: 'POST', body: form })
+      if (!res.ok) {
+        let detail = `HTTP ${res.status}`
+        try { detail = (await res.json()).detail ?? detail } catch { /* non-JSON */ }
+        throw new Error(detail)
+      }
+      const blob = await res.blob()
+      const a = Object.assign(document.createElement('a'), {
+        href:     URL.createObjectURL(blob),
+        download: `${(file.name ?? 'drawing').replace(/\.pdf$/i, '')}_annotated.pdf`,
+      })
+      a.click(); URL.revokeObjectURL(a.href)
+    } catch (err) {
+      setErrorMsg(`Could not build annotated PDF: ${String(err)}`)
+      setAppState('error')
+    } finally {
+      setAnnotating(false)
+    }
   }
 
   const progress = Math.round(
@@ -1682,6 +1712,15 @@ export default function App() {
                       title={enabledChecks.length === 0 ? 'Select at least one check' : 'Run the analysis again'}
                       className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white text-xs font-bold rounded-xl hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors tracking-wide shadow-sm">
                       <RefreshCw size={13} />Re-Analyze
+                    </button>
+                  )}
+                  {file && (
+                    <button onClick={downloadAnnotatedPdf}
+                      disabled={annotating}
+                      title="Download the PDF with each failed finding highlighted and commented in place"
+                      className="flex items-center gap-2 px-4 py-2 bg-amber-500 text-white text-xs font-bold rounded-xl hover:bg-amber-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors tracking-wide shadow-sm">
+                      {annotating ? <Loader2 size={13} className="animate-spin" /> : <Highlighter size={13} />}
+                      {annotating ? 'Building…' : 'Annotated PDF'}
                     </button>
                   )}
                   <button onClick={downloadReport}
