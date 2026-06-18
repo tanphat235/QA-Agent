@@ -3,7 +3,7 @@ import {
   LayoutDashboard, History, HelpCircle,
   FileText, CheckCircle, AlertTriangle,
   Download, Loader2, ChevronLeft, ChevronRight, ChevronDown,
-  XCircle, BookOpen, Save, Pencil, Database, Paperclip,
+  XCircle, BookOpen, Save, Pencil, Database, Paperclip, RefreshCw,
 } from 'lucide-react'
 
 // ── Types ────────────────────────────────────────────────────
@@ -1519,9 +1519,18 @@ export default function App() {
                         </span>
                       )}
                       {appState === 'done' && (
-                        <span className="text-[9px] bg-green-50 text-green-600 border border-green-100 px-2 py-0.5 rounded-full font-bold tracking-widest">
-                          DONE
-                        </span>
+                        <>
+                          <span className="text-[9px] bg-green-50 text-green-600 border border-green-100 px-2 py-0.5 rounded-full font-bold tracking-widest">
+                            DONE
+                          </span>
+                          <button
+                            onClick={analyze}
+                            disabled={enabledChecks.length === 0}
+                            title={enabledChecks.length === 0 ? 'Select at least one check' : 'Run the analysis again'}
+                            className="ml-1 flex items-center gap-1 px-3 py-1.5 bg-blue-600 text-white text-[11px] font-bold rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors tracking-wide shadow-sm">
+                            <RefreshCw size={11} /> Re-Analyze
+                          </button>
+                        </>
                       )}
                       {appState === 'error' && (
                         <span className="text-[9px] bg-red-50 text-red-500 px-2 py-0.5 rounded-full font-bold border border-red-100 tracking-widest">FAILED</span>
@@ -1666,10 +1675,20 @@ export default function App() {
                   )}
                 </div>
 
-                <button onClick={downloadReport}
-                  className="flex items-center gap-2 px-4 py-2 bg-slate-900 text-white text-xs font-bold rounded-xl hover:bg-slate-700 transition-colors tracking-wide shadow-sm flex-shrink-0">
-                  <Download size={13} />Download Report
-                </button>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  {file && appState !== 'analyzing' && (
+                    <button onClick={analyze}
+                      disabled={enabledChecks.length === 0}
+                      title={enabledChecks.length === 0 ? 'Select at least one check' : 'Run the analysis again'}
+                      className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white text-xs font-bold rounded-xl hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors tracking-wide shadow-sm">
+                      <RefreshCw size={13} />Re-Analyze
+                    </button>
+                  )}
+                  <button onClick={downloadReport}
+                    className="flex items-center gap-2 px-4 py-2 bg-slate-900 text-white text-xs font-bold rounded-xl hover:bg-slate-700 transition-colors tracking-wide shadow-sm">
+                    <Download size={13} />Download Report
+                  </button>
+                </div>
               </div>
 
               {/* Tree view */}
