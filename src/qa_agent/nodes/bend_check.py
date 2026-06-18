@@ -1,13 +1,13 @@
 import logging
-import re
 from pydantic import BaseModel, Field
 from langchain_anthropic import ChatAnthropic
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.outputs import LLMResult
 
-from qa_agent.state import GraphState, Issue
+from qa_agent.state import GraphState
 from qa_agent.rag.retriever import get_check_prompt, get_check_meta
+from qa_agent.nodes.issue_filter import OUTPUT_RULES, accept_finding, build_check_issues
 
 logger = logging.getLogger(__name__)
 
@@ -63,12 +63,10 @@ OUTPUT FORMAT — one item per finding
 
 RULES:
   • OUTPUT ONLY actual problems — values that do not comply, missing items, or clear errors.
-  • Do NOT output any item to describe a passing check, a matching value, or a verified-correct result.
-    (e.g. "all values match" or "no issues found for X" → output nothing for that check)
-  • An empty issues list means ALL enabled checks passed — that is the correct output when no problems exist.
   • Do NOT infer or estimate values not shown.
-  • If required information is absent from the drawing, add the check key to not_found instead of skipping.\
-"""
+  • If required information is absent from the drawing, add the check key to not_found instead of skipping.
+
+""" + OUTPUT_RULES
 
 
 def _build_bend_task(enabled_sub: list[str] | None) -> str:
@@ -78,20 +76,6 @@ def _build_bend_task(enabled_sub: list[str] | None) -> str:
     return _TASK_INTRO + "\n\n" + blocks + _TASK_OUTRO_TPL.format(check_keys=check_keys)
 
 
-
-# Drop LLM items that describe a passing result instead of an actual violation.
-_PASS_ITEM_RE = re.compile(
-    r"[-–—]\s*pass(?:es)?\b"
-    r"|^pass(?:es)?\b"
-    r"|\bthis pass(?:es)?\b"
-    r"|\bno\s+(?:issues?|errors?|violations?|problems?|findings?|spelling\s+errors?)\s+(?:were\s+)?found\b"
-    r"|\bno issue\b"
-    r"|\bexactly meets\b"
-    r"|\bdeclared\b.{0,30}\bmatches\b.{0,30}\bcalculated\b"
-    r"|\bmatches?\b.{0,30}\brequired\b"
-    r"|\bvalues?\s+matches?\b",
-    re.IGNORECASE | re.MULTILINE,
-)
 
 _HIGH_CONFIDENCE_CHECKS = {"pos_coverage"}
 
@@ -163,48 +147,10 @@ def bend_check(state: GraphState) -> dict:
         if item.check not in by_check:
             continue
         threshold = 0.80 if item.check in _HIGH_CONFIDENCE_CHECKS else 0.60
-        if item.confidence >= threshold and not _PASS_ITEM_RE.search(item.description):
+        if accept_finding(item.description, item.confidence, threshold):
             by_check[item.check].append(item)
+        else:
+            print(f"[{item.check}] dropped non-violation item: {item.description[:100]!r}")
 
     not_found_set = set(result.not_found or [])
-    issues: list[Issue] = []
-
-    for check_key, (check_name, pass_desc, nf_desc) in _CHECK_META.items():
-        if enabled_sub is not None and check_key not in enabled_sub:
-            continue
-        if check_key in not_found_set:
-            issues.append({
-                "category": "bend",
-                "check_name": check_name,
-                "not_found": True,
-                "severity": "info",
-                "description": nf_desc,
-                "page": 1,
-                "location": "drawing",
-                "confidence": 1.0,
-            })
-            continue
-        found = by_check[check_key]
-        passed = len(found) == 0
-        summary_desc = pass_desc if passed else (f"FAIL — {found[0].description}" if len(found) == 1 else f"FAIL — {len(found)} issue(s) found.")
-        issues.append({
-            "category": "bend",
-            "check_name": check_name,
-            "passed": passed,
-            "severity": "info" if passed else "error",
-            "description": summary_desc,
-            "page": 1,
-            "location": "drawing",
-            "confidence": 1.0,
-        })
-        for item in found:
-            issues.append({
-                "category": "bend",
-                "severity": item.severity,
-                "description": item.description,
-                "page": item.page,
-                "location": item.location,
-                "confidence": item.confidence,
-            })
-
-    return {"bend_issues": issues}
+    return {"bend_issues": build_check_issues("bend", _CHECK_META, by_check, not_found_set, enabled_sub)}

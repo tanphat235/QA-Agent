@@ -33,6 +33,9 @@ DO NOT flag:
     (initials, abbreviated names such as "T.Ng", "H.T", "D.M") — these are never spelling errors.
   • PDF font rendering artifacts where the overall word is still identifiable
     (e.g. a colon rendered as a period in a scale label, or slightly compressed letter spacing).
+  • Garbled or meaningless strings from PDF text extraction — especially in the
+    "ROTATED / VERTICAL LABELS" section. These are extraction artifacts, not drawing defects.
+    Ignore random fragments (e.g. "wi4", "nn33"); only flag clearly readable misspellings.
 
 NOT FOUND — add "spelling" to not_found only if no readable text is visible anywhere on the sheet.\
 """

@@ -10,6 +10,7 @@ from langchain_core.outputs import LLMResult
 
 from qa_agent.state import GraphState, Issue
 from qa_agent.rag.retriever import get_node_context, get_node_images
+from qa_agent.nodes.issue_filter import OUTPUT_RULES, accept_finding, clean_finding_description, fail_summary
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +39,8 @@ OUTPUT FORMAT — one item per finding
 
 RULES:
   • Only report issues directly visible and unambiguous.
-  • If no issues are found, return an empty issues list with not_found = false — that is correct.\
-"""
+
+""" + OUTPUT_RULES
 
 
 class _Issue(BaseModel):
@@ -126,7 +127,10 @@ def run_check(
         config={"callbacks": [_UsageCallback(check_key)]},
     )
 
-    filtered = [i for i in result.issues if i.confidence >= confidence_threshold]
+    filtered = [
+        i for i in result.issues
+        if accept_finding(i.description, i.confidence, confidence_threshold)
+    ]
     passed = len(filtered) == 0 and not result.not_found
 
     issues: list[Issue] = []
@@ -142,12 +146,7 @@ def run_check(
             "confidence": 1.0,
         })
     else:
-        if passed:
-            summary_desc = pass_desc
-        elif len(filtered) == 1:
-            summary_desc = f"FAIL — {filtered[0].description}"
-        else:
-            summary_desc = f"FAIL — {len(filtered)} issue(s) found."
+        summary_desc = pass_desc if passed else fail_summary(len(filtered))
         issues.append({
             "category": domain,
             "check_name": check_name,
@@ -162,7 +161,7 @@ def run_check(
             issues.append({
                 "category": domain,
                 "severity": item.severity,
-                "description": item.description,
+                "description": clean_finding_description(item.description),
                 "page": item.page,
                 "location": item.location,
                 "confidence": item.confidence,

@@ -53,3 +53,6 @@ RULES:
   • If only one table is present, cross-reference against that table only.
   • Do NOT compare quantities or counts — existence only.
   • Do NOT flag rebar Pos numbers or bar annotations.
+  • Output an item ONLY for a code that still has no counterpart after cross-check.
+    If a suspected mismatch resolves, output NOTHING for that code.
+  • Never include verification steps, re-checking notes, or pass/fail verdicts in descriptions.

@@ -6,8 +6,10 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.outputs import LLMResult
 
-from qa_agent.state import GraphState, Issue
+from qa_agent.state import GraphState
 from qa_agent.rag.retriever import get_check_prompt, get_check_meta
+from qa_agent.nodes.issue_filter import OUTPUT_RULES, accept_finding, build_check_issues
+from qa_agent.nodes.pdf_extractor import _normalize_ebt_nr, _ebt_field_matches
 
 logger = logging.getLogger(__name__)
 
@@ -41,28 +43,20 @@ The drawing content below was extracted from a precast wall structural drawing P
 Inspect the text and tables and report ONLY issues you can directly observe.\
 """
 
-# Drop LLM items that describe a passing result instead of an actual violation.
-_PASS_ITEM_RE = re.compile(
-    r"[-–—]\s*pass(?:es)?\b"
-    r"|^pass(?:es)?\b"
-    r"|\bthis pass(?:es)?\b"
-    r"|\bno\s+(?:issues?|errors?|violations?|problems?|findings?|spelling\s+errors?)\s+(?:were\s+)?found\b"
-    r"|\bno issue\b"
-    r"|\bexactly meets\b"
-    r"|\bdeclared\b.{0,30}\bmatches\b.{0,30}\bcalculated\b"
-    r"|\bmatches?\b.{0,30}\brequired\b"
-    r"|\bvalues?\s+matches?\b"
-    r"|\bno unmatched\b"
-    r"|\bre-?evaluat"
-    r"|\bcross-?check(?:ing)?\s+confirms\b"
-    r"|\bafter\s+(?:full|complete)\s+review\b",
-    re.IGNORECASE | re.MULTILINE,
-)
-
 # section_name checks only marker → view. View-without-marker items are false
 # positives (marker labels are often unreadable in extracted text) — drop them.
 _VIEW_TO_MARKER_RE = re.compile(
     r"\bview\b.{0,60}\bno\s+correspond\w*\b.{0,40}\bmarker\b",
+    re.IGNORECASE,
+)
+
+# Spelling false positives: LLM flags pdfplumber extraction noise as "garbled text".
+_EXTRACTION_ARTIFACT_RE = re.compile(
+    r"\b(?:garbled|corrupted)\b"
+    r"|\bunreadable\s+text\s+strings?\b"
+    r"|\boverlapping\s+text\s+fragments?\b"
+    r"|\brotated/?vertical\s+labels?\b"
+    r"|\bextract(?:ion)?\s+artifacts?\b",
     re.IGNORECASE,
 )
 
@@ -103,13 +97,10 @@ DEBUG NOTES — always populate one entry per active check, regardless of pass/f
 RULES:
   • OUTPUT ONLY actual problems — items that clearly do not comply.
   • Do NOT output any item to describe a passing check or a verified-correct result.
-  • Reason SILENTLY. The description field states only the violation itself — never your
-    verification steps, re-evaluations, or lists of items that turned out to be correct.
-    If re-checking resolves a suspected issue, omit the item entirely.
-  • An empty issues list means ALL enabled checks passed — that is the correct output when no problems exist.
   • Do NOT flag uncertain or marginally readable text.
-  • If prerequisite drawing elements are absent, add the check key to not_found instead of skipping.\
-"""
+  • If prerequisite drawing elements are absent, add the check key to not_found instead of skipping.
+
+""" + OUTPUT_RULES
 
 
 def _build_spell_task(enabled_sub: list[str] | None) -> str:
@@ -152,6 +143,168 @@ class _SpellResult(BaseModel):
     issues: list[_SpellIssue]
     not_found: list[str] = Field(default_factory=list, description="Check keys where prerequisite drawing elements were absent")
     debug_notes: list[str] = Field(default_factory=list, description="One debug entry per active check showing extracted values")
+
+
+# ── Steel-list Einbauteilliste extraction (LLM, column-aware) ────────────────
+# pdfplumber gives a flat word/line stream; the previous regex/column-split
+# parser repeatedly misaligned cells (the manufacturer name bled into the
+# description, an entire row collapsed into one column, the quantity picked up
+# the EBT number). That produced bogus "field mismatch" failures even when the
+# drawing and the steel list carry identical tables. We let the model read the
+# extracted text and place each value into its correct column instead — then the
+# row-by-row / column-by-column comparison below is plain, deterministic Python.
+
+class _EbtRow(BaseModel):
+    ebt_nr: str = Field(description="EBT-Nummer / BIP-Number, exactly as printed")
+    hersteller: str = Field(default="", description="Hersteller / Manufacturer column value only")
+    bezeichnung: str = Field(default="", description="Bezeichnung / Description column value")
+    korrosionsschutz: str = Field(default="", description="Korrosionsschutz column value; empty string if the cell is blank")
+    qty: str = Field(default="", description="Menge (Stück) / Unit (Pcs) column value, the integer as printed")
+
+
+class _EbtTables(BaseModel):
+    drawing_found: bool = Field(description="true if an Einbauteilliste table is present in the DRAWING text")
+    steel_list_found: bool = Field(description="true if an Einbauteilliste table is present in the STEEL LIST text")
+    drawing_rows: list[_EbtRow] = Field(default_factory=list, description="DRAWING table rows, top-to-bottom")
+    steel_list_rows: list[_EbtRow] = Field(default_factory=list, description="STEEL LIST table rows, top-to-bottom")
+
+
+_EBT_EXTRACT_SYSTEM = """\
+You are a precise table-extraction tool for German precast-concrete documents.
+Read ONLY the text supplied to you. Never translate, normalize, reorder, infer,
+or invent any value — copy each cell exactly as printed and place every value in
+its correct column. Apply the SAME column logic identically to both documents.\
+"""
+
+_EBT_EXTRACT_PROMPT = """\
+TASK — Extract the Einbauteilliste (Built-in / embedded parts list per precast element)
+from BOTH inputs above and place every value in its correct column.
+
+You are given two inputs, in this order:
+  • DRAWING    — the structural drawing (first PDF document, or the text under "=== DRAWING TEXT ===")
+  • STEEL LIST — the supplementary steel list (second PDF document, or the text under "=== STEEL LIST TEXT ===")
+
+When PDF documents are supplied, READ THE TABLE DIRECTLY FROM THE RENDERED TABLE —
+that is the source of truth; it shows the column grid, so use the visual columns
+to place each value. (A flat text extraction can drop or merge narrow cells.)
+
+Each input contains a table whose title contains "Einbauteilliste" (also labelled
+"Built-in parts list" / "je Fertigteil"). The table has these columns, in this
+fixed left-to-right order:
+
+  1. EBT-Nummer / BIP-Number                  — the part number code
+  2. Hersteller / Manufacturer                — the manufacturer name
+  3. Bezeichnung / Description                — the full product description
+  4. Korrosionsschutz / Corrosion protection — a short protection code or blank
+  5. Menge (Stück) / Unit (Pcs)               — the quantity, an integer
+
+Return the rows of each table separately (drawing_rows / steel_list_rows),
+one object per DATA row, top-to-bottom.
+
+STRICT RULES:
+  • Copy every cell value EXACTLY as printed. Do not translate, abbreviate,
+    reorder, round, normalize, or invent anything.
+  • Apply IDENTICAL column logic to both tables. The two tables describe the same
+    parts, so a value present in one column for a row in one document should be
+    read the same way in the other — do not capture a column in one document and
+    drop it in the other unless the text genuinely differs.
+  • Bezeichnung: capture the FULL description text as printed. If the manufacturer
+    name is printed as the first word of the description, KEEP it in `bezeichnung`
+    (and still also fill `hersteller` from the Manufacturer column). Do this the
+    SAME way for both documents.
+  • Korrosionsschutz: this column sits between Bezeichnung and Menge. Its header may
+    be split/wrapped across lines (e.g. "Korrosionsschu tz"). It holds a SHORT
+    corrosion-protection code such as "FV", "feuerverzinkt", "verzinkt", "blank",
+    "keine" — capture that code whenever it appears for a row. Return an empty
+    string ONLY when the cell is truly blank in that table.
+  • `qty` is the Menge / Unit column only. Never put the EBT number, a dimension,
+    or any other number there.
+  • Skip header rows, section titles, project/metadata lines, subtotals and notes.
+  • If a document has no Einbauteilliste table, set its *_found flag false and
+    return an empty list for it.
+"""
+
+
+def _extract_ebt_tables(
+    drawing_text: str,
+    steel_list_text: str,
+    drawing_pdf: str | None = None,
+    steel_list_pdf: str | None = None,
+) -> tuple[list[dict], list[dict]]:
+    """LLM-extract both Einbauteilliste tables in one call, column-aligned and consistent.
+
+    Prefers reading the rendered PDF documents (vision) so narrow/wrapped cells
+    such as the Korrosionsschutz code are not lost; falls back to pdfplumber text.
+    """
+    def _to_rows(rows: list[_EbtRow]) -> list[dict]:
+        return [
+            {
+                "ebt_nr":           _normalize_ebt_nr(r.ebt_nr),
+                "hersteller":       (r.hersteller or "").strip(),
+                "bezeichnung":      (r.bezeichnung or "").strip(),
+                "korrosionsschutz": (r.korrosionsschutz or "").strip(),
+                "qty":              (r.qty or "").strip(),
+            }
+            for r in rows
+            if (r.ebt_nr or "").strip()
+        ]
+
+    use_vision = bool(drawing_pdf) and bool(steel_list_pdf)
+    if not use_vision and not (drawing_text or "").strip() and not (steel_list_text or "").strip():
+        print("[steel_list_check] no input to extract EBT tables from")
+        return ([], [])
+
+    def _doc(b64: str) -> dict:
+        return {
+            "type": "document",
+            "source": {"type": "base64", "media_type": "application/pdf", "data": b64},
+            "cache_control": {"type": "ephemeral"},
+        }
+
+    if use_vision:
+        print("[steel_list_check] extracting EBT tables via rendered PDF documents (vision)")
+        human_content: list[dict] = [
+            {"type": "text", "text": "=== DRAWING (PDF document) ==="},
+            _doc(drawing_pdf),  # type: ignore[arg-type]
+            {"type": "text", "text": "=== STEEL LIST (PDF document) ==="},
+            _doc(steel_list_pdf),  # type: ignore[arg-type]
+            {"type": "text", "text": _EBT_EXTRACT_PROMPT},
+        ]
+    else:
+        print("[steel_list_check] extracting EBT tables via pdfplumber text (no PDF available)")
+        human_content = [
+            {"type": "text", "text": "=== DRAWING TEXT ===\n" + (drawing_text or ""),
+             "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": "=== STEEL LIST TEXT ===\n" + (steel_list_text or "")},
+            {"type": "text", "text": _EBT_EXTRACT_PROMPT},
+        ]
+
+    llm = ChatAnthropic(  # type: ignore[call-arg]
+        model="claude-sonnet-4-6",  # type: ignore[call-arg]
+        temperature=0,  # type: ignore[call-arg]
+        max_tokens=4096,  # type: ignore[call-arg]
+    ).with_structured_output(_EbtTables).with_retry(stop_after_attempt=2)
+
+    result: _EbtTables = llm.invoke(  # type: ignore[assignment]
+        [
+            SystemMessage(content=_EBT_EXTRACT_SYSTEM),
+            HumanMessage(content=human_content),
+        ],
+        config={"callbacks": [_UsageCallback("ebt_extract")]},
+    )
+
+    dr_rows = _to_rows(result.drawing_rows)
+    sl_rows = _to_rows(result.steel_list_rows)
+    print(f"[steel_list_check] LLM-extracted EBT rows — drawing={len(dr_rows)} (found={result.drawing_found})  "
+          f"steel_list={len(sl_rows)} (found={result.steel_list_found})")
+    for label, rows in (("drawing", dr_rows), ("steel list", sl_rows)):
+        for it in rows:
+            print(
+                f"[steel_list_check]   [{label}] EBT {it['ebt_nr']}: "
+                f"hersteller={it['hersteller']!r}  bezeichnung={it['bezeichnung'][:40]!r}  "
+                f"ks={it['korrosionsschutz']!r}  qty={it['qty']!r}"
+            )
+    return (dr_rows, sl_rows)
 
 
 def spell_check(state: GraphState) -> dict:
@@ -242,10 +395,16 @@ def spell_check(state: GraphState) -> dict:
 
     by_check: dict[str, list[_SpellIssue]] = {k: [] for k in _CHECK_META}
     for item in result.issues:
-        if item.confidence < 0.60 or item.check not in by_check or _PASS_ITEM_RE.search(item.description):
+        if item.check not in by_check:
+            continue
+        if not accept_finding(item.description, item.confidence):
+            print(f"[{item.check}] dropped non-violation item: {item.description[:100]!r}")
             continue
         if item.check == "section_name" and _VIEW_TO_MARKER_RE.search(item.description):
             print(f"[section_name] dropped view→marker item: {item.description[:80]!r}")
+            continue
+        if item.check == "spelling" and _EXTRACTION_ARTIFACT_RE.search(item.description):
+            print(f"[spelling] dropped extraction-artifact item: {item.description[:100]!r}")
             continue
         by_check[item.check].append(item)
 
@@ -569,11 +728,20 @@ def spell_check(state: GraphState) -> dict:
             pdf_c: dict = state.get("pdf_content") or {}  # type: ignore[assignment]
             dr_stab  = str(pdf_c.get("stabliste_total")       or "").strip()
             dr_matt  = str(pdf_c.get("mattenstahlliste_total") or "").strip()
-            dr_ebt: list[dict] = pdf_c.get("einbauteilliste_items") or []
 
             sl_stab  = str(sl_data.get("stabliste_total")       or "").strip()
             sl_matt  = str(sl_data.get("mattenstahlliste_total") or "").strip()
-            sl_ebt: list[dict] = sl_data.get("einbauteilliste_items") or []
+
+            # Read the Einbauteilliste tables in one combined call so the model
+            # applies identical column logic to both. It reads the rendered PDF
+            # documents (vision) when available — pdfplumber text drops narrow
+            # cells like the Korrosionsschutz "FV" code — and falls back to text.
+            dr_ebt, sl_ebt = _extract_ebt_tables(
+                str(pdf_c.get("raw_text") or ""),
+                str(sl_data.get("raw_text") or ""),
+                drawing_pdf=state.get("pdf_data"),
+                steel_list_pdf=sl_data.get("pdf_data"),
+            )
 
             print(f"[steel_list_check] ── Comparison ──────────────────────────────────")
             print(f"[steel_list_check]   Stabliste Gesamtmasse   : drawing={dr_stab!r}  steel_list={sl_stab!r}")
@@ -614,9 +782,15 @@ def spell_check(state: GraphState) -> dict:
             _sl_cmp_float("Stabliste Gesamtmasse",       dr_stab, sl_stab)
             _sl_cmp_float("Mattenstahlliste Gesamtgewicht", dr_matt, sl_matt)
 
+            # If neither document yields an Einbauteilliste table, the prerequisite
+            # is absent — report NOT FOUND rather than flagging every row as extra.
+            if not dr_ebt and not sl_ebt:
+                not_found_set.add("steel_list_check")
+                print("[steel_list_check] NOT FOUND — no Einbauteilliste table in drawing or steel list")
+
             # EBT comparison — all 5 fields must match exactly
-            dr_ebt_map = {item["ebt_nr"]: item for item in dr_ebt}
-            sl_ebt_map = {item["ebt_nr"]: item for item in sl_ebt}
+            dr_ebt_map = {_normalize_ebt_nr(item["ebt_nr"]): item for item in dr_ebt}
+            sl_ebt_map = {_normalize_ebt_nr(item["ebt_nr"]): item for item in sl_ebt}
 
             _EBT_FIELDS = [
                 ("hersteller",       "Hersteller"),
@@ -639,7 +813,7 @@ def spell_check(state: GraphState) -> dict:
                     for field_key, field_label in _EBT_FIELDS:
                         dr_val = dr_item.get(field_key, "")
                         sl_val = sl_item.get(field_key, "")
-                        if dr_val != sl_val:
+                        if not _ebt_field_matches(field_key, dr_val, sl_val, dr_item, sl_item):
                             mismatches.append(
                                 f"{field_label}: drawing={dr_val!r} vs steel list={sl_val!r}"
                             )
@@ -668,46 +842,13 @@ def spell_check(state: GraphState) -> dict:
             n_sl = len(by_check["steel_list_check"])
             print(f"[steel_list_check] {'PASS' if n_sl == 0 else f'FAIL — {n_sl} mismatch(es)'}")
 
-    issues: list[Issue] = []
-    for check_key, (check_name, pass_desc, nf_desc) in _CHECK_META.items():
-        if enabled_sub is not None and check_key not in enabled_sub:
-            continue
-        if check_key in not_found_set:
-            issues.append({
-                "category": "spell",
-                "check_name": check_name,
-                "not_found": True,
-                "severity": "info",
-                "description": nf_desc,
-                "page": 1,
-                "location": "drawing",
-                "confidence": 1.0,
-            })
-            continue
-        found = by_check[check_key]
-        passed = len(found) == 0
-        summary_desc = dynamic_pass_descs.get(check_key, pass_desc) if passed else (
-            f"FAIL — {found[0].description}" if len(found) == 1
-            else f"FAIL — {len(found)} issue(s) found."
-        )
-        issues.append({
-            "category": "spell",
-            "check_name": check_name,
-            "passed": passed,
-            "severity": "info" if passed else "error",
-            "description": summary_desc,
-            "page": 1,
-            "location": "drawing",
-            "confidence": 1.0,
-        })
-        for item in found:
-            issues.append({
-                "category": "spell",
-                "severity": item.severity,
-                "description": item.description,
-                "page": item.page,
-                "location": item.location,
-                "confidence": item.confidence,
-            })
+    issues = build_check_issues(
+        "spell",
+        _CHECK_META,
+        by_check,
+        not_found_set,
+        enabled_sub,
+        dynamic_pass_descs,
+    )
 
     return {"spell_issues": issues}

@@ -1,13 +1,13 @@
 import logging
-import re
 from pydantic import BaseModel, Field
 from langchain_anthropic import ChatAnthropic
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.outputs import LLMResult
 
-from qa_agent.state import GraphState, Issue
+from qa_agent.state import GraphState
 from qa_agent.rag.retriever import get_check_prompt, get_check_meta
+from qa_agent.nodes.issue_filter import OUTPUT_RULES, accept_finding, build_check_issues
 
 logger = logging.getLogger(__name__)
 
@@ -71,19 +71,6 @@ the examples below — instead add the affected check key to not_found.
 """
 
 # Drop LLM items that describe a passing result instead of an actual violation.
-_PASS_ITEM_RE = re.compile(
-    r"[-–—]\s*pass(?:es)?\b"
-    r"|^pass(?:es)?\b"
-    r"|\bthis pass(?:es)?\b"
-    r"|\bno\s+(?:issues?|errors?|violations?|problems?|findings?|spelling\s+errors?)\s+(?:were\s+)?found\b"
-    r"|\bno issue\b"
-    r"|\bexactly meets\b"
-    r"|\bdeclared\b.{0,30}\bmatches\b.{0,30}\bcalculated\b"
-    r"|\bmatches?\b.{0,30}\brequired\b"
-    r"|\bvalues?\s+matches?\b",
-    re.IGNORECASE | re.MULTILINE,
-)
-
 _REBAR_CHECKS = ["spacer_label", "pin_width_vertical", "pin_width_horizontal", "spacer_width"]
 _CHECK_PROMPTS: dict[str, str] = {k: get_check_prompt("rebar", k) for k in _REBAR_CHECKS}
 _CHECK_META: dict[str, tuple[str, str, str]] = {k: get_check_meta("rebar", k) for k in _REBAR_CHECKS}
@@ -106,12 +93,10 @@ OUTPUT FORMAT — one item per finding
 
 RULES:
   • OUTPUT ONLY actual problems — labels missing suffix, or dimension values that do not match.
-  • Do NOT output any item to describe a passing check or a verified-correct dimension.
-    (e.g. "declared 27 cm matches calculated 27 cm" → output nothing for that check)
-  • An empty issues list means ALL enabled checks passed — that is the correct output when no problems exist.
   • When flagging a dimension issue, state the formula and both values in the description.
-  • If required dimensions or values are not visible in the drawing, add the check key to not_found instead of skipping.\
-"""
+  • If required dimensions or values are not visible in the drawing, add the check key to not_found instead of skipping.
+
+""" + OUTPUT_RULES
 
 
 def _build_rebar_task(enabled_sub: list[str] | None) -> str:
@@ -163,62 +148,11 @@ class _RebarResult(BaseModel):
 def _filter_items(result: _RebarResult) -> dict[str, list[_RebarIssue]]:
     by_check: dict[str, list[_RebarIssue]] = {k: [] for k in _CHECK_META}
     for item in result.issues:
-        if item.confidence >= 0.60 and item.check in by_check and not _PASS_ITEM_RE.search(item.description):
+        if item.check in by_check and accept_finding(item.description, item.confidence):
             by_check[item.check].append(item)
+        elif item.check in by_check:
+            print(f"[{item.check}] dropped non-violation item: {item.description[:100]!r}")
     return by_check
-
-
-def _summary_desc(pass_desc: str, found: list[_RebarIssue]) -> str:
-    if not found:
-        return pass_desc
-    if len(found) == 1:
-        return f"FAIL — {found[0].description}"
-    return f"FAIL — {len(found)} issue(s) found."
-
-
-def _build_issues(
-    by_check: dict[str, list[_RebarIssue]],
-    not_found_set: set[str],
-    enabled_sub: list[str] | None,
-) -> list[Issue]:
-    issues: list[Issue] = []
-    for check_key, (check_name, pass_desc, nf_desc) in _CHECK_META.items():
-        if enabled_sub is not None and check_key not in enabled_sub:
-            continue
-        if check_key in not_found_set:
-            issues.append({
-                "category": "rebar",
-                "check_name": check_name,
-                "not_found": True,
-                "severity": "info",
-                "description": nf_desc,
-                "page": 1,
-                "location": "drawing",
-                "confidence": 1.0,
-            })
-            continue
-        found = by_check[check_key]
-        passed = len(found) == 0
-        issues.append({
-            "category": "rebar",
-            "check_name": check_name,
-            "passed": passed,
-            "severity": "info" if passed else "error",
-            "description": _summary_desc(pass_desc, found),
-            "page": 1,
-            "location": "drawing",
-            "confidence": 1.0,
-        })
-        for item in found:
-            issues.append({
-                "category": "rebar",
-                "severity": item.severity,
-                "description": item.description,
-                "page": item.page,
-                "location": item.location,
-                "confidence": item.confidence,
-            })
-    return issues
 
 
 def rebar_check(state: GraphState) -> dict:
@@ -244,4 +178,4 @@ def rebar_check(state: GraphState) -> dict:
 
     by_check = _filter_items(result)
     not_found_set = set(result.not_found or [])
-    return {"rebar_issues": _build_issues(by_check, not_found_set, enabled_sub)}
+    return {"rebar_issues": build_check_issues("rebar", _CHECK_META, by_check, not_found_set, enabled_sub)}

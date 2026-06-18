@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import os
 import json
 import tempfile
@@ -159,6 +160,10 @@ async def analyze(
         sl_tmp = await _save_upload(sl_bytes)
         try:
             steel_list_data = await asyncio.to_thread(extract_steel_list_pdf, sl_tmp)
+            # Carry the raw PDF (base64) so checks can read the table from the
+            # rendered document (vision) — pdfplumber text loses cells like the
+            # Korrosionsschutz "FV" code that sit in narrow/wrapped columns.
+            steel_list_data["pdf_data"] = base64.b64encode(sl_bytes).decode("ascii")
             print(f"[server] steel_list extracted: gesamtmasse={steel_list_data.get('gesamtmasse')!r}  pages={steel_list_data.get('page_count')}")
         except Exception as exc:
             print(f"[server] ✗ steel_list extraction failed: {exc}")
