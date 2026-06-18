@@ -9,7 +9,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.outputs import LLMResult
 
 from qa_agent.state import GraphState, Issue
-from qa_agent.rag.retriever import get_node_context, get_node_images
+from qa_agent.rag.retriever import get_node_images
 from qa_agent.nodes.issue_filter import OUTPUT_RULES, accept_finding, clean_finding_description, fail_summary
 
 logger = logging.getLogger(__name__)
@@ -117,7 +117,7 @@ def run_check(
         "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data},
         "cache_control": {"type": "ephemeral"},
     })
-    human_content.append({"type": "text", "text": prompt + _OUTRO + get_node_context(domain)})
+    human_content.append({"type": "text", "text": prompt + _OUTRO})
 
     result: _Result = llm.invoke(  # type: ignore[assignment]
         [

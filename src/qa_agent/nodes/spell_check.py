@@ -10,6 +10,7 @@ from qa_agent.state import GraphState
 from qa_agent.rag.retriever import get_check_prompt, get_check_meta
 from qa_agent.nodes.issue_filter import OUTPUT_RULES, accept_finding, build_check_issues
 from qa_agent.nodes.pdf_extractor import _normalize_ebt_nr, _ebt_field_matches
+from qa_agent.nodes.user_ai_checks import run_user_ai_checks
 
 logger = logging.getLogger(__name__)
 
@@ -850,5 +851,6 @@ def spell_check(state: GraphState) -> dict:
         enabled_sub,
         dynamic_pass_descs,
     )
+    issues.extend(run_user_ai_checks("spell", state))
 
     return {"spell_issues": issues}

@@ -1,5 +1,6 @@
-# Spelling Errors
-> **Domain:** Spelling & Title Block | **Check key:** `spelling`
+# Spelling Check
+
+> **Domain:** spell | **Check key:** `spelling`
 
 ## Display Name
 

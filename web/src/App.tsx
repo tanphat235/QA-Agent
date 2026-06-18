@@ -1,9 +1,10 @@
-import { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import {
   LayoutDashboard, History, HelpCircle,
   FileText, CheckCircle, AlertTriangle,
   Download, Loader2, ChevronLeft, ChevronRight, ChevronDown,
-  XCircle, BookOpen, Save, Pencil, Database, Paperclip, RefreshCw, Highlighter,
+  XCircle, Save, Pencil, Paperclip, RefreshCw, Highlighter,
+  ListChecks, Plus, Trash2,
 } from 'lucide-react'
 
 // ── Types ────────────────────────────────────────────────────
@@ -43,18 +44,30 @@ interface HistoryEntry {
   checks: string[]
   result: AnalysisResult
 }
-interface TrainingMistake {
-  id: string
-  check_key: string
-  title: string
-  wrong: string
-  correct: string
+interface CheckDef {
+  domain: string
+  key: string
+  display_name: string
+  description: string
+  prompt: string
+  pass: string
+  not_found: string
+  builtin: boolean
+  user_defined?: boolean
 }
-type TrainingData = Record<string, TrainingMistake[]>
+interface CheckDomain {
+  key: string
+  title: string
+  coming_soon: boolean
+}
+interface ChecksData {
+  checks: CheckDef[]
+  domains: CheckDomain[]
+}
 
 type AppState    = 'idle' | 'ready' | 'analyzing' | 'done' | 'error'
 type ResultFilter = null | 'passed' | 'failed' | 'issues'
-type ActiveView  = 'dashboard' | 'history' | 'training' | 'knowledge'
+type ActiveView  = 'dashboard' | 'history' | 'definerules'
 
 // ── Constants ────────────────────────────────────────────────
 const NODES = [
@@ -66,58 +79,18 @@ const NODES = [
   { key: 'return_to_ui',      label: 'Preparing report',            checkKey: null },
 ]
 
-const CHECK_OPTIONS = [
-  { key: 'spell', label: 'Spelling & Title Block', color: 'gray',   comingSoon: false },
-  { key: 'bend',  label: 'Bending & Schedule',     color: 'purple', comingSoon: true  },
-  { key: 'rebar', label: 'Rebar Labels & Dims',    color: 'blue',   comingSoon: true  },
-] as const
-const NAV = [
-  { icon: LayoutDashboard, label: 'Dashboard',    view: 'dashboard' as ActiveView },
-  { icon: History,         label: 'Check History', view: 'history'  as ActiveView },
-  { icon: BookOpen,        label: 'AI Training',   view: 'training' as ActiveView },
-  { icon: Database,        label: 'Knowledge Base', view: 'knowledge' as ActiveView },
-]
+type CheckOption = { key: string; label: string; color: string; comingSoon: boolean }
 
-const NODE_SECTIONS = [
-  {
-    key: 'bend',
-    title: 'Bending & Schedule',
-    checks: [
-      { key: 'pos_coverage',    title: 'Pos Coverage' },
-      { key: 'mesh_pos',        title: 'Mesh Reinforcement Pos' },
-      { key: 'mesh_ratio',      title: 'Mesh-to-Total Mass Ratio' },
-      { key: 'mass_arithmetic', title: 'Total Mass Arithmetic' },
-      { key: 'bending_angle',   title: 'Bending Angle / Mandrel Diameter' },
-      { key: 'bar_length',      title: 'Bar Length vs Schedule' },
-    ],
-  },
-  {
-    key: 'spell',
-    title: 'Spelling & Title Block',
-    checks: [
-      { key: 'spelling',         title: 'Spelling' },
-      { key: 'section_name',     title: 'Section Name Completeness' },
-      { key: 'parts_label',      title: 'Parts Label Consistency' },
-      { key: 'pos_count',        title: 'Last Position Number vs Title Block' },
-      { key: 'revision_check',   title: 'Revision Code Consistency' },
-      { key: 'drawing_status',   title: 'Drawing Status' },
-      { key: 'exposition_class', title: 'Exposition Class vs Concrete Cover' },
-      { key: 'steel_content',        title: 'Steel Content (kg/m³)' },
-      { key: 'lastausgleich',        title: 'Lastausgleichgehänge Note' },
-      { key: 'overview_plan_check',  title: 'Overview Plan vs Title Block', requiresOverviewPlan: true },
-      { key: 'steel_list_check',     title: 'Steel List vs Drawing',        requiresSteelList: true },
-    ],
-  },
-  {
-    key: 'rebar',
-    title: 'Rebar Labels & Dims',
-    checks: [
-      { key: 'spacer_label',         title: 'Spacer/Clamp Label Suffix' },
-      { key: 'pin_width_vertical',   title: 'Vertical Pin Width' },
-      { key: 'pin_width_horizontal', title: 'Horizontal Pin Width' },
-      { key: 'spacer_width',         title: 'Spacer/Clamp Width' },
-    ],
-  },
+type NodeSectionCheck = {
+  key: string
+  title: string
+  requiresOverviewPlan?: boolean
+  requiresSteelList?: boolean
+}
+const NAV = [
+  { icon: LayoutDashboard, label: 'Dashboard',     view: 'dashboard'   as ActiveView },
+  { icon: History,         label: 'Check History', view: 'history'     as ActiveView },
+  { icon: ListChecks,      label: 'Define Rules',  view: 'definerules' as ActiveView },
 ]
 
 // ── Tree-building types ──────────────────────────────────────
@@ -227,9 +200,10 @@ function isAnalysisResultShape(x: unknown): x is AnalysisResult {
 
 const _CAT_ORDER = ['bend', 'rebar', 'spell'] as const
 const _CAT_TITLES: Record<string, string> = {
-  spell: 'Spelling & Title Block',
-  bend:  'Bending & Schedule',
-  rebar: 'Rebar Labels & Dims',
+  spell:  'Spelling & Title Block',
+  bend:   'Bending & Schedule',
+  rebar:  'Rebar Labels & Dims',
+  custom: 'Custom Checks',  // legacy history entries only
 }
 
 function normalizeSeverity(s: unknown): string {
@@ -362,14 +336,8 @@ export default function App() {
   const [doneNodes, setDoneNodes]       = useState<string[]>([])
   const [activeNode, setActiveNode]     = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen]           = useState(true)
-  const [enabledSubChecks, setEnabledSubChecks] = useState<Record<string, string[]>>(() =>
-    Object.fromEntries(NODE_SECTIONS.map(s => [
-      s.key,
-      CHECK_OPTIONS.find(o => o.key === s.key)?.comingSoon
-        ? []
-        : s.checks.filter(c => c.key !== 'overview_plan_check' && c.key !== 'steel_list_check').map(c => c.key),
-    ]))
-  )
+  const [enabledSubChecks, setEnabledSubChecks] = useState<Record<string, string[]>>({})
+  const checksInitialized = useRef(false)
   const [expandedCheckCategories, setExpandedCheckCategories] = useState<Set<string>>(new Set())
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set())
   const [expandedGroups,    setExpandedGroups]    = useState<Set<string>>(new Set())
@@ -377,16 +345,12 @@ export default function App() {
   const [activeView,        setActiveView]        = useState<ActiveView>('dashboard')
   const [historyEntries,    setHistoryEntries]    = useState<HistoryEntry[]>(() => loadHistory())
   const [viewingEntry,           setViewingEntry]           = useState<HistoryEntry | null>(null)
-  const [trainingData,           setTrainingData]           = useState<TrainingData>({})
-  const [trainingLoading,        setTrainingLoading]        = useState(false)
-  const [trainingSaving,         setTrainingSaving]         = useState(false)
-  const [trainingSaveOk,         setTrainingSaveOk]         = useState(false)
-  const [activeTrainingTab,      setActiveTrainingTab]      = useState('bend')
-  const [expandedTrainingChecks, setExpandedTrainingChecks] = useState<Set<string>>(new Set())
-  const [editingMistakes,        setEditingMistakes]        = useState<Set<string>>(new Set())
-  const [cardErrors,             setCardErrors]             = useState<Record<string, string>>({})
-  const [kbSaving,               setKbSaving]               = useState(false)
-  const [kbSaveOk,               setKbSaveOk]               = useState(false)
+  const [checksData,      setChecksData]      = useState<ChecksData | null>(null)
+  const [checksLoading,   setChecksLoading]   = useState(false)
+  const [checkDrafts,     setCheckDrafts]     = useState<Record<string, CheckDef>>({})
+  const [expandedChecks,  setExpandedChecks]  = useState<Set<string>>(new Set())
+  const [checkSaving,     setCheckSaving]     = useState<string | null>(null)  // "domain::key" being saved
+  const [checkErrors,     setCheckErrors]     = useState<Record<string, string>>({})
   const [annotating,             setAnnotating]             = useState(false)
   const inputRef           = useRef<HTMLInputElement>(null)
   const steelListInputRef  = useRef<HTMLInputElement>(null)
@@ -473,101 +437,228 @@ export default function App() {
     setHistoryEntries([])
   }
 
-  // Load structured training data when training view is opened
-  useEffect(() => {
-    if (activeView !== 'training') return
-    setTrainingLoading(true)
-    fetch('/api/mistakes-structured')
+  // ── Check definitions (built-in + custom) ───────────────────────────────
+  const loadChecks = useCallback(() => {
+    setChecksLoading(true)
+    fetch('/api/checks')
       .then(r => r.json())
-      .then((d: TrainingData) => {
-        setTrainingData(d)
-        setExpandedTrainingChecks(new Set())  // all collapsed by default
-        setEditingMistakes(new Set())          // all read-only — already saved
-      })
+      .then((d: ChecksData) => setChecksData(d))
       .catch(() => {})
-      .finally(() => setTrainingLoading(false))
-  }, [activeView])
+      .finally(() => setChecksLoading(false))
+  }, [])
 
-  const downloadKbFile = () => {
-    window.open('/api/knowledge-base/download', '_blank')
-  }
+  // Load once on mount and refresh whenever the Define Rules view is opened.
+  useEffect(() => { loadChecks() }, [loadChecks])
+  useEffect(() => { if (activeView === 'definerules') loadChecks() }, [activeView, loadChecks])
 
-  const uploadKbFile = async (f: File) => {
-    setKbSaving(true)
-    setKbSaveOk(false)
-    try {
-      const form = new FormData()
-      form.append('file', f)
-      const res = await fetch('/api/knowledge-base/upload', { method: 'POST', body: form })
-      if (res.ok) {
-        setKbSaveOk(true)
-        setTimeout(() => setKbSaveOk(false), 2000)
-      }
-    } finally {
-      setKbSaving(false)
-    }
-  }
+  const checkOptions: CheckOption[] = useMemo(() =>
+    (checksData?.domains ?? []).map(d => ({
+      key: d.key,
+      label: d.title,
+      color: d.key === 'spell' ? 'gray' : d.key === 'bend' ? 'purple' : 'blue',
+      comingSoon: d.coming_soon,
+    })),
+    [checksData],
+  )
 
-  const saveMistakes = async () => {
-    setTrainingSaving(true)
-    setTrainingSaveOk(false)
-    try {
-      const res = await fetch('/api/mistakes-structured', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ data: trainingData }),
-      })
-      if (res.ok) {
-        setTrainingSaveOk(true)
-        setTimeout(() => {
-          setTrainingSaveOk(false)
-          setEditingMistakes(new Set())  // exit edit mode after brief confirmation
-        }, 800)
-      }
-    } finally {
-      setTrainingSaving(false)
-    }
-  }
-
-  const updateMistake = (section: string, updated: TrainingMistake) => {
-    setCardErrors(prev => { const next = { ...prev }; delete next[updated.id]; return next })
-    setTrainingData(prev => ({
-      ...prev,
-      [section]: (prev[section] ?? []).map(m => m.id === updated.id ? updated : m),
+  const nodeSections: { key: string; title: string; checks: NodeSectionCheck[] }[] = useMemo(() => {
+    if (!checksData) return []
+    return checksData.domains.map(d => ({
+      key: d.key,
+      title: d.title,
+      checks: checksData.checks
+        .filter(c => c.domain === d.key)
+        .map(c => ({
+          key: c.key,
+          title: c.display_name,
+          ...(c.key === 'overview_plan_check' ? { requiresOverviewPlan: true } : {}),
+          ...(c.key === 'steel_list_check' ? { requiresSteelList: true } : {}),
+        })),
     }))
-  }
+  }, [checksData])
 
-  const deleteMistake = (section: string, id: string) => {
-    setTrainingData(prev => {
-      const next = { ...prev, [section]: (prev[section] ?? []).filter(m => m.id !== id) }
-      fetch('/api/mistakes-structured', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ data: next }),
-      })
-      return next
-    })
-  }
+  useEffect(() => {
+    if (!checksData || checksInitialized.current) return
+    checksInitialized.current = true
+    setEnabledSubChecks(
+      Object.fromEntries(
+        checksData.domains.map(d => {
+          const keys = checksData.checks
+            .filter(c => c.domain === d.key)
+            .filter(c => c.key !== 'overview_plan_check' && c.key !== 'steel_list_check')
+            .map(c => c.key)
+          return [d.key, d.coming_soon ? [] : keys]
+        }),
+      ),
+    )
+  }, [checksData])
 
-  const addMistake = (section: string, check_key: string) => {
-    const newItem: TrainingMistake = {
-      id: `${Date.now()}_${Math.random().toString(36).slice(2)}`,
-      check_key,
-      title: '',
-      wrong: '',
-      correct: '',
+  const ckey = (c: { domain: string; key: string }) => `${c.domain}::${c.key}`
+
+  const startEdit = (c: CheckDef) => {
+    setCheckDrafts(prev => ({ ...prev, [ckey(c)]: { ...c } }))
+    setExpandedChecks(prev => new Set([...prev, ckey(c)]))
+  }
+  const cancelEdit = (id: string) => {
+    setCheckDrafts(prev => { const n = { ...prev }; delete n[id]; return n })
+    setCheckErrors(prev => { const n = { ...prev }; delete n[id]; return n })
+  }
+  const updateDraft = (id: string, patch: Partial<CheckDef>) =>
+    setCheckDrafts(prev => ({ ...prev, [id]: { ...prev[id], ...patch } }))
+
+  const saveCheck = async (id: string) => {
+    const draft = checkDrafts[id]
+    if (!draft) return
+    const original = checksData?.checks.find(c => ckey(c) === id)
+    const isUserDefined = draft.user_defined ?? !draft.builtin
+    const promptToSend = isUserDefined ? (draft.description || draft.prompt) : draft.prompt
+    if (!draft.display_name.trim()) { setCheckErrors(p => ({ ...p, [id]: 'Display name is required' })); return }
+    if (isUserDefined && !draft.description.trim()) {
+      setCheckErrors(p => ({ ...p, [id]: 'Description is required' })); return
     }
-    setTrainingData(prev => ({ ...prev, [section]: [...(prev[section] ?? []), newItem] }))
-    setExpandedTrainingChecks(prev => new Set([...prev, `${section}::${check_key}`]))
-    setEditingMistakes(prev => new Set([...prev, newItem.id]))  // new mistake starts in edit mode
+    if (!isUserDefined && !!original?.prompt?.trim() && !draft.prompt.trim()) {
+      setCheckErrors(p => ({ ...p, [id]: 'Check prompt is required' })); return
+    }
+    setCheckSaving(id)
+    setCheckErrors(p => { const n = { ...p }; delete n[id]; return n })
+    try {
+      const res = await fetch('/api/checks', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          domain: draft.domain, key: draft.builtin ? draft.key : (draft.key || null),
+          display_name: draft.display_name, description: draft.description,
+          prompt: promptToSend, pass_text: draft.pass, not_found_text: draft.not_found,
+        }),
+      })
+      if (!res.ok) {
+        const detail = (await res.json().catch(() => ({}))).detail ?? `HTTP ${res.status}`
+        setCheckErrors(p => ({ ...p, [id]: String(detail) })); return
+      }
+      setCheckDrafts(prev => { const n = { ...prev }; delete n[id]; return n })
+      loadChecks()
+    } finally {
+      setCheckSaving(null)
+    }
   }
 
-  const toggleTrainingCheck = (key: string) =>
-    setExpandedTrainingChecks(prev => {
-      const next = new Set(prev); next.has(key) ? next.delete(key) : next.add(key); return next
-    })
+  const deleteCheck = async (c: CheckDef) => {
+    await fetch(`/api/checks/${c.domain}/${c.key}`, { method: 'DELETE' })
+    setEnabledSubChecks(prev => ({
+      ...prev,
+      [c.domain]: (prev[c.domain] ?? []).filter(k => k !== c.key),
+    }))
+    loadChecks()
+  }
 
-  const enabledChecks = CHECK_OPTIONS
+  const addCheck = (domain = 'spell') => {
+    const id = `new::${domain}`
+    setCheckDrafts(prev => ({ ...prev, [id]: {
+      domain, key: '', display_name: '', description: '',
+      prompt: '', pass: 'PASS', not_found: 'NOT FOUND', builtin: false, user_defined: true,
+    } }))
+    setExpandedChecks(prev => new Set([...prev, id]))
+  }
+
+  const toggleCheckExpanded = (id: string) =>
+    setExpandedChecks(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n })
+
+  // Editable form for a check draft (new custom or an existing check being edited).
+  const _lbl = 'text-[10px] font-bold uppercase tracking-wider text-gray-400'
+  const _inp = 'mt-1 w-full text-[12px] text-gray-700 bg-white border border-gray-200 rounded-lg px-2.5 py-2 focus:outline-none focus:ring-1 focus:ring-blue-300 focus:border-blue-300'
+  const renderCheckFields = (id: string, draft: CheckDef) => {
+    const saving = checkSaving === id
+    const err = checkErrors[id]
+    const isNew = id.startsWith('new::')
+    const isUserDefined = draft.user_defined ?? !draft.builtin
+    const original = checksData?.checks.find(c => ckey(c) === id)
+    const showPrompt = !isUserDefined && !!original?.prompt?.trim()
+    return (
+      <div className="space-y-3">
+        {err && (
+          <div className="px-3 py-2 bg-red-50 border border-red-100 rounded-lg text-[11px] text-red-600 font-medium flex items-center gap-1.5">
+            <XCircle size={11} className="flex-shrink-0" />{err}
+          </div>
+        )}
+        <div className="grid grid-cols-2 gap-3">
+          <label className="block">
+            <span className={_lbl}>Display Name</span>
+            <input value={draft.display_name} onChange={e => updateDraft(id, { display_name: e.target.value })}
+              placeholder="e.g. Scale present" className={_inp} />
+          </label>
+          {isNew && (
+            <label className="block">
+              <span className={_lbl}>Category</span>
+              <select
+                value={draft.domain}
+                onChange={e => updateDraft(id, { domain: e.target.value })}
+                className={_inp}
+              >
+                {(checksData?.domains ?? []).map(d => (
+                  <option key={d.key} value={d.key}>{d.title}</option>
+                ))}
+              </select>
+            </label>
+          )}
+          {isNew && (
+            <label className="block">
+              <span className={_lbl}>Key (optional)</span>
+              <input value={draft.key} onChange={e => updateDraft(id, { key: e.target.value })}
+                placeholder="auto from name" className={`${_inp} font-mono`} />
+            </label>
+          )}
+        </div>
+        <label className="block">
+          <span className={_lbl}>
+            {isUserDefined ? 'Description — what the AI should check' : 'Description'}
+          </span>
+          <textarea value={draft.description} onChange={e => updateDraft(id, { description: e.target.value })}
+            rows={isUserDefined ? 5 : 3}
+            placeholder={isUserDefined
+              ? "e.g. Verify a scale label like 'M 1:50' is present in the title block; report an error if it is missing."
+              : 'Short summary of what this check verifies'}
+            className={`${_inp} leading-relaxed resize-y`} />
+        </label>
+        {!isUserDefined && (showPrompt ? (
+          <label className="block">
+            <span className={_lbl}>Check Prompt — describe what the AI must verify</span>
+            <textarea value={draft.prompt} onChange={e => updateDraft(id, { prompt: e.target.value })} rows={6}
+              placeholder="e.g. Verify a scale label like 'M 1:50' is present in the title block. Report it as an error if missing."
+              className={`${_inp} font-mono leading-relaxed resize-y`} />
+          </label>
+        ) : (
+          <p className="text-[10px] text-gray-400 italic">
+            This is a built-in computed check — its logic is in code, so there is no editable prompt.
+          </p>
+        ))}
+        <div className="grid grid-cols-2 gap-3">
+          <label className="block">
+            <span className={_lbl}>Pass message</span>
+            <input value={draft.pass} onChange={e => updateDraft(id, { pass: e.target.value })} className={_inp} />
+          </label>
+          <label className="block">
+            <span className={_lbl}>Not-found message</span>
+            <input value={draft.not_found} onChange={e => updateDraft(id, { not_found: e.target.value })} className={_inp} />
+          </label>
+        </div>
+        <div className="flex items-center gap-2 pt-1">
+          <button onClick={() => saveCheck(id)} disabled={saving}
+            className="flex items-center gap-1.5 px-4 py-2 bg-blue-600 text-white text-[11px] font-bold rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors">
+            {saving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+          <button onClick={() => cancelEdit(id)}
+            className="px-4 py-2 text-[11px] font-semibold text-gray-500 hover:text-gray-700 rounded-lg hover:bg-gray-100 transition-colors">
+            Cancel
+          </button>
+          {draft.builtin && (
+            <span className="text-[10px] text-gray-400 ml-auto">Built-in check · editing its .md wording/prompt</span>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  const enabledChecks = checkOptions
     .filter(o => !o.comingSoon && (enabledSubChecks[o.key] ?? []).length > 0)
     .map(o => o.key)
 
@@ -583,9 +674,9 @@ export default function App() {
 
   const toggleAllInCategory = (categoryKey: string) => {
     setEnabledSubChecks(prev => {
-      const allKeys = NODE_SECTIONS.find(s => s.key === categoryKey)?.checks.map(c => c.key) ?? []
+      const allKeys = nodeSections.find(s => s.key === categoryKey)?.checks.map(c => c.key) ?? []
       const current = prev[categoryKey] ?? []
-      const allEnabled = allKeys.every(k => current.includes(k))
+      const allEnabled = allKeys.length > 0 && allKeys.every(k => current.includes(k))
       return { ...prev, [categoryKey]: allEnabled ? [] : allKeys }
     })
   }
@@ -861,18 +952,15 @@ export default function App() {
           <div>
             <h1 className="text-[15px] font-bold text-gray-900 tracking-tight">
               {activeView === 'history' ? 'Check History'
-                : activeView === 'training' ? 'AI Training'
-                : activeView === 'knowledge' ? 'Knowledge Base'
+                : activeView === 'definerules' ? 'Define Rules'
                 : 'Dashboard'}
             </h1>
             <p className="text-[11px] text-gray-400 mt-0.5 tracking-wide">
               {activeView === 'history'
                 ? `${historyEntries.length} of ${HISTORY_MAX} recent analyses stored`
-                : activeView === 'training'
-                  ? 'Edit common AI mistakes · Saved file is injected into every analysis'
-                  : activeView === 'knowledge'
-                    ? 'Edit QA rules · Saved content is used by AI in every analysis via RAG'
-                    : 'Structural drawing validation · PDF analysis'}
+                : activeView === 'definerules'
+                  ? 'View & edit every QA check · Add your own .md rules that run during analysis'
+                  : 'Structural drawing validation · PDF analysis'}
             </p>
           </div>
         </header>
@@ -905,7 +993,7 @@ export default function App() {
                   {historyEntries.map(entry => {
                     const { passed, failed, issues } = historyStats(entry)
                     const checkLabels = entry.checks.map(c =>
-                      CHECK_OPTIONS.find(o => o.key === c)?.label ?? c
+                      checkOptions.find(o => o.key === c)?.label ?? c
                     )
                     return (
                       <div key={entry.id}
@@ -963,272 +1051,120 @@ export default function App() {
             </div>
           )}
 
-          {/* ── Training view ───────────────────────────── */}
-          {activeView === 'training' && (
+          {/* ── Define Rules view ───────────────────────── */}
+          {activeView === 'definerules' && (
             <div className="space-y-4">
 
               {/* Header */}
               <div className="bg-white rounded-2xl border border-gray-200/70 px-6 py-4 shadow-sm flex items-center gap-4">
                 <div className="w-9 h-9 rounded-xl bg-blue-50 border border-blue-100 flex items-center justify-center flex-shrink-0">
-                  <BookOpen size={16} className="text-blue-500" />
+                  <ListChecks size={16} className="text-blue-500" />
                 </div>
-                <div className="min-w-0">
-                  <p className="text-[13px] font-bold text-gray-800">Known AI Check Mistakes</p>
+                <div className="min-w-0 flex-1">
+                  <p className="text-[13px] font-bold text-gray-800">QA Check Rules</p>
                   <p className="text-[11px] text-gray-400 mt-0.5">
-                    Each entry records a confirmed AI check error and is injected into every analysis prompt to prevent the same mistake from recurring.
+                    Every check is a Markdown rule. Edit any check&apos;s wording or prompt, or add your own
+                    to a category — new rules run by AI during analysis and appear on the Dashboard like any other check.
                   </p>
                 </div>
+                <button onClick={() => addCheck('spell')}
+                  className="flex items-center gap-1.5 px-4 py-2 bg-blue-600 text-white text-xs font-bold rounded-xl hover:bg-blue-700 transition-colors flex-shrink-0">
+                  <Plus size={13} /> Add Check
+                </button>
               </div>
 
-              {trainingLoading ? (
+              {checksLoading && !checksData ? (
                 <div className="flex items-center justify-center py-20 gap-2 text-gray-400">
-                  <Loader2 size={18} className="animate-spin" />
-                  <span className="text-sm">Loading…</span>
+                  <Loader2 size={18} className="animate-spin" /><span className="text-sm">Loading…</span>
                 </div>
-              ) : <>
+              ) : (
+                <>
+                  {/* New check draft */}
+                  {Object.entries(checkDrafts).filter(([id]) => id.startsWith('new::')).map(([id, draft]) => (
+                    <div key={id} className="bg-white rounded-2xl border-2 border-blue-200 shadow-sm px-5 py-4">
+                      <div className="flex items-center gap-2 mb-3">
+                        <span className="w-5 h-5 rounded-md bg-blue-100 flex items-center justify-center"><Plus size={12} className="text-blue-600" /></span>
+                        <span className="text-[13px] font-bold text-gray-800">New Check</span>
+                      </div>
+                      {renderCheckFields(id, draft)}
+                    </div>
+                  ))}
 
-              {/* Section tabs */}
-              <div className="flex gap-2 flex-wrap">
-                {NODE_SECTIONS.map(sec => {
-                  const isActive = activeTrainingTab === sec.key
-                  return (
-                    <button key={sec.key} onClick={() => setActiveTrainingTab(sec.key)}
-                      className={`px-4 py-2 rounded-xl text-[12px] font-bold transition-all ${
-                        isActive
-                          ? 'bg-slate-900 text-white shadow-sm'
-                          : 'bg-white border border-gray-200 text-gray-500 hover:border-gray-300 hover:text-gray-700'
-                      }`}
-                    >
-                      {sec.title}
-                    </button>
-                  )
-                })}
-              </div>
-
-              {/* Check groups for active tab */}
-              {(NODE_SECTIONS.find(s => s.key === activeTrainingTab)?.checks ?? []).map(check => {
-                const gKey    = `${activeTrainingTab}::${check.key}`
-                const expanded = expandedTrainingChecks.has(gKey)
-                const mistakes = (trainingData[activeTrainingTab] ?? []).filter(m => m.check_key === check.key)
-
-                return (
-                  <div key={check.key} className="bg-white rounded-2xl border border-gray-200/70 overflow-hidden shadow-sm">
-
-                    {/* Check header */}
-                    <button
-                      onClick={() => toggleTrainingCheck(gKey)}
-                      className="w-full px-5 py-3 flex items-center gap-3 hover:bg-gray-50/60 transition-colors"
-                    >
-                      <ChevronDown size={13} className={`text-gray-400 transition-transform flex-shrink-0 ${expanded ? 'rotate-180' : ''}`} />
-                      <span className="text-[13px] font-semibold text-gray-700 flex-1 text-left">{check.title}</span>
-                      {mistakes.length > 0 && (
-                        <span className="text-[10px] px-2 py-0.5 bg-amber-100 text-amber-700 border border-amber-200 rounded-full font-bold flex-shrink-0">
-                          {mistakes.length} mistake{mistakes.length > 1 ? 's' : ''}
-                        </span>
-                      )}
-                    </button>
-
-                    {expanded && (
-                      <div className="border-t border-gray-100 px-5 py-4 space-y-3">
-
-                        {mistakes.length === 0 && (
-                          <p className="text-[12px] text-gray-300 italic">No mistakes recorded for this check.</p>
-                        )}
-
-                        {mistakes.map((mistake, idx) => {
-                          const isEditing = editingMistakes.has(mistake.id)
+                  {/* Checks grouped by domain */}
+                  {(checksData?.domains ?? []).map(domain => {
+                    const list = (checksData?.checks ?? []).filter(c => c.domain === domain.key)
+                    if (!list.length) return null
+                    const comingSoon = domain.coming_soon
+                    return (
+                      <div key={domain.key} className="space-y-2">
+                        <div className="flex items-center gap-2 px-1 pt-1">
+                          <span className={`text-[11px] font-black uppercase tracking-widest ${comingSoon ? 'text-gray-300' : 'text-gray-400'}`}>{domain.title}</span>
+                          <span className="text-[10px] text-gray-300">{list.length}</span>
+                          {comingSoon && (
+                            <span className="text-[9px] px-1.5 py-0.5 bg-amber-100 text-amber-600 border border-amber-200 rounded-full font-bold">Coming soon</span>
+                          )}
+                        </div>
+                        <div className={comingSoon ? 'space-y-2 opacity-50 pointer-events-none select-none' : 'space-y-2'}>
+                        {list.map(c => {
+                          const id = ckey(c)
+                          const draft = checkDrafts[id]
+                          const expanded = expandedChecks.has(id)
                           return (
-                            <div key={mistake.id} className={`border rounded-xl overflow-hidden transition-colors ${isEditing ? 'border-blue-200 bg-blue-50/10' : 'border-gray-200 bg-gray-50/40'}`}>
-                              {/* Title row */}
-                              <div className="flex items-center gap-2 px-3.5 py-2.5 border-b border-gray-100">
-                                <span className="text-[10px] font-bold text-gray-300 flex-shrink-0 w-4">#{idx + 1}</span>
-                                {isEditing ? (
-                                  <input
-                                    value={mistake.title}
-                                    onChange={e => updateMistake(activeTrainingTab, { ...mistake, title: e.target.value })}
-                                    placeholder="Brief description of this mistake…"
-                                    className="flex-1 text-[12px] font-semibold text-gray-700 bg-transparent focus:outline-none placeholder:text-gray-300"
-                                    autoFocus
-                                  />
-                                ) : (
-                                  <span className="flex-1 text-[12px] font-semibold text-gray-400 truncate">
-                                    {mistake.title || <span className="italic text-gray-300 font-normal">No title</span>}
-                                  </span>
-                                )}
-                                {isEditing ? (
-                                  <button
-                                    onClick={() => {
-                                      const m = (trainingData[activeTrainingTab] ?? []).find(x => x.id === mistake.id)
-                                      if (!m) return
-                                      const missing: string[] = []
-                                      if (!m.title.trim())   missing.push('Title')
-                                      if (!m.wrong.trim())   missing.push('Wrong')
-                                      if (!m.correct.trim()) missing.push('Correct')
-                                      if (missing.length) {
-                                        setCardErrors(prev => ({ ...prev, [mistake.id]: `Required: ${missing.join(', ')}` }))
-                                        return
-                                      }
-                                      setCardErrors(prev => { const next = { ...prev }; delete next[mistake.id]; return next })
-                                      saveMistakes()
-                                    }}
-                                    disabled={trainingSaving}
-                                    className={`flex items-center gap-1 text-[10px] font-bold px-2.5 py-1 rounded-lg transition-all flex-shrink-0 ${
-                                      trainingSaveOk
-                                        ? 'bg-green-500 text-white'
-                                        : 'bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50'
-                                    }`}
-                                  >
-                                    {trainingSaving
-                                      ? <Loader2 size={10} className="animate-spin" />
-                                      : <Save size={10} />}
-                                    {trainingSaveOk ? 'Saved!' : trainingSaving ? '…' : 'Save'}
-                                  </button>
-                                ) : (
-                                  <button
-                                    onClick={() => setEditingMistakes(prev => new Set([...prev, mistake.id]))}
-                                    className="text-gray-300 hover:text-blue-500 transition-colors flex-shrink-0"
-                                    title="Edit"
-                                  ><Pencil size={13} /></button>
-                                )}
-                                <button
-                                  onClick={() => deleteMistake(activeTrainingTab, mistake.id)}
-                                  className="text-gray-300 hover:text-red-500 transition-colors flex-shrink-0"
-                                  title="Delete"
-                                ><XCircle size={14} /></button>
-                              </div>
-                              {/* Validation error */}
-                              {isEditing && cardErrors[mistake.id] && (
-                                <div className="px-3.5 py-2 bg-red-50 border-b border-red-100 flex items-center gap-1.5">
-                                  <XCircle size={11} className="text-red-400 flex-shrink-0" />
-                                  <span className="text-[11px] text-red-600 font-medium">{cardErrors[mistake.id]}</span>
+                            <div key={id} className="bg-white rounded-2xl border border-gray-200/70 overflow-hidden shadow-sm">
+                              <button onClick={() => toggleCheckExpanded(id)}
+                                className="w-full px-5 py-3 flex items-center gap-3 hover:bg-gray-50/60 transition-colors">
+                                <ChevronDown size={13} className={`text-gray-400 transition-transform flex-shrink-0 ${expanded ? 'rotate-180' : ''}`} />
+                                <span className="text-[13px] font-semibold text-gray-700 flex-1 text-left truncate">{c.display_name}</span>
+                                <span className="text-[9px] font-mono text-gray-300 hidden sm:inline">{c.key}</span>
+                                {c.builtin
+                                  ? <span className="text-[9px] px-1.5 py-0.5 bg-gray-100 text-gray-500 border border-gray-200 rounded-full font-bold flex-shrink-0">Built-in</span>
+                                  : <span className="text-[9px] px-1.5 py-0.5 bg-green-100 text-green-700 border border-green-200 rounded-full font-bold flex-shrink-0">User rule</span>}
+                              </button>
+                              {expanded && (
+                                <div className="border-t border-gray-100 px-5 py-4">
+                                  {draft ? renderCheckFields(id, draft) : (
+                                    <div className="space-y-3">
+                                      <div>
+                                        <p className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Description</p>
+                                        {c.description
+                                          ? <p className="text-[12px] text-gray-600 mt-0.5 whitespace-pre-wrap leading-relaxed">{c.description}</p>
+                                          : <p className="text-[12px] italic text-gray-300 mt-0.5">None</p>}
+                                      </div>
+                                      {c.builtin && (c.prompt
+                                        ? (
+                                          <div>
+                                            <p className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Check Prompt</p>
+                                            <pre className="text-[11px] text-gray-600 mt-0.5 whitespace-pre-wrap font-mono bg-gray-50 border border-gray-100 rounded-lg p-3 max-h-60 overflow-auto">{c.prompt}</pre>
+                                          </div>
+                                        )
+                                        : (
+                                          <p className="text-[10px] text-gray-400 italic">Computed check — logic is in code, no editable prompt.</p>
+                                        ))}
+                                      <div className="flex items-center gap-2">
+                                        <button onClick={() => startEdit(c)}
+                                          className="flex items-center gap-1.5 px-3.5 py-1.5 bg-slate-900 text-white text-[11px] font-bold rounded-lg hover:bg-blue-600 transition-colors">
+                                          <Pencil size={11} /> Edit
+                                        </button>
+                                        {!c.builtin && (
+                                          <button onClick={() => deleteCheck(c)}
+                                            className="flex items-center gap-1.5 px-3.5 py-1.5 text-[11px] font-bold text-red-500 hover:bg-red-50 rounded-lg transition-colors">
+                                            <Trash2 size={11} /> Delete
+                                          </button>
+                                        )}
+                                      </div>
+                                    </div>
+                                  )}
                                 </div>
                               )}
-                              {/* WRONG */}
-                              <div className="px-3.5 py-2.5 border-b border-gray-100">
-                                <p className={`text-[10px] font-black uppercase tracking-wider mb-1 ${isEditing ? 'text-red-500' : 'text-red-300'}`}>Wrong</p>
-                                {isEditing ? (
-                                  <textarea
-                                    value={mistake.wrong}
-                                    onChange={e => updateMistake(activeTrainingTab, { ...mistake, wrong: e.target.value })}
-                                    placeholder="What the AI did incorrectly…"
-                                    rows={2}
-                                    className="w-full text-[11px] text-gray-600 bg-white border border-gray-200 rounded-lg px-2.5 py-2 resize-y focus:outline-none focus:ring-1 focus:ring-red-300 focus:border-red-300 leading-relaxed"
-                                  />
-                                ) : (
-                                  <p className={`text-[11px] leading-relaxed ${mistake.wrong ? 'text-gray-400' : 'italic text-gray-300'}`}>
-                                    {mistake.wrong || 'Not set'}
-                                  </p>
-                                )}
-                              </div>
-                              {/* CORRECT */}
-                              <div className="px-3.5 py-2.5">
-                                <p className={`text-[10px] font-black uppercase tracking-wider mb-1 ${isEditing ? 'text-green-600' : 'text-green-300'}`}>Correct</p>
-                                {isEditing ? (
-                                  <textarea
-                                    value={mistake.correct}
-                                    onChange={e => updateMistake(activeTrainingTab, { ...mistake, correct: e.target.value })}
-                                    placeholder="The correct behavior or rule…"
-                                    rows={2}
-                                    className="w-full text-[11px] text-gray-600 bg-white border border-gray-200 rounded-lg px-2.5 py-2 resize-y focus:outline-none focus:ring-1 focus:ring-green-300 focus:border-green-300 leading-relaxed"
-                                  />
-                                ) : (
-                                  <p className={`text-[11px] leading-relaxed ${mistake.correct ? 'text-gray-400' : 'italic text-gray-300'}`}>
-                                    {mistake.correct || 'Not set'}
-                                  </p>
-                                )}
-                              </div>
                             </div>
                           )
                         })}
-
-                        <button
-                          onClick={() => addMistake(activeTrainingTab, check.key)}
-                          className="flex items-center gap-1.5 text-[11px] font-semibold text-blue-500 hover:text-blue-700 transition-colors py-0.5"
-                        >
-                          <span className="w-4 h-4 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 font-black text-[10px]">+</span>
-                          Add Mistake
-                        </button>
+                        </div>
                       </div>
-                    )}
-                  </div>
-                )
-              })}
-
-              </>}
-            </div>
-          )}
-
-          {/* ── Knowledge Base view ──────────────────────── */}
-          {activeView === 'knowledge' && (
-            <div className="space-y-4">
-
-              {/* Header card */}
-              <div className="bg-white rounded-2xl border border-gray-200/70 px-6 py-4 shadow-sm flex items-center gap-4">
-                <div className="w-9 h-9 rounded-xl bg-violet-50 border border-violet-100 flex items-center justify-center flex-shrink-0">
-                  <Database size={16} className="text-violet-500" />
-                </div>
-                <div className="min-w-0">
-                  <p className="text-[13px] font-bold text-gray-800">QA Knowledge Base</p>
-                  <p className="text-[11px] text-gray-400 mt-0.5">
-                    Edit rules in Microsoft Word — text, tables, and images are all supported.
-                    Download, edit, then upload to apply changes to every AI analysis.
-                  </p>
-                </div>
-              </div>
-
-              {/* Actions */}
-              <div className="bg-white rounded-2xl border border-gray-200/70 shadow-sm p-6 flex flex-col gap-5">
-
-                {/* Step 1 — Download */}
-                <div className="flex items-start gap-4">
-                  <div className="w-7 h-7 rounded-full bg-violet-100 text-violet-600 flex items-center justify-center text-[11px] font-black flex-shrink-0 mt-0.5">1</div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-[13px] font-semibold text-gray-700">Download &amp; edit in Word</p>
-                    <p className="text-[11px] text-gray-400 mt-0.5 mb-3">
-                      Download the file, open in Microsoft Word. Add text, tables, or images freely.
-                      Use headings <span className="font-mono bg-gray-100 px-1 rounded text-gray-500">Spell Check Node</span>, <span className="font-mono bg-gray-100 px-1 rounded text-gray-500">Bend Check Node</span>, <span className="font-mono bg-gray-100 px-1 rounded text-gray-500">Rebar Check Node</span> to organize rules by domain.
-                      Save the file in Word when done.
-                    </p>
-                    <button
-                      onClick={downloadKbFile}
-                      className="flex items-center gap-2 px-4 py-2 bg-slate-900 text-white text-[12px] font-bold rounded-xl hover:bg-slate-700 transition-colors shadow-sm"
-                    >
-                      <Download size={13} />
-                      Download .docx
-                    </button>
-                  </div>
-                </div>
-
-                <div className="border-t border-gray-100" />
-
-                {/* Step 2 — Upload */}
-                <div className="flex items-start gap-4">
-                  <div className="w-7 h-7 rounded-full bg-violet-100 text-violet-600 flex items-center justify-center text-[11px] font-black flex-shrink-0 mt-0.5">2</div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-[13px] font-semibold text-gray-700">Upload the edited file</p>
-                    <p className="text-[11px] text-gray-400 mt-0.5 mb-3">
-                      Select the saved .docx from your machine. The server will store it and rebuild the RAG knowledge index immediately — the AI will use the updated rules on every subsequent analysis.
-                    </p>
-                    <label className={`inline-flex items-center gap-2 px-4 py-2 text-[12px] font-bold rounded-xl cursor-pointer transition-all shadow-sm ${
-                      kbSaveOk
-                        ? 'bg-green-500 text-white'
-                        : 'bg-violet-600 text-white hover:bg-violet-700'
-                    } ${kbSaving ? 'opacity-50 pointer-events-none' : ''}`}>
-                      {kbSaving
-                        ? <Loader2 size={13} className="animate-spin" />
-                        : <Save size={13} />}
-                      {kbSaveOk ? 'Uploaded!' : kbSaving ? 'Uploading…' : 'Upload & Update RAG'}
-                      <input
-                        type="file"
-                        accept=".docx"
-                        className="hidden"
-                        onChange={e => { const f = e.target.files?.[0]; if (f) uploadKbFile(f); e.target.value = '' }}
-                      />
-                    </label>
-                  </div>
-                </div>
-
-              </div>
+                    )
+                  })}
+                </>
+              )}
             </div>
           )}
 
@@ -1324,11 +1260,15 @@ export default function App() {
               </div>
 
               <div className="flex flex-col gap-2.5">
-
-                {/* 3 category cards — horizontal row */}
+                {checksLoading && !checksData ? (
+                  <div className="flex items-center justify-center py-8 gap-2 text-gray-400">
+                    <Loader2 size={16} className="animate-spin" /><span className="text-xs">Loading checks…</span>
+                  </div>
+                ) : (
+                <>
                 <div className="flex gap-2">
-                  {CHECK_OPTIONS.map(({ key, label, comingSoon }) => {
-                    const section = NODE_SECTIONS.find(s => s.key === key)!
+                  {checkOptions.map(({ key, label, comingSoon }) => {
+                    const section = nodeSections.find(s => s.key === key)!
                     const allSubKeys = section.checks.map(c => c.key)
                     const enabledSubs = enabledSubChecks[key] ?? []
                     const allEnabled = allSubKeys.every(k => enabledSubs.includes(k))
@@ -1408,9 +1348,9 @@ export default function App() {
                 </div>
 
                 {/* Sub-checks panel — full-width, below the row */}
-                {CHECK_OPTIONS.map(({ key, label, comingSoon }) => {
+                {checkOptions.map(({ key, label, comingSoon }) => {
                   if (comingSoon || !expandedCheckCategories.has(key)) return null
-                  const section = NODE_SECTIONS.find(s => s.key === key)!
+                  const section = nodeSections.find(s => s.key === key)!
                   const enabledSubs = enabledSubChecks[key] ?? []
                   const someEnabled = enabledSubs.length > 0
                   const disabled = appState === 'analyzing'
@@ -1478,6 +1418,8 @@ export default function App() {
                   )
                 })}
 
+                </>
+                )}
               </div>
 
               {!file && viewingEntry ? (
@@ -1493,7 +1435,7 @@ export default function App() {
                       <div className="flex gap-1 flex-wrap mt-1.5">
                         {viewingEntry.checks.map(c => (
                           <span key={c} className="text-[9px] px-1.5 py-0.5 bg-blue-100 text-blue-600 rounded-full font-semibold">
-                            {CHECK_OPTIONS.find(o => o.key === c)?.label ?? c}
+                            {checkOptions.find(o => o.key === c)?.label ?? c}
                           </span>
                         ))}
                       </div>

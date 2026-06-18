@@ -37,12 +37,12 @@ def build_graph():
 
     g.add_edge(START, "preprocess")
 
-    # Fan out: all three check nodes run in parallel
+    # Fan out: all check nodes run in parallel
     g.add_edge("preprocess", "spell_check")
     g.add_edge("preprocess", "bend_check")
     g.add_edge("preprocess", "rebar_check")
 
-    # Fan in: aggregate waits for all three to complete
+    # Fan in: aggregate waits for all check nodes to complete
     g.add_edge("spell_check",  "aggregate_results")
     g.add_edge("bend_check",   "aggregate_results")
     g.add_edge("rebar_check",  "aggregate_results")

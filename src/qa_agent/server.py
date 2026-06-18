@@ -19,9 +19,9 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from langgraph_sdk import get_client
 
-from qa_agent.mistakes_store import load_structured, save_structured
 from qa_agent.nodes.pdf_extractor import extract_steel_list_pdf, extract_overview_plan_pdf
 from qa_agent.pdf_annotator import annotate_pdf
+from qa_agent import checks_registry as registry
 
 LANGGRAPH_URL = os.getenv("LANGGRAPH_URL", "http://127.0.0.1:2024")
 
@@ -264,22 +264,52 @@ async def annotate_report(
     )
 
 
-@app.get("/api/mistakes-structured")
-async def get_mistakes_structured():
-    data = await asyncio.to_thread(load_structured)
-    return data
+@app.get("/api/checks")
+async def list_checks():
+    """All defined checks (built-in + custom), for the Define-Rules UI and the
+    dynamic check-selection sidebar."""
+    checks = await asyncio.to_thread(registry.list_checks)
+    domains = [
+        {
+            "key": d,
+            "title": registry.domain_title(d),
+            "coming_soon": d in registry.COMING_SOON_DOMAINS,
+        }
+        for d in registry.ALL_DOMAINS
+    ]
+    return {"checks": checks, "domains": domains}
 
 
-class _MistakesStructuredBody(BaseModel):
-    data: dict
+class _CheckBody(BaseModel):
+    domain: str = "spell"
+    key: str | None = None
+    display_name: str
+    description: str = ""
+    prompt: str = ""
+    pass_text: str = "PASS"
+    not_found_text: str = "NOT FOUND"
 
 
-@app.post("/api/mistakes-structured")
-async def save_mistakes_structured(body: _MistakesStructuredBody):
+@app.post("/api/checks")
+async def save_check(body: _CheckBody):
     try:
-        await asyncio.to_thread(save_structured, body.data)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        saved = await asyncio.to_thread(
+            registry.save_check,
+            domain=body.domain, key=body.key, display_name=body.display_name,
+            description=body.description, prompt=body.prompt,
+            pass_text=body.pass_text, not_found_text=body.not_found_text,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "check": saved}
+
+
+@app.delete("/api/checks/{domain}/{key}")
+async def delete_check(domain: str, key: str):
+    try:
+        await asyncio.to_thread(registry.delete_check, domain, key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     return {"ok": True}
 
 

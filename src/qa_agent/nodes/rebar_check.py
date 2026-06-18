@@ -8,6 +8,7 @@ from langchain_core.outputs import LLMResult
 from qa_agent.state import GraphState
 from qa_agent.rag.retriever import get_check_prompt, get_check_meta
 from qa_agent.nodes.issue_filter import OUTPUT_RULES, accept_finding, build_check_issues
+from qa_agent.nodes.user_ai_checks import run_user_ai_checks
 
 logger = logging.getLogger(__name__)
 
@@ -178,4 +179,6 @@ def rebar_check(state: GraphState) -> dict:
 
     by_check = _filter_items(result)
     not_found_set = set(result.not_found or [])
-    return {"rebar_issues": build_check_issues("rebar", _CHECK_META, by_check, not_found_set, enabled_sub)}
+    issues = build_check_issues("rebar", _CHECK_META, by_check, not_found_set, enabled_sub)
+    issues.extend(run_user_ai_checks("rebar", state))
+    return {"rebar_issues": issues}
