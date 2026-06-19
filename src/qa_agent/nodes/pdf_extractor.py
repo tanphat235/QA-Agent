@@ -874,53 +874,133 @@ def _find_bilingual_value(raw_text: str, german: str, english: str, integer_only
     return None
 
 
+# Units that may sit next to (or be merged with) a title-block value — stripped
+# so only the number is kept. Critical: this lets us REJECT a bare unit word like
+# "m3" / "to" that would otherwise be mistaken for the value.
+_TB_UNIT_RE = r"(?:m³|m3|m²|m2|to|t|kg|stk|stück|pcs)"
+
+
+def _tb_numeric(text: str, integer_only: bool = False) -> str | None:
+    """Return the numeric part of a title-block cell, or None if it is not a value.
+
+    Accepts "3.21", "3,21", "3.21m³", "8.03 to", "1" — rejects bare units ("m3",
+    "to", "T") and codes ("WE104"). Decimal comma is normalised to a dot.
+    """
+    t = re.sub(r"\s+", "", text or "")
+    num = r"\d+" if integer_only else r"\d+(?:[.,]\d+)?"
+    m = re.fullmatch(rf"({num}){_TB_UNIT_RE}?", t, re.IGNORECASE)
+    return m.group(1).replace(",", ".") if m else None
+
+
+def _next_label_x(words: list[dict], anchor: dict) -> float | None:
+    """x0 of the next column's label to the right of `anchor` on the same row.
+
+    The title block lays out cells side by side (Volumen | Gewicht | Anzahl | …).
+    The value for one label must never be read past the NEXT label — that belongs
+    to the next column. A "label" is an alphabetic word of ≥4 letters (real column
+    headers), so short unit tokens ("m³", "to", "T", "kg") are not treated as the
+    boundary.
+    """
+    def _overlaps(w: dict) -> bool:
+        return min(w["bottom"], anchor["bottom"]) - max(w["top"], anchor["top"]) > 0
+
+    xs = [
+        w["x0"] for w in words
+        if w["x0"] > anchor["x1"] + 2 and _overlaps(w)
+        and sum(c.isalpha() for c in w["text"]) >= 4
+    ]
+    return min(xs, default=None)
+
+
+def _value_near_word(
+    words: list[dict], anchor: dict, integer_only: bool = False,
+    right_bound: float | None = None,
+) -> str | None:
+    """Find the numeric value belonging to a label word.
+
+    The value is the nearest PURE number that lies in the label's own COLUMN
+    (between the label's left edge and `right_bound` = the next column's label) and
+    on the label's row OR below it. This covers all title-block layouts: value to
+    the right on the same row, value on the row directly below, or value in a
+    compact cell whose row nearly touches the label. Adjacent unit tokens ("m3",
+    "to", "T") and codes are rejected, and the search never crosses into the next
+    column, so a neighbour's value can never be picked.
+    """
+    hi = right_bound if right_bound is not None else anchor["x1"] + 140
+    lo = anchor["x0"] - 25
+    acx = (anchor["x0"] + anchor["x1"]) / 2
+
+    candidates: list[tuple[dict, str]] = []
+    for w in words:
+        cx = (w["x0"] + w["x1"]) / 2
+        if not (lo <= cx < hi):                       # must be in this column
+            continue
+        if w["top"] < anchor["top"] - 3:              # not on a row above the label
+            continue
+        if w["top"] > anchor["bottom"] + 55:          # not too far below
+            continue
+        v = _tb_numeric(w["text"], integer_only)
+        if v is not None:
+            candidates.append((w, v))
+    if not candidates:
+        return None
+    # Nearest first: topmost row (same row before the row below), then the token
+    # whose centre best lines up under the label.
+    candidates.sort(key=lambda t: (t[0]["top"], abs((t[0]["x0"] + t[0]["x1"]) / 2 - acx)))
+    return candidates[0][1]
+
+
+def _find_titleblock_value(
+    words: list[dict], label_fragment: str, integer_only: bool = False,
+) -> str | None:
+    """Value for a title-block label, regardless of whether it is printed to the
+    right of the label or on the row below it. Uses the bottommost occurrence of
+    the label (the title block sits at the bottom of the sheet) and never reads
+    past the next column's label."""
+    matches = [w for w in words if label_fragment.lower() in w["text"].lower()]
+    if not matches:
+        return None
+    label = max(matches, key=lambda w: w["top"])
+    val = _value_near_word(words, label, integer_only, _next_label_x(words, label))
+    print(f"[titleblock] '{label_fragment}' (top={round(label['top'])}) → {val!r}")
+    return val
+
+
 def _find_volumen(words: list[dict], raw_text: str) -> str | None:
-    return _find_numeric_right_of(words, "Volumen") or _find_bilingual_value(raw_text, "Volumen", "Volume")
+    return _find_titleblock_value(words, "Volumen") or _find_bilingual_value(raw_text, "Volumen", "Volume")
 
 
 def _find_gewicht(words: list[dict], raw_text: str) -> str | None:
-    """Gewicht / Weight — anchored to the same row as 'Volumen / Volume'.
-
-    'Volumen' and 'Gewicht' share the same title-block row.  By finding 'Volumen'
-    first we get the exact y-coordinate of that row and can then look for the
-    'Gewicht' label *on that specific row only*, avoiding false hits from steel-list
-    table headers ('Gewicht' column with a total like 144.51 kg) that may appear at
-    a higher top-coordinate on the same page.
+    """Gewicht / Weight — preferably anchored to the same row as 'Volumen' so we
+    don't pick up a steel-list 'Gewicht' column header higher on the sheet.
+    The value may be to the right of the label OR on the row below it.
     """
     vol_matches = [w for w in words if "volumen" in w["text"].lower()]
     if vol_matches:
         vol_word = max(vol_matches, key=lambda w: w["top"])   # bottommost = title block
         vol_y = vol_word["top"]
-        # Find "Gewicht" on the SAME ROW as "Volumen" (strict ±8 pt)
         gwt_matches = [
             w for w in words
-            if "gewicht" in w["text"].lower()
-            and abs(w["top"] - vol_y) <= 8
+            if "gewicht" in w["text"].lower() and abs(w["top"] - vol_y) <= 8
         ]
         if gwt_matches:
             gwt_word = max(gwt_matches, key=lambda w: w["x0"])  # rightmost if multiple
-            candidates = sorted(
-                [
-                    w for w in words
-                    if abs(w["top"] - gwt_word["top"]) <= 8
-                    and w["x0"] > gwt_word["x1"]
-                    and re.search(r"\d", w["text"])
-                ],
-                key=lambda w: w["x0"],
-            )
-            if candidates:
-                val = candidates[0]["text"].strip().replace(",", ".")
-                print(f"[gewicht] same-row-as-volumen (y≈{round(vol_y)}) → {val!r}")
+            val = _value_near_word(words, gwt_word, right_bound=_next_label_x(words, gwt_word))
+            if val is not None:
+                print(f"[gewicht] near Gewicht on Volumen row (y≈{round(vol_y)}) → {val!r}")
                 return val
-            print("[gewicht] Gewicht found on vol-row but no numeric word to its right")
+            print("[gewicht] Gewicht found on vol-row but no numeric value right/below")
         else:
             print(f"[gewicht] no 'Gewicht' word on Volumen row (y≈{round(vol_y)} ±8pt)")
-    # Fallback: bilingual raw-text search
-    return _find_bilingual_value(raw_text, "Gewicht", "Weight")
+    # Fallbacks: bottommost 'Gewicht' anywhere, then bilingual raw-text search.
+    return _find_titleblock_value(words, "Gewicht") or _find_bilingual_value(raw_text, "Gewicht", "Weight")
 
 
 def _find_anzahl(words: list[dict], raw_text: str) -> str | None:
-    val = _find_numeric_right_of(words, "Anzahl") or _find_bilingual_value(raw_text, "Anzahl", "Quantity", integer_only=True)
+    val = (
+        _find_titleblock_value(words, "Anzahl", integer_only=True)
+        or _find_bilingual_value(raw_text, "Anzahl", "Quantity", integer_only=True)
+    )
     if val:
         m = re.match(r"(\d+)", val)
         return m.group(1) if m else val
