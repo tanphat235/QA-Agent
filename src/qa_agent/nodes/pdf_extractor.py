@@ -1034,14 +1034,31 @@ _REV_COL_MARGIN = 15  # pt — column width tolerance around "Rev" header
 
 _POS_X_MARGIN = 8  # pt — column width tolerance around "Pos." header
 
+# The two rebar schedules. Stabliste ↔ letzte Stabstahlposition,
+# Mattenstahlliste ↔ letzte Mattenposition. They are often stacked one above the
+# other with their "Pos." columns at the same x, so each schedule's reading must
+# be bounded to its own table.
+_SCHEDULE_KEYWORDS = ("stabliste", "mattenstahlliste")
+
+# A schedule's total row ends its table. Matched as a compound so it is NOT
+# confused with the "Gesamt Länge" COLUMN header that appears inside the Stabliste.
+_TOTAL_ROW_RE = re.compile(r"gesamt\s*(?:masse|gewicht)", re.IGNORECASE)
+
 
 def _max_pos_in_schedule(words: list[dict], schedule_keyword: str) -> str | None:
-    schedule_word = next(
-        (w for w in words if schedule_keyword.lower() in w["text"].lower()), None
-    )
-    if schedule_word is None:
-        return None
+    """Highest position number (< 100) in the Pos. column of ONE schedule.
 
+    The read is bounded vertically to this schedule's own table — it stops at the
+    OTHER schedule's title or at this table's "Gesamt…" total row. Without that
+    bound the Pos column bleeds into the adjacent table stacked below it and
+    reports that table's max instead (e.g. Mattenstahlliste picking up Stabliste's
+    position 6).
+    """
+    kw = schedule_keyword.lower()
+    schedule_word = next((w for w in words if kw in w["text"].lower()), None)
+    if schedule_word is None:
+        print(f"[pos_count] {schedule_keyword}: title NOT FOUND on sheet")
+        return None
     schedule_top = schedule_word["top"]
 
     pos_headers = [
@@ -1050,23 +1067,89 @@ def _max_pos_in_schedule(words: list[dict], schedule_keyword: str) -> str | None
         and w["top"] >= schedule_top - 5
     ]
     if not pos_headers:
+        print(f"[pos_count] {schedule_keyword}: no 'Pos.' header found below title (top={round(schedule_top)})")
         return None
 
-    pos_header = min(pos_headers, key=lambda w: abs(w["top"] - schedule_top))
-    col_x0 = pos_header["x0"] - _POS_X_MARGIN
-    col_x1 = pos_header["x1"] + _POS_X_MARGIN
+    # Pick the Pos header belonging to THIS schedule by horizontal alignment with
+    # its title first (the two schedules sit side-by-side with titles at nearly the
+    # same y, so y-proximity alone would grab the wrong table's column), then by
+    # vertical proximity (handles two schedules stacked in the same x-column).
+    schedule_x0 = schedule_word["x0"]
+    pos_header = min(
+        pos_headers,
+        key=lambda w: (abs(w["x0"] - schedule_x0), abs(w["top"] - schedule_top)),
+    )
     header_bottom = pos_header["bottom"]
+    # The Pos column spans from its header to the NEXT column header (Stück / Stck).
+    # Bounding the right edge by that header lets us match a position number even
+    # if it is nudged sideways (e.g. inside a revision cloud) without ever bleeding
+    # into the Stück column. Membership is by the number's horizontal CENTRE.
+    next_hx = _next_label_x(words, pos_header)
+    col_x0 = pos_header["x0"] - 12
+    col_x1 = (next_hx - 2) if next_hx is not None else pos_header["x1"] + 30
 
-    values = [
-        int(w["text"].strip())
-        for w in words
-        if w["top"] >= header_bottom
-        and w["x0"] >= col_x0
-        and w["x1"] <= col_x1
-        and re.fullmatch(r"\d+", w["text"].strip())
-        and int(w["text"].strip()) < 100
-    ]
+    # This table's horizontal extent: the columns on the Pos-header row (capped so
+    # unrelated text far across a wide sheet is ignored). A boundary word must fall
+    # within this band, otherwise a DIFFERENT table sitting side-by-side (and only
+    # overlapping in y) — e.g. the Mattenstahlliste's "Gesamtgewicht" off to the
+    # side — would wrongly cut this table's Pos column short.
+    def _overlaps_h(w: dict) -> bool:
+        return min(w["bottom"], pos_header["bottom"]) - max(w["top"], pos_header["top"]) > 0
 
+    table_right = max(
+        (w["x1"] for w in words if _overlaps_h(w) and w["x0"] <= pos_header["x0"] + 700),
+        default=pos_header["x1"] + 500,
+    )
+    tbl_lo, tbl_hi = pos_header["x0"] - 60, table_right + 60
+
+    def _in_table_x(w: dict) -> bool:
+        cx = (w["x0"] + w["x1"]) / 2
+        return tbl_lo <= cx <= tbl_hi
+
+    # Lower bound for THIS table: the nearest boundary below the Pos header (within
+    # this table's x-band) — the OTHER schedule's title, or this table's total row.
+    # The total is matched as a compound ("Gesamtmasse"/"Gesamtgewicht") so the
+    # "Gesamt Länge" COLUMN header is NOT mistaken for the table end.
+    boundary = min(
+        (w for w in words
+         if w["top"] > header_bottom + 2 and _in_table_x(w)
+         and (any(o in w["text"].lower() for o in _SCHEDULE_KEYWORDS if o != kw)
+              or _TOTAL_ROW_RE.search(w["text"]))),
+        key=lambda w: w["top"], default=None,
+    )
+    y_max = boundary["top"] if boundary else float("inf")
+
+    # Every integer whose horizontal centre falls in the Pos column, top-to-bottom.
+    def _in_col(w: dict) -> bool:
+        cx = (w["x0"] + w["x1"]) / 2
+        return col_x0 <= cx <= col_x1
+
+    in_col = sorted(
+        (w for w in words
+         if w["top"] >= header_bottom and _in_col(w)
+         and re.fullmatch(r"\d+", w["text"].strip())),
+        key=lambda w: w["top"],
+    )
+
+    def _kept(w: dict) -> bool:
+        return w["top"] < y_max and int(w["text"].strip()) < 100
+
+    values = [int(w["text"].strip()) for w in in_col if _kept(w)]
+
+    # ── DEBUG: show exactly what the extractor saw ──────────────────────────
+    y_max_str = "inf" if y_max == float("inf") else round(y_max)
+    bnd = f"{boundary['text']!r}@{round(boundary['top'])}" if boundary else "none"
+    print(f"[pos_count] {schedule_keyword}: title@(x={round(schedule_x0)},y={round(schedule_top)}) "
+          f"pos-header@x={round(pos_header['x0'])} pos-col x[{round(col_x0)},{round(col_x1)}] "
+          f"header_bottom={round(header_bottom)} boundary={bnd} y_max={y_max_str}")
+    print(f"[pos_count] {schedule_keyword}: column numbers (value@top kept/skip): "
+          + ", ".join(
+              f"{w['text']}@{round(w['top'])}"
+              + ("" if _kept(w) else
+                 "(skip:>=100)" if int(w['text'].strip()) >= 100 else "(skip:below-boundary)")
+              for w in in_col
+          ))
+    print(f"[pos_count] {schedule_keyword}: KEPT={values}  MAX={max(values) if values else None}")
     return str(max(values)) if values else None
 
 
