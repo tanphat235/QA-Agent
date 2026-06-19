@@ -22,13 +22,34 @@ logger = logging.getLogger(__name__)
 
 _SYSTEM = """\
 You are a senior structural QA reviewer for precast concrete wall drawings.
-Inspect the drawing (PDF document and the pre-extracted text below) and apply the
-QA rules exactly as written. Report ONLY problems you can directly observe.
+Inspect the drawing (PDF document + the extracted text) and apply the QA rules
+exactly as written. You may CALCULATE and COMPARE values to decide a rule.
+Report ONLY problems you can directly observe or compute.
 
 CRITICAL:
-  • Use only what is actually in this drawing — never invent or assume values.
-  • If a rule's prerequisite element is missing or unreadable, add that rule's key
-    to not_found instead of guessing or silently passing.\
+  • Prefer the "PRE-EXTRACTED VALUES" block — those numbers were parsed
+    deterministically and are the source of truth for any calculation/comparison.
+    Use the rendered drawing only to locate or confirm things not listed there.
+  • Never invent or assume a value. If a value a rule needs is absent/unreadable,
+    add that rule's key to not_found instead of guessing or silently passing.\
+"""
+
+# Appended after the rules so the model knows HOW to do arithmetic/comparison.
+_CALC_GUIDANCE = """\
+
+═══════════════════════════════════
+CALCULATION & COMPARISON
+═══════════════════════════════════
+  • When a rule needs arithmetic (sum, ratio, difference, %) or a comparison
+    (A vs B, value vs limit, max of a column vs a title-block value), compute it
+    from the PRE-EXTRACTED VALUES above. Work step by step internally.
+  • Decimals may use a comma or a dot ("3,21" = "3.21"); treat them as equal.
+  • Apply the tolerance the rule states. If the rule gives none:
+      – exact match for codes, text and integer counts (Pos, Anzahl, EBT-Nummer);
+      – measured quantities (mass, weight, volume, length) match within ±1 %.
+  • Flag a finding ONLY when the rule is actually violated after the calculation.
+    A rule that holds within tolerance produces NOTHING. Put no working/derivation
+    in the description — just state the violated fact and the two values involved.\
 """
 
 _OUTRO_TPL = """\
@@ -79,6 +100,79 @@ class _UsageCallback(BaseCallbackHandler):
             print(f"[usage][{self.label}] could not read usage: {exc}")
 
 
+def _format_extracted_facts(state: GraphState) -> str:
+    """Readable block of the deterministically pre-extracted values, so a user
+    rule can be evaluated by calculation/comparison rather than visual guessing."""
+    pc = state.get("pdf_content") or {}
+    tb = pc.get("title_block") or {}
+    lines: list[str] = [
+        "=== PRE-EXTRACTED VALUES (exact — use these for any calculation/comparison) ==="
+    ]
+
+    def add(label: str, value) -> None:
+        if value not in (None, "", []):
+            lines.append(f"  {label}: {value}")
+
+    lines.append("[Title block]")
+    add("Volumen (m³)", tb.get("volumen"))
+    add("Gewicht (to)", tb.get("gewicht"))
+    add("Anzahl", tb.get("anzahl"))
+    add("Gesamtmasse total steel (kg)", tb.get("gesamtmasse"))
+    add("Exposition class", tb.get("exposition_class"))
+    add("Betondeckung Cmin,dur", tb.get("betondeckung_cmin_dur"))
+    add("Betondeckung ΔCdev", tb.get("betondeckung_delta_c"))
+    add("Betondeckung Cv", tb.get("betondeckung_cv"))
+    add("Revision (title block)", tb.get("revision_title_block"))
+    add("Revision (last in table)", tb.get("revision_table_last"))
+    add("Status", tb.get("status_title_block"))
+    add("Planfreigabe", tb.get("planfreigabe_text"))
+    add("Drawing No.", tb.get("drawing_no_value"))
+    add("Drawing Title", tb.get("drawing_title_value"))
+    add("letzte Stabstahlposition", tb.get("letzte_stabstahlposition"))
+    add("letzte Mattenposition", tb.get("letzte_mattenposition"))
+
+    lines.append("[Schedules]")
+    add("Stabliste Gesamtmasse (kg)", pc.get("stabliste_total"))
+    add("Mattenstahlliste Gesamtgewicht (kg)", pc.get("mattenstahlliste_total"))
+    add("Stabliste max Pos (<100)", tb.get("max_stabliste_pos"))
+    add("Mattenstahlliste max Pos (<100)", tb.get("max_mattenliste_pos"))
+
+    ebt = pc.get("einbauteilliste_items") or []
+    if ebt:
+        lines.append("[Einbauteilliste rows]")
+        for it in ebt:
+            lines.append(
+                f"  EBT {it.get('ebt_nr')}: hersteller={it.get('hersteller')!r} "
+                f"bezeichnung={it.get('bezeichnung')!r} "
+                f"korrosionsschutz={it.get('korrosionsschutz')!r} qty={it.get('qty')}"
+            )
+
+    sl = state.get("steel_list_data") or {}
+    if sl:
+        lines.append("[Steel List file]")
+        add("Gesamtmasse (kg)", sl.get("gesamtmasse"))
+        add("Stabliste total (kg)", sl.get("stabliste_total"))
+        add("Mattenstahlliste total (kg)", sl.get("mattenstahlliste_total"))
+        for it in (sl.get("einbauteilliste_items") or []):
+            lines.append(
+                f"  EBT {it.get('ebt_nr')}: hersteller={it.get('hersteller')!r} "
+                f"bezeichnung={it.get('bezeichnung')!r} "
+                f"korrosionsschutz={it.get('korrosionsschutz')!r} qty={it.get('qty')}"
+            )
+
+    op = state.get("overview_plan_data") or {}
+    rows = op.get("element_rows") if isinstance(op, dict) else None
+    if rows:
+        lines.append("[Overview plan rows]")
+        for r in rows:
+            lines.append(
+                f"  code={r.get('code')} volume={r.get('volume')} weight={r.get('weight')} "
+                f"qty={r.get('quantity')} drawing_no={r.get('drawing_no')}"
+            )
+
+    return "\n".join(lines)
+
+
 def run_user_ai_checks(domain: str, state: GraphState) -> list:
     """Run enabled user-defined AI checks for *domain*; return issue dicts."""
     enabled_sub = (state.get("enabled_sub_checks") or {}).get(domain)
@@ -103,8 +197,11 @@ def run_user_ai_checks(domain: str, state: GraphState) -> list:
     task = (
         "Apply each of the following QA rules to the drawing.\n\n"
         + "\n\n".join(blocks)
+        + _CALC_GUIDANCE
         + _OUTRO_TPL.format(check_keys=check_keys)
     )
+
+    facts = _format_extracted_facts(state)
 
     human_content: list[dict] = []
     if pdf_data:
@@ -115,6 +212,7 @@ def run_user_ai_checks(domain: str, state: GraphState) -> list:
         })
     if formatted:
         human_content.append({"type": "text", "text": formatted})
+    human_content.append({"type": "text", "text": facts})
     human_content.append({"type": "text", "text": task})
 
     llm = ChatAnthropic(  # type: ignore[call-arg]
