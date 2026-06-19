@@ -21,38 +21,48 @@ Cross-reference part label codes between the views (Ansicht, Schnitt, Draufsicht
 
 CHECK — Parts Label Consistency (parts_label)
 
-All values used in this check MUST be read directly from this PDF. Discard any part codes,
-EBT-Nummer, or MT-Nummer from memory or from any previous drawing run before starting.
+All values used in this check MUST be read directly from this PDF / extracted text. Discard any
+part codes, EBT-Nummer, or MT-Nummer from memory or from any previous drawing run before starting.
 
 NOT FOUND — add "parts_label" to not_found if NEITHER Einbauteilliste NOR Montageteilliste
 is visible on this sheet. Do NOT silently pass.
 
+CRITICAL — EXACT-DIGIT MATCHING (read this before flagging anything):
+  • Part codes are full numeric strings (e.g. 5-digit EBT numbers). Codes that differ by even ONE
+    digit are DIFFERENT parts — 07162 and 07163 are NOT the same part.
+  • A code appearing many times NEVER implies that a similar-looking code is present or absent.
+    Each code must be matched on its OWN complete, exact digit sequence. Do not let a frequent
+    neighbour code (e.g. dozens of 07163) mask the presence of a rarer one (e.g. 07162).
+  • The same view label may be repeated many times, drawn rotated/vertical, or colour-highlighted
+    as a revision change. Treat ALL of these as valid occurrences. Scan the WHOLE sheet, including
+    any block titled "ROTATED / VERTICAL LABELS".
+
 STEP 1 — READ TABLE NUMBERS FROM THIS PDF
-  Locate the Einbauteilliste (embedded parts list) and/or Montageteilliste (mounting parts list)
-  on this sheet. For each table that is present, read every EBT-Nummer (from Einbauteilliste)
-  and every MT-Nummer (from Montageteilliste) row by row directly from the PDF.
-  Record the full list: TABLE_NUMBERS = [all EBT-Nummer and MT-Nummer read from this PDF]
+  Locate the Einbauteilliste (embedded parts list) and/or Montageteilliste (mounting parts list).
+  For each table present, read every EBT-Nummer / MT-Nummer row by row, exactly as printed.
+  TABLE_NUMBERS = [all EBT-Nummer and MT-Nummer read from this PDF]
 
 STEP 2 — READ VIEW LABELS FROM THIS PDF
-  Scan every view on the sheet: Ansicht, Wandansicht, Draufsicht, and every Schnitt section.
-  Collect every part label that looks like an EBT-Nummer or MT-Nummer (numeric codes assigned
-  to embedded or mounting parts). Skip rebar annotations (Pos numbers, "ø", "L=", "-M.E.").
-  For labels with a multiplier prefix (e.g. "2x00104") take the code after "x": "00104".
-  Record the full list: VIEW_LABELS = [all part label codes read from views in this PDF]
+  Scan every view: Ansicht, Wandansicht, Draufsicht, and every Schnitt section. Collect every
+  part-label code (numeric codes for embedded/mounting parts). Skip rebar annotations
+  (Pos numbers, "ø", "L=", "-M.E."). For a multiplier prefix (e.g. "2x00104") take the code after "x".
+  VIEW_LABELS = [every distinct part-label code found in the views]
 
-STEP 3 — CROSS-REFERENCE
-  A. Label not in table: any code in VIEW_LABELS that is NOT in TABLE_NUMBERS → flag as error.
-     State which label and which view it appeared in.
-  B. Table number not labeled: any EBT-Nummer or MT-Nummer in TABLE_NUMBERS that is NOT found
-     in any view after scanning the entire sheet → flag as error.
-     State which number and which table it came from.
+STEP 3 — CROSS-REFERENCE (verify by exact match before flagging)
+  A. Label not in table: a code in VIEW_LABELS whose exact digits match NO table row → flag.
+     State the label and the view it appeared in.
+  B. Table number not labelled: for EACH code in TABLE_NUMBERS, search the ENTIRE sheet text
+     (all views + any rotated/vertical block) for that EXACT digit sequence. Flag it ONLY if the
+     exact code occurs ZERO times anywhere outside the table itself.
+     MANDATORY re-check before flagging: scan the full text once more for the exact string. If the
+     exact code appears even once in a view, it is consistent — output NOTHING for it. Never infer
+     absence from the presence of a code that differs by one or more digits.
 
 RULES:
-  • Only flag codes confirmed present in your written lists with a clear mismatch.
+  • Only flag a code that still has NO counterpart after the exact-match re-check.
   • A code found in ANY present table is consistent — do NOT flag it.
   • If only one table is present, cross-reference against that table only.
   • Do NOT compare quantities or counts — existence only.
   • Do NOT flag rebar Pos numbers or bar annotations.
-  • Output an item ONLY for a code that still has no counterpart after cross-check.
-    If a suspected mismatch resolves, output NOTHING for that code.
+  • If a suspected mismatch resolves on re-check, output NOTHING for that code.
   • Never include verification steps, re-checking notes, or pass/fail verdicts in descriptions.
