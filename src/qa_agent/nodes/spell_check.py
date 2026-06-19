@@ -172,57 +172,69 @@ class _EbtTables(BaseModel):
 
 _EBT_EXTRACT_SYSTEM = """\
 You are a precise table-extraction tool for German precast-concrete documents.
-Read ONLY the text supplied to you. Never translate, normalize, reorder, infer,
-or invent any value — copy each cell exactly as printed and place every value in
-its correct column. Apply the SAME column logic identically to both documents.\
+Read each table column by column from the rendered grid. Never translate,
+normalize, reorder, infer, or invent any value — copy each cell exactly as
+printed and place every value under its correct column header. Read every column
+for every row, including narrow or mostly-empty columns. Apply the SAME column
+logic identically to both documents.\
 """
 
 _EBT_EXTRACT_PROMPT = """\
 TASK — Extract the Einbauteilliste (Built-in / embedded parts list per precast element)
-from BOTH inputs above and place every value in its correct column.
+from BOTH inputs above and place every value under its correct column.
 
 You are given two inputs, in this order:
   • DRAWING    — the structural drawing (first PDF document, or the text under "=== DRAWING TEXT ===")
   • STEEL LIST — the supplementary steel list (second PDF document, or the text under "=== STEEL LIST TEXT ===")
 
-When PDF documents are supplied, READ THE TABLE DIRECTLY FROM THE RENDERED TABLE —
-that is the source of truth; it shows the column grid, so use the visual columns
-to place each value. (A flat text extraction can drop or merge narrow cells.)
+When PDF documents are supplied, READ THE TABLE DIRECTLY FROM THE RENDERED GRID —
+that is the source of truth. Trace each column header straight down its column and
+read the cell that lines up with each row's EBT-Nummer. (A flat text extraction can
+drop a value or merge a narrow cell into its neighbour — do not rely on it.)
 
 Each input contains a table whose title contains "Einbauteilliste" (also labelled
-"Built-in parts list" / "je Fertigteil"). The table has these columns, in this
-fixed left-to-right order:
+"Built-in parts list" / "je Fertigteil"). The columns, in fixed left-to-right order:
 
   1. EBT-Nummer / BIP-Number                  — the part number code
   2. Hersteller / Manufacturer                — the manufacturer name
-  3. Bezeichnung / Description                — the full product description
-  4. Korrosionsschutz / Corrosion protection — a short protection code or blank
+  3. Bezeichnung / Description                — the product description text
+  4. Korrosionsschutz / Corrosion protection — a SHORT code (e.g. FV) or blank
   5. Menge (Stück) / Unit (Pcs)               — the quantity, an integer
 
 Return the rows of each table separately (drawing_rows / steel_list_rows),
 one object per DATA row, top-to-bottom.
 
+HOW TO READ THE KORROSIONSSCHUTZ COLUMN (the column that is most often mis-read):
+  • It is the 4th column, between Bezeichnung and Menge. Its header may wrap across
+    two lines (e.g. "Korrosionsschu / tz"). The cell holds a short code such as
+    "FV" (feuerverzinkt), "feuerverzinkt", "verzinkt", "KTL", "blank", "keine".
+  • This column is usually SPARSE — many rows are blank and only some rows carry a
+    code. A code can sit far to the right of a long description with wide blank
+    space before it; it STILL belongs to Korrosionsschutz.
+  • A short code appearing after/at the end of the description text (e.g.
+    "… JTA K38/17 L800   FV") is the Korrosionsschutz value — put it in
+    `korrosionsschutz`, NEVER append it to `bezeichnung` and never read it as Menge.
+  • Read this cell for EVERY row, in BOTH documents. Return an empty string ONLY
+    when that cell is genuinely empty in the rendered grid.
+
 STRICT RULES:
   • Copy every cell value EXACTLY as printed. Do not translate, abbreviate,
     reorder, round, normalize, or invent anything.
-  • Apply IDENTICAL column logic to both tables. The two tables describe the same
-    parts, so a value present in one column for a row in one document should be
-    read the same way in the other — do not capture a column in one document and
-    drop it in the other unless the text genuinely differs.
-  • Bezeichnung: capture the FULL description text as printed. If the manufacturer
-    name is printed as the first word of the description, KEEP it in `bezeichnung`
-    (and still also fill `hersteller` from the Manufacturer column). Do this the
-    SAME way for both documents.
-  • Korrosionsschutz: this column sits between Bezeichnung and Menge. Its header may
-    be split/wrapped across lines (e.g. "Korrosionsschu tz"). It holds a SHORT
-    corrosion-protection code such as "FV", "feuerverzinkt", "verzinkt", "blank",
-    "keine" — capture that code whenever it appears for a row. Return an empty
-    string ONLY when the cell is truly blank in that table.
-  • `qty` is the Menge / Unit column only. Never put the EBT number, a dimension,
-    or any other number there.
+  • Bezeichnung: capture the description text only. If the manufacturer name is
+    printed as the first word of the description, KEEP it in `bezeichnung` and also
+    fill `hersteller`. Do NOT let any trailing Korrosionsschutz code leak into it.
+  • `qty` is the Menge / Unit column only — never the EBT number or a dimension.
   • Skip header rows, section titles, project/metadata lines, subtotals and notes.
   • If a document has no Einbauteilliste table, set its *_found flag false and
     return an empty list for it.
+
+FINAL CONSISTENCY RE-CHECK (do this before returning):
+  The two tables describe the SAME parts. For every EBT-Nummer that appears in both
+  drawing_rows and steel_list_rows, compare its Korrosionsschutz and its Menge.
+  If they differ (e.g. one has "FV" and the other is empty), GO BACK and re-read
+  that exact cell in the rendered grid of BOTH documents — you most likely under-read
+  a sparse Korrosionsschutz cell. Correct it. Keep a difference only if, after
+  re-reading both grids, the cells truly differ.
 """
 
 
