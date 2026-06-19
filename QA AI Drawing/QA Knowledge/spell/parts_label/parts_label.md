@@ -48,21 +48,29 @@ STEP 2 — READ VIEW LABELS FROM THIS PDF
   (Pos numbers, "ø", "L=", "-M.E."). For a multiplier prefix (e.g. "2x00104") take the code after "x".
   VIEW_LABELS = [every distinct part-label code found in the views]
 
-STEP 3 — CROSS-REFERENCE (verify by exact match before flagging)
-  A. Label not in table: a code in VIEW_LABELS whose exact digits match NO table row → flag.
-     State the label and the view it appeared in.
-  B. Table number not labelled: for EACH code in TABLE_NUMBERS, search the ENTIRE sheet text
-     (all views + any rotated/vertical block) for that EXACT digit sequence. Flag it ONLY if the
-     exact code occurs ZERO times anywhere outside the table itself.
-     MANDATORY re-check before flagging: scan the full text once more for the exact string. If the
-     exact code appears even once in a view, it is consistent — output NOTHING for it. Never infer
-     absence from the presence of a code that differs by one or more digits.
+STEP 3 — CROSS-REFERENCE (reason SILENTLY; emit only confirmed problems)
+  A. Label not in table: a code in VIEW_LABELS whose exact digits match NO table row.
+  B. Table number not labelled: for EACH code in TABLE_NUMBERS, search the ENTIRE sheet
+     (all views + any rotated/vertical block) for that EXACT digit sequence. It is a problem
+     ONLY if the exact code occurs ZERO times anywhere outside the table itself.
+     Re-check before deciding: if the exact code appears even once in a view, it is consistent —
+     it is NOT a problem. Never infer absence from a code that differs by one or more digits.
+
+  Do ALL of this reasoning silently. A code that exists in a table AND is labelled in ≥1 view
+  (or vice-versa) is CONSISTENT — it is not a finding, so produce NOTHING for it.
+
+OUTPUT — issues[] contains ONLY confirmed problems, nothing else:
+  • One issues[] entry = ONE code and its ONE problem, in ≤ 20 words. Examples:
+      "EBT 07162 is in the Einbauteilliste but labelled in no view."
+      "Label 04210 appears in Schnitt 1-1 but is in no schedule table."
+  • If every code is consistent, issues[] MUST be EMPTY (this check then PASSES).
+  • NEVER put any of the following in a description: a scan summary, per-code narration,
+    the words "consistent" / "no … issue found" / "Flagging:" / "after full scan",
+    reasoning, how you verified, or text about codes that turned out fine.
+  • Put any reasoning/among-codes notes ONLY in the parts_label debug note — never in issues[].
 
 RULES:
-  • Only flag a code that still has NO counterpart after the exact-match re-check.
   • A code found in ANY present table is consistent — do NOT flag it.
   • If only one table is present, cross-reference against that table only.
   • Do NOT compare quantities or counts — existence only.
   • Do NOT flag rebar Pos numbers or bar annotations.
-  • If a suspected mismatch resolves on re-check, output NOTHING for that code.
-  • Never include verification steps, re-checking notes, or pass/fail verdicts in descriptions.

@@ -30,7 +30,13 @@ _PASS_ITEM_RE = re.compile(
     r"|\bfalse\s+positive\b"
     r"|\bactually\s+(?:is\s+)?present\b"
     r"|\bnot\s+an?\s+error\b"
-    r"|\bis\s+present\s+in\s+(?:the\s+)?(?:einbauteilliste|montageteilliste)\b",
+    r"|\bis\s+present\s+in\s+(?:the\s+)?(?:einbauteilliste|montageteilliste)\b"
+    # Reasoning/verification narrative that concludes there is no problem:
+    r"|\bno\s+\w+\s+(?:issue|error|violation|mismatch|problem)s?\s+found\b"   # "no parts_label issue found"
+    r"|[-–—]\s*consistent\b"                                                   # "… — consistent."
+    r"|\b(?:is|are)\s+consistent\b"
+    r"|\bafter\s+(?:a\s+)?(?:full|complete)\s+scan\b"
+    r"|\band\s+(?:do(?:es)?\s+)?(?:appear|labell?ed)\b.{0,40}\bin\s+the\s+views\b",  # "… appear in the views"
     re.IGNORECASE | re.MULTILINE,
 )
 
