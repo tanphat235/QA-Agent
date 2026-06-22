@@ -32,32 +32,60 @@ logger = logging.getLogger(__name__)
 
 _SYSTEM_TEXT = """\
 You are a senior structural QA reviewer for precast concrete wall drawings.
-You are given the drawing's EXTRACTED TEXT and a block of PRE-EXTRACTED VALUES
-(parsed deterministically from the drawing). Apply the QA rules exactly as
-written. You may CALCULATE and COMPARE values to decide a rule. Report ONLY
-problems you can directly read from the text or compute from those values.
 
-CRITICAL:
-  • The "PRE-EXTRACTED VALUES" block is the source of truth for any
-    calculation/comparison — use those numbers, not your own estimate.
-  • Never invent or assume a value. If a value a rule needs is absent from both
-    the extracted text and the values block, add that rule's key to not_found
-    instead of guessing or silently passing.\
+CRITICAL — READ FROM EXTRACTED TEXT ONLY:
+  Every value you use (numbers, labels, part codes, Pos numbers, dimensions, names) MUST be read
+  directly from the extracted drawing text provided below. Never use memorized data, training
+  knowledge, or information from any previous run or previously seen drawing.
+  If a piece of text in the extraction appears fragmented, garbled, or unclear, do NOT reconstruct
+  or infer its intended value — report it as unreadable and add the check to not_found instead.
+  Never "imply", "infer", or "reconstruct" a value. If you cannot read it directly, it is not_found.
+
+CRITICAL — CALCULATION FROM PRE-EXTRACTED VALUES:
+  A block of PRE-EXTRACTED VALUES (deterministically parsed) is provided below the drawing text.
+  For any arithmetic comparison (sums, ratios, limits) use those numbers — they are the source of
+  truth. If a value a rule needs is absent from both the extracted text and the values block, add
+  that rule's key to not_found instead of guessing or silently passing.
+
+CRITICAL — NEVER SILENTLY PASS:
+  If any information required by a check is missing, not visible, or not readable in the drawing,
+  you MUST add that check key to not_found. Do NOT assume a check passes just because you cannot
+  find the relevant elements. Missing prerequisite = not_found, not pass.
+
+German terminology:
+  Schnitt X-X = section/cross-section | Ansicht = elevation/formwork view | Wandansicht = wall elevation
+  Bewehrung = reinforcement/rebar | Stabliste = bar list/rebar schedule | Mattenstahlliste = mesh rebar list
+  Einbauteilliste = embedded parts list | Montageteilliste = assembly parts list (per element)
+  Pos = bar position/mark | Gesamt = total | Stahl = steel | Maßstab / M 1:XX = scale
+  Draufsicht = top/plan view | Matten-Schneideskizze = mesh cut sketch | Detail = detail view\
 """
 
 _SYSTEM_VISION = """\
 You are a senior structural QA reviewer for precast concrete wall drawings.
-Inspect the PDF drawing visually and technically. You are also given the
-drawing's EXTRACTED TEXT and a block of PRE-EXTRACTED VALUES as supplementary
-aids. Apply the QA rules exactly as written. Report ONLY problems you can
-directly observe in the drawing or compute from the pre-extracted values.
+Inspect the PDF drawing visually and technically.
 
-CRITICAL:
-  • Read values from the RENDERED PDF — the extracted text may lose cells or
-    mis-align columns. Use the text block only as a cross-reference.
-  • The "PRE-EXTRACTED VALUES" block is the source of truth for numerical
-    calculations. Never invent or assume a value. If a value is absent from
-    both the drawing and the values block, add the rule's key to not_found.\
+CRITICAL — PREFER THE RENDERED PDF:
+  Read all values (dimensions, labels, table cells, annotations) directly from the rendered PDF.
+  Extracted text is provided as a supplementary cross-reference only — pdfplumber may drop or
+  mis-align values from graphical views, narrow table columns, or rotated text. Always trust what
+  you see in the rendered drawing over the extracted text.
+
+CRITICAL — CALCULATION FROM PRE-EXTRACTED VALUES:
+  A block of PRE-EXTRACTED VALUES (deterministically parsed) is also provided. For arithmetic
+  checks (sums, ratios, limits) prefer those numbers as the source of truth for calculations.
+  If a value is absent from both the PDF and the values block, add that rule's key to not_found.
+
+CRITICAL — NEVER SILENTLY PASS:
+  If any information required by a check is missing, not visible, or not readable in the drawing,
+  you MUST add that check key to not_found. Do NOT assume a check passes just because you cannot
+  find the relevant elements. Missing prerequisite = not_found, not pass.
+
+German terminology:
+  Schnitt X-X = section/cross-section | Ansicht = elevation/formwork view | Wandansicht = wall elevation
+  Bewehrung = reinforcement/rebar | Stabliste = bar list/rebar schedule | Mattenstahlliste = mesh rebar list
+  Einbauteilliste = embedded parts list | Montageteilliste = assembly parts list (per element)
+  Pos = bar position/mark | Gesamt = total | Stahl = steel | Maßstab / M 1:XX = scale
+  Draufsicht = top/plan view | Matten-Schneideskizze = mesh cut sketch | Detail = detail view\
 """
 
 # Appended after the rules so the model knows HOW to do arithmetic/comparison.
@@ -127,8 +155,16 @@ class _UsageCallback(BaseCallbackHandler):
 
 
 def _format_extracted_facts(state: GraphState) -> str:
-    """Readable block of the deterministically pre-extracted values, so a user
-    rule can be evaluated by calculation/comparison rather than visual guessing."""
+    """Build the supplementary data block passed to every user-defined check.
+
+    Contains three layers, mirroring what built-in checks have access to:
+      1. PRE-EXTRACTED VALUES  — deterministic key-value pairs from title block,
+                                 schedule totals, EBT table rows, overview plan rows.
+      2. STEEL LIST TEXT       — full pdfplumber text of the supplementary steel-list
+                                 file (if uploaded), so checks can read any cell.
+      3. OVERVIEW PLAN TEXT    — full pdfplumber text of the overview plan file
+                                 (if uploaded), so checks can read any row or column.
+    """
     pc = state.get("pdf_content") or {}
     tb = pc.get("title_block") or {}
     lines: list[str] = [
@@ -165,7 +201,7 @@ def _format_extracted_facts(state: GraphState) -> str:
 
     ebt = pc.get("einbauteilliste_items") or []
     if ebt:
-        lines.append("[Einbauteilliste rows]")
+        lines.append("[Einbauteilliste (drawing) rows]")
         for it in ebt:
             lines.append(
                 f"  EBT {it.get('ebt_nr')}: hersteller={it.get('hersteller')!r} "
@@ -175,7 +211,7 @@ def _format_extracted_facts(state: GraphState) -> str:
 
     sl = state.get("steel_list_data") or {}
     if sl:
-        lines.append("[Steel List file]")
+        lines.append("[Steel List — structured values]")
         add("Gesamtmasse (kg)", sl.get("gesamtmasse"))
         add("Stabliste total (kg)", sl.get("stabliste_total"))
         add("Mattenstahlliste total (kg)", sl.get("mattenstahlliste_total"))
@@ -187,14 +223,26 @@ def _format_extracted_facts(state: GraphState) -> str:
             )
 
     op = state.get("overview_plan_data") or {}
-    rows = op.get("element_rows") if isinstance(op, dict) else None
-    if rows:
-        lines.append("[Overview plan rows]")
-        for r in rows:
+    op_rows = op.get("element_rows") if isinstance(op, dict) else None
+    if op_rows:
+        lines.append("[Overview plan — structured rows]")
+        for r in op_rows:
             lines.append(
                 f"  code={r.get('code')} volume={r.get('volume')} weight={r.get('weight')} "
                 f"qty={r.get('quantity')} drawing_no={r.get('drawing_no')}"
             )
+
+    # ── Full pdfplumber text of supplementary files ───────────────────────────
+    # Appended so checks that need to read any cell or row have the raw text.
+    sl_raw = (sl.get("raw_text") or "").strip() if sl else ""
+    if sl_raw:
+        lines.append("\n=== STEEL LIST TEXT (pdfplumber extraction) ===")
+        lines.append(sl_raw)
+
+    op_raw = (op.get("raw_text") or "").strip() if isinstance(op, dict) else ""
+    if op_raw:
+        lines.append("\n=== OVERVIEW PLAN TEXT (pdfplumber extraction) ===")
+        lines.append(op_raw)
 
     return "\n".join(lines)
 
@@ -223,29 +271,45 @@ def _invoke_group(
     pdf_data: str | None,
     use_vision: bool,
 ) -> _UserAiResult:
-    """Call the LLM for one routing group (text-only or vision)."""
+    """Call the LLM for one routing group (text-only or vision).
+
+    Vision group  → claude-sonnet-4-6, PDF + formatted text + facts
+    Text-only group → claude-haiku-4-5, formatted text + facts
+    Both groups use production-grade system prompts identical in quality to
+    built-in checks (NEVER SILENTLY PASS, German terminology, etc.).
+    """
     task = _build_task(keys, meta, domain)
 
     if use_vision:
         model = "claude-sonnet-4-6"
         system = _SYSTEM_VISION
         human_content: list[dict] = []
+        # PDF first — the model reads the rendered drawing as the primary source.
         if pdf_data:
             human_content.append({
                 "type": "document",
                 "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data},
                 "cache_control": {"type": "ephemeral"},
             })
+        # Extracted text as supplementary cross-reference.
         if formatted:
             human_content.append({"type": "text", "text": formatted})
+        # Pre-extracted facts block (deterministic values for calculations).
+        human_content.append({"type": "text", "text": facts})
     else:
         model = "claude-haiku-4-5"
         system = _SYSTEM_TEXT
         human_content = []
+        # Extracted text — primary source for text-only checks.
         if formatted:
-            human_content.append({"type": "text", "text": formatted})
+            human_content.append({
+                "type": "text",
+                "text": formatted,
+                "cache_control": {"type": "ephemeral"},
+            })
+        # Pre-extracted facts block (deterministic values for calculations).
+        human_content.append({"type": "text", "text": facts})
 
-    human_content.append({"type": "text", "text": facts})
     human_content.append({"type": "text", "text": task})
 
     label = f"user_ai_{domain}_{'vision' if use_vision else 'text'}"
@@ -254,7 +318,7 @@ def _invoke_group(
     llm = ChatAnthropic(  # type: ignore[call-arg]
         model=model,  # type: ignore[call-arg]
         temperature=0,  # type: ignore[call-arg]
-        max_tokens=4096,  # type: ignore[call-arg]
+        max_tokens=8192,  # type: ignore[call-arg]
     ).with_structured_output(_UserAiResult).with_retry(stop_after_attempt=2)
 
     return llm.invoke(  # type: ignore[return-value]
