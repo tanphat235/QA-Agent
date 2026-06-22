@@ -62,6 +62,18 @@ def get_check_meta(domain: str, check_key: str) -> tuple[str, str, str]:
 
 
 @lru_cache(maxsize=None)
+def get_check_requires_vision(domain: str, check_key: str) -> bool:
+    """Return True if the check's .md declares '## Requires Vision: true'.
+
+    Defaults to False — text-only checks run on the cheaper Haiku model.
+    Vision checks receive the rendered PDF document and run on Sonnet.
+    """
+    md_path = _KNOWLEDGE_DIR / domain / check_key / f"{check_key}.md"
+    val = _read_md_section(md_path, "Requires Vision").strip().lower()
+    return val in ("true", "yes", "1")
+
+
+@lru_cache(maxsize=None)
 def get_node_images(domain: str) -> list[dict]:
     """
     Load all reference images for a domain from the knowledge filesystem.

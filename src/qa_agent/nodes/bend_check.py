@@ -12,29 +12,26 @@ from qa_agent.nodes.user_ai_checks import run_user_ai_checks
 
 logger = logging.getLogger(__name__)
 
-# Must be byte-for-byte identical across all nodes so Anthropic can share the cached PDF prefix.
+# All bend checks operate on schedule/table text — no vision required.
+# Input: pdfplumber extracted text only. Model: claude-haiku-4-5 (cheap, fast).
 _COMMON_SYSTEM = """\
-You are a senior structural QA reviewer for precast concrete wall drawings. Inspect the PDF drawing visually and technically.
+You are a senior structural QA reviewer for precast concrete wall drawings.
 
 CRITICAL — READ FROM EXTRACTED TEXT ONLY:
-  Every value you use (numbers, labels, part codes, Pos numbers, dimensions, names) MUST be read
+  Every value you use (numbers, Pos numbers, bar dimensions, mass totals) MUST be read
   directly from the extracted drawing text provided below. Never use memorized data, training
   knowledge, or information from any previous run or previously seen drawing.
-  If a piece of text in the extraction appears fragmented, garbled, or unclear, do NOT reconstruct
-  or infer its intended value — report it as unreadable and add the check to not_found instead.
+  If a piece of text appears fragmented, garbled, or unclear, do NOT reconstruct or infer its
+  intended value — report it as unreadable and add the check to not_found instead.
   Never "imply", "infer", or "reconstruct" a value. If you cannot read it directly, it is not_found.
 
 CRITICAL — NEVER SILENTLY PASS:
-  If any information required by a check is missing, not visible, or not readable in the drawing,
-  you MUST add that check key to not_found. Do NOT assume a check passes just because you cannot
-  find the relevant elements. Missing prerequisite = not_found, not pass.
+  If any information required by a check is missing or not readable in the extracted text,
+  you MUST add that check key to not_found. Missing prerequisite = not_found, not pass.
 
 German terminology:
-  Schnitt X-X = section/cross-section | Ansicht = elevation/formwork view | Wandansicht = wall elevation
-  Bewehrung = reinforcement/rebar | Stabliste = bar list/rebar schedule | Mattenstahlliste = mesh rebar list
-  Einbauteilliste = embedded parts list | Montageteilliste = assembly parts list (per element)
-  Pos = bar position/mark | Gesamt = total | Stahl = steel | Maßstab / M 1:XX = scale
-  Draufsicht = top/plan view | Matten-Schneideskizze = mesh cut sketch | Detail = detail view\
+  Stabliste = bar schedule | Mattenstahlliste = mesh rebar schedule | Pos = bar position mark
+  Gesamt / Gesamtmasse = total / total mass | Matten-Schneideskizze = mesh cut sketch\
 """
 
 _TASK_INTRO = """\
@@ -119,8 +116,9 @@ def bend_check(state: GraphState) -> dict:
     formatted: str = (state.get("pdf_content") or {}).get("formatted") or ""
     enabled_sub = (state.get("enabled_sub_checks") or {}).get("bend")
 
+    # All bend checks read from schedule/table text — no vision needed.
     llm = ChatAnthropic(  # type: ignore[call-arg]
-        model="claude-sonnet-4-6",  # type: ignore[call-arg]
+        model="claude-haiku-4-5",  # type: ignore[call-arg]
         temperature=0,  # type: ignore[call-arg]
         max_tokens=4096,  # type: ignore[call-arg]
     ).with_structured_output(_BendResult).with_retry(stop_after_attempt=2)

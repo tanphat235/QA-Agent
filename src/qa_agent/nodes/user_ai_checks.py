@@ -2,6 +2,16 @@
 
 User-created .md rules (not in SHIPPED_BUILTIN_KEYS) are run here and merged
 into the domain's issue list (spell / bend / rebar).
+
+Model routing
+─────────────
+Text-only checks (requires_vision=false, the default):
+  • Input  : extracted text + pre-extracted facts block
+  • Model  : claude-haiku-4-5  (cheap, fast)
+
+Vision checks (requires_vision=true in the check's .md):
+  • Input  : rendered PDF document + extracted text + facts block
+  • Model  : claude-sonnet-4-6  (handles visual layout / table reading)
 """
 from __future__ import annotations
 
@@ -15,23 +25,39 @@ from langchain_core.outputs import LLMResult
 
 from qa_agent.state import GraphState
 from qa_agent import checks_registry as registry
-from qa_agent.rag.retriever import get_check_prompt, get_check_meta
+from qa_agent.rag.retriever import get_check_prompt, get_check_meta, get_check_requires_vision
 from qa_agent.nodes.issue_filter import OUTPUT_RULES, accept_finding, build_check_issues
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM = """\
+_SYSTEM_TEXT = """\
 You are a senior structural QA reviewer for precast concrete wall drawings.
-Inspect the drawing (PDF document + the extracted text) and apply the QA rules
-exactly as written. You may CALCULATE and COMPARE values to decide a rule.
-Report ONLY problems you can directly observe or compute.
+You are given the drawing's EXTRACTED TEXT and a block of PRE-EXTRACTED VALUES
+(parsed deterministically from the drawing). Apply the QA rules exactly as
+written. You may CALCULATE and COMPARE values to decide a rule. Report ONLY
+problems you can directly read from the text or compute from those values.
 
 CRITICAL:
-  • Prefer the "PRE-EXTRACTED VALUES" block — those numbers were parsed
-    deterministically and are the source of truth for any calculation/comparison.
-    Use the rendered drawing only to locate or confirm things not listed there.
-  • Never invent or assume a value. If a value a rule needs is absent/unreadable,
-    add that rule's key to not_found instead of guessing or silently passing.\
+  • The "PRE-EXTRACTED VALUES" block is the source of truth for any
+    calculation/comparison — use those numbers, not your own estimate.
+  • Never invent or assume a value. If a value a rule needs is absent from both
+    the extracted text and the values block, add that rule's key to not_found
+    instead of guessing or silently passing.\
+"""
+
+_SYSTEM_VISION = """\
+You are a senior structural QA reviewer for precast concrete wall drawings.
+Inspect the PDF drawing visually and technically. You are also given the
+drawing's EXTRACTED TEXT and a block of PRE-EXTRACTED VALUES as supplementary
+aids. Apply the QA rules exactly as written. Report ONLY problems you can
+directly observe in the drawing or compute from the pre-extracted values.
+
+CRITICAL:
+  • Read values from the RENDERED PDF — the extracted text may lose cells or
+    mis-align columns. Use the text block only as a cross-reference.
+  • The "PRE-EXTRACTED VALUES" block is the source of truth for numerical
+    calculations. Never invent or assume a value. If a value is absent from
+    both the drawing and the values block, add the rule's key to not_found.\
 """
 
 # Appended after the rules so the model knows HOW to do arithmetic/comparison.
@@ -173,8 +199,77 @@ def _format_extracted_facts(state: GraphState) -> str:
     return "\n".join(lines)
 
 
+def _build_task(keys: list[str], meta: dict, domain: str) -> str:
+    blocks = []
+    for k in keys:
+        name = meta[k][0]
+        prompt = get_check_prompt(domain, k) or ""
+        blocks.append(f"CHECK — {name} ({k})\n{prompt.strip()}")
+    check_keys = " | ".join(f'"{k}"' for k in keys)
+    return (
+        "Apply each of the following QA rules to the drawing.\n\n"
+        + "\n\n".join(blocks)
+        + _CALC_GUIDANCE
+        + _OUTRO_TPL.format(check_keys=check_keys)
+    )
+
+
+def _invoke_group(
+    keys: list[str],
+    meta: dict,
+    domain: str,
+    facts: str,
+    formatted: str,
+    pdf_data: str | None,
+    use_vision: bool,
+) -> _UserAiResult:
+    """Call the LLM for one routing group (text-only or vision)."""
+    task = _build_task(keys, meta, domain)
+
+    if use_vision:
+        model = "claude-sonnet-4-6"
+        system = _SYSTEM_VISION
+        human_content: list[dict] = []
+        if pdf_data:
+            human_content.append({
+                "type": "document",
+                "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data},
+                "cache_control": {"type": "ephemeral"},
+            })
+        if formatted:
+            human_content.append({"type": "text", "text": formatted})
+    else:
+        model = "claude-haiku-4-5"
+        system = _SYSTEM_TEXT
+        human_content = []
+        if formatted:
+            human_content.append({"type": "text", "text": formatted})
+
+    human_content.append({"type": "text", "text": facts})
+    human_content.append({"type": "text", "text": task})
+
+    label = f"user_ai_{domain}_{'vision' if use_vision else 'text'}"
+    print(f"[user_ai_checks][{domain}] {'vision' if use_vision else 'text'} group → {model}: {keys}")
+
+    llm = ChatAnthropic(  # type: ignore[call-arg]
+        model=model,  # type: ignore[call-arg]
+        temperature=0,  # type: ignore[call-arg]
+        max_tokens=4096,  # type: ignore[call-arg]
+    ).with_structured_output(_UserAiResult).with_retry(stop_after_attempt=2)
+
+    return llm.invoke(  # type: ignore[return-value]
+        [SystemMessage(content=system), HumanMessage(content=human_content)],
+        config={"callbacks": [_UsageCallback(label)]},
+    )
+
+
 def run_user_ai_checks(domain: str, state: GraphState) -> list:
-    """Run enabled user-defined AI checks for *domain*; return issue dicts."""
+    """Run enabled user-defined AI checks for *domain*; return issue dicts.
+
+    Checks are split by their ``## Requires Vision`` flag:
+      • false (default) → claude-haiku-4-5, text + facts only
+      • true            → claude-sonnet-4-6, PDF document + text + facts
+    """
     enabled_sub = (state.get("enabled_sub_checks") or {}).get(domain)
     all_keys = registry.list_user_ai_check_keys(domain)
     active = [k for k in all_keys if enabled_sub is None or k in (enabled_sub or [])]
@@ -187,61 +282,39 @@ def run_user_ai_checks(domain: str, state: GraphState) -> list:
     pdf_content = state.get("pdf_content") or {}
     formatted: str = pdf_content.get("formatted") or ""
     pdf_data: str | None = state.get("pdf_data")  # type: ignore[assignment]
-
-    blocks = []
-    for k in active:
-        name = meta[k][0]
-        prompt = get_check_prompt(domain, k) or ""
-        blocks.append(f"CHECK — {name} ({k})\n{prompt.strip()}")
-    check_keys = " | ".join(f'"{k}"' for k in active)
-    task = (
-        "Apply each of the following QA rules to the drawing.\n\n"
-        + "\n\n".join(blocks)
-        + _CALC_GUIDANCE
-        + _OUTRO_TPL.format(check_keys=check_keys)
-    )
-
     facts = _format_extracted_facts(state)
 
-    human_content: list[dict] = []
-    if pdf_data:
-        human_content.append({
-            "type": "document",
-            "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data},
-            "cache_control": {"type": "ephemeral"},
-        })
-    if formatted:
-        human_content.append({"type": "text", "text": formatted})
-    human_content.append({"type": "text", "text": facts})
-    human_content.append({"type": "text", "text": task})
+    # Route checks by vision requirement
+    text_keys  = [k for k in active if not get_check_requires_vision(domain, k)]
+    vision_keys = [k for k in active if get_check_requires_vision(domain, k)]
 
-    llm = ChatAnthropic(  # type: ignore[call-arg]
-        model="claude-sonnet-4-6",  # type: ignore[call-arg]
-        temperature=0,  # type: ignore[call-arg]
-        max_tokens=4096,  # type: ignore[call-arg]
-    ).with_structured_output(_UserAiResult).with_retry(stop_after_attempt=2)
+    if vision_keys and not pdf_data:
+        # No PDF available — downgrade vision checks to text-only with a warning
+        print(
+            f"[user_ai_checks][{domain}] WARNING: {vision_keys} require vision but "
+            f"pdf_data is absent — falling back to text-only (claude-haiku-4-5)"
+        )
+        text_keys  = active
+        vision_keys = []
 
-    result: _UserAiResult = llm.invoke(  # type: ignore[assignment]
-        [SystemMessage(content=_SYSTEM), HumanMessage(content=human_content)],
-        config={"callbacks": [_UsageCallback(f"user_ai_{domain}")]},
-    )
-    print(f"[user_ai_checks][{domain}] raw items from LLM: {len(result.issues)}")
-
+    # Collect all raw issues and not_found across both groups
     by_check: dict[str, list[_UserAiIssue]] = {k: [] for k in active}
-    for item in result.issues:
-        if item.check not in by_check:
-            continue
-        if not accept_finding(item.description, item.confidence):
-            print(f"[user_ai_checks][{domain}] dropped non-violation: {item.description[:80]!r}")
-            continue
-        by_check[item.check].append(item)
+    not_found_set: set[str] = set()
 
-    not_found_set = {k for k in (result.not_found or []) if k in by_check}
+    for group_keys, use_vision in ((text_keys, False), (vision_keys, True)):
+        if not group_keys:
+            continue
+        result = _invoke_group(group_keys, meta, domain, facts, formatted, pdf_data, use_vision)
+        print(f"[user_ai_checks][{domain}] {'vision' if use_vision else 'text'} raw items: {len(result.issues)}")
 
-    return build_check_issues(
-        domain,
-        meta,
-        by_check,
-        not_found_set,
-        active,
-    )
+        for item in result.issues:
+            if item.check not in by_check:
+                continue
+            if not accept_finding(item.description, item.confidence):
+                print(f"[user_ai_checks][{domain}] dropped non-violation: {item.description[:80]!r}")
+                continue
+            by_check[item.check].append(item)
+
+        not_found_set |= {k for k in (result.not_found or []) if k in by_check}
+
+    return build_check_issues(domain, meta, by_check, not_found_set, active)

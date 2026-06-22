@@ -13,6 +13,10 @@ PASS — all spacer/clamp widths match wall_width – 2×Cv + 2×Ø_spacer.
 
 NOT FOUND — wall thickness, Cv, or spacer wire diameter not visible.
 
+## Requires Vision
+
+true
+
 ## Description
 
 check the width of the Spacers/Clamps reinforcement.

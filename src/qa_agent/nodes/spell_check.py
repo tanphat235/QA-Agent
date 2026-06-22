@@ -380,8 +380,9 @@ def spell_check(state: GraphState) -> dict:
     print(f"[lastausgleich] ebt_table_found={la_ebt_found}  rd_max_qty={la_rd_qty}  text_present={la_text_present}")
 
     # ── LLM call for the other spell checks ─────────────────────────────────
+    # Text-only input (no PDF/vision) — Haiku is sufficient.
     llm = ChatAnthropic(  # type: ignore[call-arg]
-        model="claude-sonnet-4-6",  # type: ignore[call-arg]
+        model="claude-haiku-4-5",  # type: ignore[call-arg]
         temperature=0,  # type: ignore[call-arg]
         max_tokens=4096,  # type: ignore[call-arg]
     ).with_structured_output(_SpellResult).with_retry(stop_after_attempt=2)

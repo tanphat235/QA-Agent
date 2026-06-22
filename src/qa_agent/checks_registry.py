@@ -65,6 +65,7 @@ def _invalidate_caches() -> None:
     """Check prompts/meta are lru_cached — drop them so edits take effect live."""
     retriever.get_check_prompt.cache_clear()
     retriever.get_check_meta.cache_clear()
+    retriever.get_check_requires_vision.cache_clear()
 
 
 def read_check(domain: str, key: str) -> dict | None:
@@ -72,16 +73,18 @@ def read_check(domain: str, key: str) -> dict | None:
     if not path.exists():
         return None
     builtin = is_builtin(domain, key)
+    rv_raw = _read_md_section(path, "Requires Vision").strip().lower()
     return {
-        "domain":        domain,
-        "key":           key,
-        "display_name":  _read_md_section(path, "Display Name") or key.replace("_", " ").title(),
-        "pass":          _read_md_section(path, "Pass") or "PASS",
-        "not_found":     _read_md_section(path, "Not Found") or "NOT FOUND",
-        "description":   _read_md_section(path, "Description"),
-        "prompt":        _read_md_section(path, "Check Prompt"),
-        "builtin":       builtin,
-        "user_defined":  not builtin,
+        "domain":           domain,
+        "key":              key,
+        "display_name":     _read_md_section(path, "Display Name") or key.replace("_", " ").title(),
+        "pass":             _read_md_section(path, "Pass") or "PASS",
+        "not_found":        _read_md_section(path, "Not Found") or "NOT FOUND",
+        "description":      _read_md_section(path, "Description"),
+        "prompt":           _read_md_section(path, "Check Prompt"),
+        "requires_vision":  rv_raw in ("true", "yes", "1"),
+        "builtin":          builtin,
+        "user_defined":     not builtin,
     }
 
 
@@ -116,12 +119,14 @@ def domain_title(domain: str) -> str:
 
 
 def _render_md(check: dict) -> str:
+    rv = "true" if check.get("requires_vision") else "false"
     return (
         f"# {check['display_name']}\n\n"
         f"> **Domain:** {check['domain']} | **Check key:** `{check['key']}`\n\n"
         f"## Display Name\n\n{check['display_name']}\n\n"
         f"## Pass\n\n{check['pass']}\n\n"
         f"## Not Found\n\n{check['not_found']}\n\n"
+        f"## Requires Vision\n\n{rv}\n\n"
         f"## Description\n\n{check.get('description', '')}\n\n"
         f"## Check Prompt\n\n{check['prompt']}\n"
     )
@@ -130,6 +135,7 @@ def _render_md(check: dict) -> str:
 def save_check(
     *, domain: str, key: str | None, display_name: str, description: str,
     prompt: str, pass_text: str, not_found_text: str,
+    requires_vision: bool = False,
 ) -> dict:
     """Create or overwrite a check .md. Built-in checks may be edited in place;
     new checks can be created in any domain. Returns the saved check."""
@@ -152,15 +158,16 @@ def save_check(
 
     effective_prompt = (prompt or description or "").strip()
     check = {
-        "domain":       domain,
-        "key":          key,
-        "display_name": (display_name or key.replace("_", " ").title()).strip(),
-        "description":  (description or "").strip(),
-        "prompt":       effective_prompt,
-        "pass":         (pass_text or "PASS").strip(),
-        "not_found":    (not_found_text or "NOT FOUND").strip(),
-        "builtin":      is_builtin(domain, key),
-        "user_defined": not is_builtin(domain, key),
+        "domain":           domain,
+        "key":              key,
+        "display_name":     (display_name or key.replace("_", " ").title()).strip(),
+        "description":      (description or "").strip(),
+        "prompt":           effective_prompt,
+        "pass":             (pass_text or "PASS").strip(),
+        "not_found":        (not_found_text or "NOT FOUND").strip(),
+        "requires_vision":  bool(requires_vision),
+        "builtin":          is_builtin(domain, key),
+        "user_defined":     not is_builtin(domain, key),
     }
 
     path = _md_path(domain, key)

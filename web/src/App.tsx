@@ -54,6 +54,7 @@ interface CheckDef {
   not_found: string
   builtin: boolean
   user_defined?: boolean
+  requires_vision?: boolean
 }
 interface CheckDomain {
   key: string
@@ -528,6 +529,7 @@ export default function App() {
           domain: draft.domain, key: draft.builtin ? draft.key : (draft.key || null),
           display_name: draft.display_name, description: draft.description,
           prompt: promptToSend, pass_text: draft.pass, not_found_text: draft.not_found,
+          requires_vision: draft.requires_vision ?? false,
         }),
       })
       if (!res.ok) {
@@ -555,6 +557,7 @@ export default function App() {
     setCheckDrafts(prev => ({ ...prev, [id]: {
       domain, key: '', display_name: '', description: '',
       prompt: '', pass: 'PASS', not_found: 'NOT FOUND', builtin: false, user_defined: true,
+      requires_vision: false,
     } }))
     setExpandedChecks(prev => new Set([...prev, id]))
   }
@@ -630,6 +633,49 @@ export default function App() {
             This is a built-in computed check — its logic is in code, so there is no editable prompt.
           </p>
         ))}
+        {(() => {
+          const isVision = draft.requires_vision ?? false
+          const borderCls = isVision ? 'border-amber-200 bg-amber-50' : 'border-gray-100 bg-gray-50'
+          const labelCls  = isVision ? 'text-amber-800' : 'text-gray-600'
+          const noteCls   = isVision ? 'text-amber-700' : 'text-gray-500'
+          return (
+            <div className={`rounded-lg border p-3 space-y-2 ${borderCls}`}>
+              <label className={`flex items-center gap-2.5 select-none ${isUserDefined ? 'cursor-pointer' : 'cursor-default'}`}>
+                <input
+                  type="checkbox"
+                  checked={isVision}
+                  disabled={!isUserDefined}
+                  onChange={isUserDefined ? e => updateDraft(id, { requires_vision: e.target.checked }) : undefined}
+                  className={`w-3.5 h-3.5 rounded ${isUserDefined ? 'accent-amber-500 cursor-pointer' : 'cursor-default opacity-60'}`}
+                />
+                <span className={`text-[11px] font-bold ${labelCls}`}>
+                  Requires Vision
+                  {isVision
+                    ? <span className="ml-1.5 font-normal">(uses smarter model · higher cost)</span>
+                    : <span className="ml-1.5 font-normal">(text-only · cheaper &amp; faster)</span>
+                  }
+                </span>
+                {!isUserDefined && (
+                  <span className="ml-auto text-[10px] text-gray-400">read-only for built-in checks</span>
+                )}
+              </label>
+              <p className={`text-[10px] leading-relaxed pl-[22px] ${noteCls}`}>
+                {isVision
+                  ? <>
+                      <span className="font-semibold">Enabled</span> — the AI receives the full rendered PDF and uses{' '}
+                      <span className="font-mono">claude-sonnet-4-6</span> to read values directly from graphical views
+                      (cross-sections, dimension lines, narrow table columns that text extraction may drop).
+                    </>
+                  : <>
+                      <span className="font-semibold">Disabled</span> — the AI runs on{' '}
+                      <span className="font-mono">claude-haiku-4-5</span> with extracted text only.
+                      {isUserDefined && ' Enable if the check needs to read from cross-section views, dimension annotations, or multi-column tables.'}
+                    </>
+                }
+              </p>
+            </div>
+          )
+        })()}
         <div className="grid grid-cols-2 gap-3">
           <label className="block">
             <span className={_lbl}>Pass message</span>

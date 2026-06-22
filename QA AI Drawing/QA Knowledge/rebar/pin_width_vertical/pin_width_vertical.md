@@ -13,6 +13,10 @@ PASS — all vertical pin widths match wall_width – 2×Cv.
 
 NOT FOUND — wall thickness, concrete cover (Cv), or labeled pin dimension not visible.
 
+## Requires Vision
+
+true
+
 ## Description
 
 check the width of the horizontal and vertical pin reinforcement.

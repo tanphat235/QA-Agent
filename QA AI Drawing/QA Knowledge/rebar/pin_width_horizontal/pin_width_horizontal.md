@@ -13,6 +13,10 @@ PASS — all horizontal pin widths match wall_width – 2×Cv – 2×Ø_layer1.
 
 NOT FOUND — wall thickness, Cv, outer rebar diameter, or labeled pin dimension not visible.
 
+## Requires Vision
+
+true
+
 ## Description
 
 Horizontal pin = wall_width – 2*Cv – 2*Layer1 rebar diameter (round down)
