@@ -27,6 +27,12 @@ from qa_agent.state import GraphState
 from qa_agent import checks_registry as registry
 from qa_agent.rag.retriever import get_check_prompt, get_check_meta, get_check_requires_vision
 from qa_agent.nodes.issue_filter import OUTPUT_RULES, accept_finding, build_check_issues
+from qa_agent.nodes.pdf_extractor import (
+    _find_top_left_element_code_raw,
+    _normalize_element_code_token,
+    _parse_element_code_suffix,
+    _resolve_element_code_from_title,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +196,9 @@ def _format_extracted_facts(state: GraphState) -> str:
     add("Planfreigabe", tb.get("planfreigabe_text"))
     add("Drawing No.", tb.get("drawing_no_value"))
     add("Drawing Title", tb.get("drawing_title_value"))
+    add("Drawing name (top of sheet)", tb.get("drawing_name"))
+    add("Element code (top-left label)", tb.get("element_code_top_left"))
+    add("Element code (Drawing Title suffix)", tb.get("element_code_from_title"))
     add("letzte Stabstahlposition", tb.get("letzte_stabstahlposition"))
     add("letzte Mattenposition", tb.get("letzte_mattenposition"))
 
@@ -327,6 +336,68 @@ def _invoke_group(
     )
 
 
+def _apply_drawing_code_deterministic(
+    state: GraphState,
+    by_check: dict[str, list[_UserAiIssue]],
+    not_found_set: set[str],
+) -> bool:
+    """Compare top-left element code vs Drawing Title suffix in Python.
+
+    Returns True when drawing_code was fully handled (skip LLM for this key).
+    """
+    pc = state.get("pdf_content") or {}
+    tb = pc.get("title_block") or {}
+    raw_text = pc.get("raw_text") or ""
+
+    top = (tb.get("element_code_top_left") or "").strip()
+    from_title = (tb.get("element_code_from_title") or "").strip()
+
+    # Runtime fallbacks (e.g. PDF extracted before extractor update).
+    if not from_title:
+        from_title = (_resolve_element_code_from_title(tb, raw_text) or "").strip()
+    if not top:
+        top = (_normalize_element_code_token(tb.get("drawing_name") or "") or "").strip()
+    if not top:
+        top = (_find_top_left_element_code_raw(raw_text) or "").strip()
+    if not from_title:
+        from_title = (_parse_element_code_suffix(tb.get("drawing_title_value")) or "").strip()
+    # If title suffix is known, look for the same code as a standalone line near sheet top.
+    if not top and from_title:
+        for line in (raw_text[:2000]).split("\n"):
+            code = _normalize_element_code_token(line.strip())
+            if code and code.upper() == from_title.upper():
+                top = code
+                break
+
+    if not top or not from_title:
+        not_found_set.add("drawing_code")
+        print(
+            f"[user_ai_checks][drawing_code] NOT FOUND — "
+            f"top_left={top!r} title_suffix={from_title!r} "
+            f"drawing_title={tb.get('drawing_title_value')!r} "
+            f"drawing_name={tb.get('drawing_name')!r}"
+        )
+        return True
+
+    if top.upper() == from_title.upper():
+        print(f"[user_ai_checks][drawing_code] deterministic PASS: {top!r} == {from_title!r}")
+        return True
+
+    by_check["drawing_code"].append(_UserAiIssue(
+        check="drawing_code",
+        severity="error",
+        description=(
+            f"Drawing code mismatch: top-left label={top}, "
+            f"Drawing Title suffix={from_title}"
+        ),
+        page=1,
+        location="title block / top-left label",
+        confidence=1.0,
+    ))
+    print(f"[user_ai_checks][drawing_code] deterministic FAIL: {top!r} != {from_title!r}")
+    return True
+
+
 def run_user_ai_checks(domain: str, state: GraphState) -> list:
     """Run enabled user-defined AI checks for *domain*; return issue dicts.
 
@@ -348,22 +419,25 @@ def run_user_ai_checks(domain: str, state: GraphState) -> list:
     pdf_data: str | None = state.get("pdf_data")  # type: ignore[assignment]
     facts = _format_extracted_facts(state)
 
-    # Route checks by vision requirement
-    text_keys  = [k for k in active if not get_check_requires_vision(domain, k)]
-    vision_keys = [k for k in active if get_check_requires_vision(domain, k)]
+    # Collect all raw issues and not_found across both groups
+    by_check: dict[str, list[_UserAiIssue]] = {k: [] for k in active}
+    not_found_set: set[str] = set()
+
+    llm_active = list(active)
+    if "drawing_code" in active:
+        _apply_drawing_code_deterministic(state, by_check, not_found_set)
+        llm_active = [k for k in llm_active if k != "drawing_code"]
+
+    text_keys  = [k for k in llm_active if not get_check_requires_vision(domain, k)]
+    vision_keys = [k for k in llm_active if get_check_requires_vision(domain, k)]
 
     if vision_keys and not pdf_data:
-        # No PDF available — downgrade vision checks to text-only with a warning
         print(
             f"[user_ai_checks][{domain}] WARNING: {vision_keys} require vision but "
             f"pdf_data is absent — falling back to text-only (claude-haiku-4-5)"
         )
-        text_keys  = active
+        text_keys  = llm_active
         vision_keys = []
-
-    # Collect all raw issues and not_found across both groups
-    by_check: dict[str, list[_UserAiIssue]] = {k: [] for k in active}
-    not_found_set: set[str] = set()
 
     for group_keys, use_vision in ((text_keys, False), (vision_keys, True)):
         if not group_keys:

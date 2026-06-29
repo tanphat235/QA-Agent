@@ -161,9 +161,35 @@ def extract_pdf_content(pdf_path: str) -> dict:
         # Word-coordinate approach fails: "Bezeichnung" / "Plan-Nr." are positioned
         # mid-label so the x-constraint collects neighbouring Revision/Status values
         # instead of the actual drawing title / drawing number.
-        title_block["drawing_title_value"] = _find_drawing_title_raw(raw_text)
+        title_from_coords = (
+            _find_text_below_label(words, "Drawing Title")
+            or _find_text_below_label(words, "Bezeichnung")
+        )
+        if title_from_coords:
+            title_block["drawing_title_value"] = title_from_coords.split("\n")[0].strip()
+        else:
+            title_block["drawing_title_value"] = (
+                _find_drawing_title_raw(raw_text)
+                or _find_drawing_title_in_raw(raw_text)
+            )
         title_block["drawing_no_value"]    = _find_drawing_no_raw(raw_text)
         title_block["drawing_name"] = _find_drawing_name(words, page.height)
+        title_block["element_code_top_left"] = _find_top_left_element_code(
+            words, page.width, page.height, raw_text,
+        )
+        title_block["element_code_from_title"] = _resolve_element_code_from_title(
+            title_block, raw_text,
+        )
+        # If top-left still missing, a short drawing_name may be the label itself.
+        if not title_block["element_code_top_left"]:
+            title_block["element_code_top_left"] = _normalize_element_code_token(
+                title_block.get("drawing_name") or "",
+            )
+        print(
+            f"[drawing_code] top_left={title_block['element_code_top_left']!r} "
+            f"from_title={title_block['element_code_from_title']!r} "
+            f"title_raw={str(title_block.get('drawing_title_value') or '')[:60]!r}"
+        )
         title_block["planfreigabe_text"] = _find_planfreigabe_text(raw_text)
         title_block["gesamtmasse"] = _find_total_mass(raw_text)
         title_block["volumen"]     = _find_volumen(words, raw_text)
@@ -740,6 +766,127 @@ def _find_total_mass(raw_text: str) -> str | None:
     return val
 
 
+_ELEMENT_CODE_RE = re.compile(r"\d+[A-Z]{0,2}-\d+", re.IGNORECASE)
+_ELEMENT_CODE_EXACT_RE = re.compile(r"^\d+[A-Z]{0,2}-\d+$", re.IGNORECASE)
+
+
+def _parse_element_code_suffix(text: str | None) -> str | None:
+    """Return the last element-code token (e.g. '201-851') from a title string."""
+    if not text:
+        return None
+    codes = _ELEMENT_CODE_RE.findall(text)
+    return codes[-1].upper() if codes else None
+
+
+def _normalize_element_code_token(text: str) -> str | None:
+    """Normalize a token/line to an element code, tolerating spaces around '-'."""
+    s = (text or "").strip()
+    if not s:
+        return None
+    compact = re.sub(r"\s+", "", s)
+    if _ELEMENT_CODE_EXACT_RE.fullmatch(compact):
+        return compact.upper()
+    return _parse_element_code_suffix(s)
+
+
+def _find_drawing_title_in_raw(raw_text: str) -> str | None:
+    """Best-effort Drawing Title from raw text (title-block area only)."""
+    for label_pat in (
+        r"(?:Bezeichnung|Drawing Title)[^\n]{0,40}\n\s*([^\n]{5,120})",
+        r"(?:Bezeichnung|Drawing Title)[^\n:]{0,20}:\s*([^\n:]{5,120})",
+    ):
+        m = re.search(label_pat, raw_text, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+    return None
+
+
+def _resolve_element_code_from_title(title_block: dict, raw_text: str) -> str | None:
+    """Parse element-code suffix from title block fields or raw text near the label."""
+    for src in (
+        title_block.get("drawing_title_value"),
+        title_block.get("drawing_name"),
+        _find_drawing_title_in_raw(raw_text),
+    ):
+        code = _parse_element_code_suffix(str(src) if src else None)
+        if code:
+            return code
+
+    # Search a window after title-block anchors anywhere in the raw text.
+    for anchor in ("Drawing Title", "Bezeichnung", "Formwork and reinforcement", "Schalung"):
+        idx = raw_text.lower().rfind(anchor.lower())
+        if idx >= 0:
+            snippet = raw_text[idx: idx + 300]
+            codes = _ELEMENT_CODE_RE.findall(snippet)
+            if codes:
+                return codes[-1].upper()
+    return None
+
+
+def _find_top_left_element_code_raw(raw_text: str) -> str | None:
+    """Fallback: scan the top of extracted text for a standalone element code."""
+    head = raw_text[:2000]
+    for line in head.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        code = _normalize_element_code_token(line)
+        if code and len(line) <= 20:
+            return code
+
+    # Last resort: first element-code token in the top portion of the sheet text.
+    codes = _ELEMENT_CODE_RE.findall(head)
+    return codes[0].upper() if codes else None
+
+
+def _find_top_left_element_code(
+    words: list[dict], page_width: float, page_height: float,
+    raw_text: str = "",
+) -> str | None:
+    """Element code at the top-left of the sheet (e.g. '201-851')."""
+    x_max = page_width * 0.50
+    y_max = page_height * 0.35
+    in_corner = [
+        w for w in words
+        if w["x0"] <= x_max and w["top"] <= y_max
+    ]
+
+    if in_corner:
+        # Prefer a standalone token that is exactly an element code.
+        exact = [
+            (w["top"], w["x0"], w["text"].strip().upper())
+            for w in in_corner
+            if _normalize_element_code_token(w["text"].strip())
+            and _ELEMENT_CODE_EXACT_RE.fullmatch(
+                re.sub(r"\s+", "", w["text"].strip())
+            )
+        ]
+        if exact:
+            return min(exact, key=lambda t: (t[0], t[1]))[2]
+
+        # Assemble lines in the corner; accept short lines whose only content is a code.
+        in_corner.sort(key=lambda w: (w["top"], w["x0"]))
+        lines: list[str] = []
+        current_words: list[str] = []
+        current_y: float = in_corner[0]["top"]
+        for w in in_corner:
+            if abs(w["top"] - current_y) <= _LINE_SNAP:
+                current_words.append(w["text"])
+            else:
+                lines.append(" ".join(current_words).strip())
+                current_words = [w["text"]]
+                current_y = w["top"]
+        if current_words:
+            lines.append(" ".join(current_words).strip())
+
+        for line in sorted(lines, key=lambda ln: (len(ln), ln)):
+            code = _normalize_element_code_token(line)
+            if code and len(line) <= 24:
+                return code
+
+    return _find_top_left_element_code_raw(raw_text)
+
+
 def _find_drawing_title_raw(raw_text: str) -> str | None:
     """Extract drawing title from raw text.
 
@@ -754,7 +901,7 @@ def _find_drawing_title_raw(raw_text: str) -> str | None:
     ):
         m = re.search(label_pat, raw_text, re.IGNORECASE)
         if m:
-            rest = m.group(1).strip()
+            rest = m.group(1).strip()[:200]
             lines = [l.strip() for l in rest.split("\n") if l.strip() and len(l.strip()) > 3]
             result = " ".join(lines[:2]) if lines else rest
             print(f"[drawing_title_raw] found: {result[:80]!r}")
@@ -2019,6 +2166,8 @@ def _format_for_llm(raw_text: str, title_block: dict) -> str:
         f"Drawing Title: {title_block.get('drawing_title_value') or '(empty)'}",
         f"Drawing No.:   {title_block.get('drawing_no_value') or '(empty)'}",
         f"Drawing Name (top of sheet): {title_block.get('drawing_name') or '(not found)'}",
+        f"Element code (top-left label): {title_block.get('element_code_top_left') or '(not found)'}",
+        f"Element code (from Drawing Title suffix): {title_block.get('element_code_from_title') or '(not found)'}",
         f"Revision (title block):      {title_block.get('revision_title_block') or '(empty)'}",
         f"Revision (last in table):    {title_block.get('revision_table_last') or '(not found)'}",
         f"Status (title block):        {title_block.get('status_title_block') or '(empty)'}",

@@ -105,5 +105,9 @@ def preprocess(state: GraphState) -> dict:
         f"  drawing_no_value={tb.get('drawing_no_value')!r}"
         f"  drawing_name={tb.get('drawing_name')!r}"
     )
+    print(
+        f"[preprocess] element_code_top_left={tb.get('element_code_top_left')!r}"
+        f"  element_code_from_title={tb.get('element_code_from_title')!r}"
+    )
 
     return {"page_count": page_count, "pdf_data": pdf_data, "pdf_content": pdf_content}
