@@ -3,15 +3,21 @@
 User-created .md rules (not in SHIPPED_BUILTIN_KEYS) are run here and merged
 into the domain's issue list (spell / bend / rebar).
 
+Data sources (user-defined checks MUST use only these):
+  • qa_agent.extraction.build_extraction_context  — pdfplumber structured fields
+  • qa_agent.extraction.format_extraction_for_llm — text block for LLM
+  • qa_agent.extraction.run_deterministic_check   — Python evaluators (no LLM)
+  • PDF vision (Sonnet) when requires_vision=true in the check .md
+
 Model routing
 ─────────────
 Text-only checks (requires_vision=false, the default):
-  • Input  : extracted text + pre-extracted facts block
-  • Model  : claude-haiku-4-5  (cheap, fast)
+  • Input  : drawing formatted text + extraction context block
+  • Model  : claude-haiku-4-5
 
-Vision checks (requires_vision=true in the check's .md):
-  • Input  : rendered PDF document + extracted text + facts block
-  • Model  : claude-sonnet-4-6  (handles visual layout / table reading)
+Vision checks (requires_vision=true):
+  • Input  : PDF document + formatted text + extraction context block
+  • Model  : claude-sonnet-4-6
 """
 from __future__ import annotations
 
@@ -27,14 +33,20 @@ from qa_agent.state import GraphState
 from qa_agent import checks_registry as registry
 from qa_agent.rag.retriever import get_check_prompt, get_check_meta, get_check_requires_vision
 from qa_agent.nodes.issue_filter import OUTPUT_RULES, accept_finding, build_check_issues
-from qa_agent.nodes.pdf_extractor import (
-    _find_top_left_element_code_raw,
-    _normalize_element_code_token,
-    _parse_element_code_suffix,
-    _resolve_element_code_from_title,
+from qa_agent.extraction import (
+    build_extraction_context,
+    format_extraction_for_llm,
+    list_extraction_fields,
+    run_deterministic_check,
 )
 
 logger = logging.getLogger(__name__)
+
+_FIELDS_INTRO = """\
+The PRE-EXTRACTED VALUES block lists every pdfplumber field available from the backend.
+Use field keys in [brackets] (e.g. [drawing.element_code_top_left]) when citing values.
+Only use values present in that block or readable from the drawing text — never invent data.\
+"""
 
 _SYSTEM_TEXT = """\
 You are a senior structural QA reviewer for precast concrete wall drawings.
@@ -94,7 +106,6 @@ German terminology:
   Draufsicht = top/plan view | Matten-Schneideskizze = mesh cut sketch | Detail = detail view\
 """
 
-# Appended after the rules so the model knows HOW to do arithmetic/comparison.
 _CALC_GUIDANCE = """\
 
 ═══════════════════════════════════
@@ -160,102 +171,6 @@ class _UsageCallback(BaseCallbackHandler):
             print(f"[usage][{self.label}] could not read usage: {exc}")
 
 
-def _format_extracted_facts(state: GraphState) -> str:
-    """Build the supplementary data block passed to every user-defined check.
-
-    Contains three layers, mirroring what built-in checks have access to:
-      1. PRE-EXTRACTED VALUES  — deterministic key-value pairs from title block,
-                                 schedule totals, EBT table rows, overview plan rows.
-      2. STEEL LIST TEXT       — full pdfplumber text of the supplementary steel-list
-                                 file (if uploaded), so checks can read any cell.
-      3. OVERVIEW PLAN TEXT    — full pdfplumber text of the overview plan file
-                                 (if uploaded), so checks can read any row or column.
-    """
-    pc = state.get("pdf_content") or {}
-    tb = pc.get("title_block") or {}
-    lines: list[str] = [
-        "=== PRE-EXTRACTED VALUES (exact — use these for any calculation/comparison) ==="
-    ]
-
-    def add(label: str, value) -> None:
-        if value not in (None, "", []):
-            lines.append(f"  {label}: {value}")
-
-    lines.append("[Title block]")
-    add("Volumen (m³)", tb.get("volumen"))
-    add("Gewicht (to)", tb.get("gewicht"))
-    add("Anzahl", tb.get("anzahl"))
-    add("Gesamtmasse total steel (kg)", tb.get("gesamtmasse"))
-    add("Exposition class", tb.get("exposition_class"))
-    add("Betondeckung Cmin,dur", tb.get("betondeckung_cmin_dur"))
-    add("Betondeckung ΔCdev", tb.get("betondeckung_delta_c"))
-    add("Betondeckung Cv", tb.get("betondeckung_cv"))
-    add("Revision (title block)", tb.get("revision_title_block"))
-    add("Revision (last in table)", tb.get("revision_table_last"))
-    add("Status", tb.get("status_title_block"))
-    add("Planfreigabe", tb.get("planfreigabe_text"))
-    add("Drawing No.", tb.get("drawing_no_value"))
-    add("Drawing Title", tb.get("drawing_title_value"))
-    add("Drawing name (top of sheet)", tb.get("drawing_name"))
-    add("Element code (top-left label)", tb.get("element_code_top_left"))
-    add("Element code (Drawing Title suffix)", tb.get("element_code_from_title"))
-    add("letzte Stabstahlposition", tb.get("letzte_stabstahlposition"))
-    add("letzte Mattenposition", tb.get("letzte_mattenposition"))
-
-    lines.append("[Schedules]")
-    add("Stabliste Gesamtmasse (kg)", pc.get("stabliste_total"))
-    add("Mattenstahlliste Gesamtgewicht (kg)", pc.get("mattenstahlliste_total"))
-    add("Stabliste max Pos (<100)", tb.get("max_stabliste_pos"))
-    add("Mattenstahlliste max Pos (<100)", tb.get("max_mattenliste_pos"))
-
-    ebt = pc.get("einbauteilliste_items") or []
-    if ebt:
-        lines.append("[Einbauteilliste (drawing) rows]")
-        for it in ebt:
-            lines.append(
-                f"  EBT {it.get('ebt_nr')}: hersteller={it.get('hersteller')!r} "
-                f"bezeichnung={it.get('bezeichnung')!r} "
-                f"korrosionsschutz={it.get('korrosionsschutz')!r} qty={it.get('qty')}"
-            )
-
-    sl = state.get("steel_list_data") or {}
-    if sl:
-        lines.append("[Steel List — structured values]")
-        add("Gesamtmasse (kg)", sl.get("gesamtmasse"))
-        add("Stabliste total (kg)", sl.get("stabliste_total"))
-        add("Mattenstahlliste total (kg)", sl.get("mattenstahlliste_total"))
-        for it in (sl.get("einbauteilliste_items") or []):
-            lines.append(
-                f"  EBT {it.get('ebt_nr')}: hersteller={it.get('hersteller')!r} "
-                f"bezeichnung={it.get('bezeichnung')!r} "
-                f"korrosionsschutz={it.get('korrosionsschutz')!r} qty={it.get('qty')}"
-            )
-
-    op = state.get("overview_plan_data") or {}
-    op_rows = op.get("element_rows") if isinstance(op, dict) else None
-    if op_rows:
-        lines.append("[Overview plan — structured rows]")
-        for r in op_rows:
-            lines.append(
-                f"  code={r.get('code')} volume={r.get('volume')} weight={r.get('weight')} "
-                f"qty={r.get('quantity')} drawing_no={r.get('drawing_no')}"
-            )
-
-    # ── Full pdfplumber text of supplementary files ───────────────────────────
-    # Appended so checks that need to read any cell or row have the raw text.
-    sl_raw = (sl.get("raw_text") or "").strip() if sl else ""
-    if sl_raw:
-        lines.append("\n=== STEEL LIST TEXT (pdfplumber extraction) ===")
-        lines.append(sl_raw)
-
-    op_raw = (op.get("raw_text") or "").strip() if isinstance(op, dict) else ""
-    if op_raw:
-        lines.append("\n=== OVERVIEW PLAN TEXT (pdfplumber extraction) ===")
-        lines.append(op_raw)
-
-    return "\n".join(lines)
-
-
 def _build_task(keys: list[str], meta: dict, domain: str) -> str:
     blocks = []
     for k in keys:
@@ -263,7 +178,9 @@ def _build_task(keys: list[str], meta: dict, domain: str) -> str:
         prompt = get_check_prompt(domain, k) or ""
         blocks.append(f"CHECK — {name} ({k})\n{prompt.strip()}")
     check_keys = " | ".join(f'"{k}"' for k in keys)
+    field_count = len(list_extraction_fields())
     return (
+        _FIELDS_INTRO + f"\n({field_count} backend extraction fields available.)\n\n"
         "Apply each of the following QA rules to the drawing.\n\n"
         + "\n\n".join(blocks)
         + _CALC_GUIDANCE
@@ -280,43 +197,32 @@ def _invoke_group(
     pdf_data: str | None,
     use_vision: bool,
 ) -> _UserAiResult:
-    """Call the LLM for one routing group (text-only or vision).
-
-    Vision group  → claude-sonnet-4-6, PDF + formatted text + facts
-    Text-only group → claude-haiku-4-5, formatted text + facts
-    Both groups use production-grade system prompts identical in quality to
-    built-in checks (NEVER SILENTLY PASS, German terminology, etc.).
-    """
+    """Call the LLM for one routing group (text-only or vision)."""
     task = _build_task(keys, meta, domain)
 
     if use_vision:
         model = "claude-sonnet-4-6"
         system = _SYSTEM_VISION
         human_content: list[dict] = []
-        # PDF first — the model reads the rendered drawing as the primary source.
         if pdf_data:
             human_content.append({
                 "type": "document",
                 "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data},
                 "cache_control": {"type": "ephemeral"},
             })
-        # Extracted text as supplementary cross-reference.
         if formatted:
             human_content.append({"type": "text", "text": formatted})
-        # Pre-extracted facts block (deterministic values for calculations).
         human_content.append({"type": "text", "text": facts})
     else:
         model = "claude-haiku-4-5"
         system = _SYSTEM_TEXT
         human_content = []
-        # Extracted text — primary source for text-only checks.
         if formatted:
             human_content.append({
                 "type": "text",
                 "text": formatted,
                 "cache_control": {"type": "ephemeral"},
             })
-        # Pre-extracted facts block (deterministic values for calculations).
         human_content.append({"type": "text", "text": facts})
 
     human_content.append({"type": "text", "text": task})
@@ -336,75 +242,38 @@ def _invoke_group(
     )
 
 
-def _apply_drawing_code_deterministic(
+def _apply_deterministic_checks(
     state: GraphState,
+    active: list[str],
     by_check: dict[str, list[_UserAiIssue]],
     not_found_set: set[str],
-) -> bool:
-    """Compare top-left element code vs Drawing Title suffix in Python.
+) -> list[str]:
+    """Run registered Python evaluators; return check keys handled (skip LLM)."""
+    ctx = build_extraction_context(state)
+    handled: list[str] = []
 
-    Returns True when drawing_code was fully handled (skip LLM for this key).
-    """
-    pc = state.get("pdf_content") or {}
-    tb = pc.get("title_block") or {}
-    raw_text = pc.get("raw_text") or ""
+    for key in active:
+        result = run_deterministic_check(key, state, ctx)
+        if result is None:
+            continue
+        handled.append(key)
+        if result.not_found:
+            not_found_set.add(key)
+        for item in result.issues:
+            by_check[key].append(_UserAiIssue(
+                check=item.check,
+                severity=item.severity,
+                description=item.description,
+                page=item.page,
+                location=item.location,
+                confidence=item.confidence,
+            ))
 
-    top = (tb.get("element_code_top_left") or "").strip()
-    from_title = (tb.get("element_code_from_title") or "").strip()
-
-    # Runtime fallbacks (e.g. PDF extracted before extractor update).
-    if not from_title:
-        from_title = (_resolve_element_code_from_title(tb, raw_text) or "").strip()
-    if not top:
-        top = (_normalize_element_code_token(tb.get("drawing_name") or "") or "").strip()
-    if not top:
-        top = (_find_top_left_element_code_raw(raw_text) or "").strip()
-    if not from_title:
-        from_title = (_parse_element_code_suffix(tb.get("drawing_title_value")) or "").strip()
-    # If title suffix is known, look for the same code as a standalone line near sheet top.
-    if not top and from_title:
-        for line in (raw_text[:2000]).split("\n"):
-            code = _normalize_element_code_token(line.strip())
-            if code and code.upper() == from_title.upper():
-                top = code
-                break
-
-    if not top or not from_title:
-        not_found_set.add("drawing_code")
-        print(
-            f"[user_ai_checks][drawing_code] NOT FOUND — "
-            f"top_left={top!r} title_suffix={from_title!r} "
-            f"drawing_title={tb.get('drawing_title_value')!r} "
-            f"drawing_name={tb.get('drawing_name')!r}"
-        )
-        return True
-
-    if top.upper() == from_title.upper():
-        print(f"[user_ai_checks][drawing_code] deterministic PASS: {top!r} == {from_title!r}")
-        return True
-
-    by_check["drawing_code"].append(_UserAiIssue(
-        check="drawing_code",
-        severity="error",
-        description=(
-            f"Drawing code mismatch: top-left label={top}, "
-            f"Drawing Title suffix={from_title}"
-        ),
-        page=1,
-        location="title block / top-left label",
-        confidence=1.0,
-    ))
-    print(f"[user_ai_checks][drawing_code] deterministic FAIL: {top!r} != {from_title!r}")
-    return True
+    return handled
 
 
 def run_user_ai_checks(domain: str, state: GraphState) -> list:
-    """Run enabled user-defined AI checks for *domain*; return issue dicts.
-
-    Checks are split by their ``## Requires Vision`` flag:
-      • false (default) → claude-haiku-4-5, text + facts only
-      • true            → claude-sonnet-4-6, PDF document + text + facts
-    """
+    """Run enabled user-defined AI checks for *domain*; return issue dicts."""
     enabled_sub = (state.get("enabled_sub_checks") or {}).get(domain)
     all_keys = registry.list_user_ai_check_keys(domain)
     active = [k for k in all_keys if enabled_sub is None or k in (enabled_sub or [])]
@@ -414,21 +283,18 @@ def run_user_ai_checks(domain: str, state: GraphState) -> list:
     meta = {k: get_check_meta(domain, k) for k in active}
     print(f"[user_ai_checks][{domain}] running {len(active)} user check(s): {active}")
 
-    pdf_content = state.get("pdf_content") or {}
-    formatted: str = pdf_content.get("formatted") or ""
+    ctx = build_extraction_context(state)
+    formatted = ctx.drawing_formatted
+    facts = format_extraction_for_llm(ctx)
     pdf_data: str | None = state.get("pdf_data")  # type: ignore[assignment]
-    facts = _format_extracted_facts(state)
 
-    # Collect all raw issues and not_found across both groups
     by_check: dict[str, list[_UserAiIssue]] = {k: [] for k in active}
     not_found_set: set[str] = set()
 
-    llm_active = list(active)
-    if "drawing_code" in active:
-        _apply_drawing_code_deterministic(state, by_check, not_found_set)
-        llm_active = [k for k in llm_active if k != "drawing_code"]
+    handled = _apply_deterministic_checks(state, active, by_check, not_found_set)
+    llm_active = [k for k in active if k not in handled]
 
-    text_keys  = [k for k in llm_active if not get_check_requires_vision(domain, k)]
+    text_keys = [k for k in llm_active if not get_check_requires_vision(domain, k)]
     vision_keys = [k for k in llm_active if get_check_requires_vision(domain, k)]
 
     if vision_keys and not pdf_data:
@@ -436,7 +302,7 @@ def run_user_ai_checks(domain: str, state: GraphState) -> list:
             f"[user_ai_checks][{domain}] WARNING: {vision_keys} require vision but "
             f"pdf_data is absent — falling back to text-only (claude-haiku-4-5)"
         )
-        text_keys  = llm_active
+        text_keys = llm_active
         vision_keys = []
 
     for group_keys, use_vision in ((text_keys, False), (vision_keys, True)):

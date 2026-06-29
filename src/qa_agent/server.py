@@ -264,6 +264,13 @@ async def annotate_report(
     )
 
 
+@app.get("/api/extraction-fields")
+async def extraction_fields():
+    """Catalog of pdfplumber fields available to user-defined checks (for frontend)."""
+    from qa_agent.extraction import list_extraction_fields
+    return {"fields": await asyncio.to_thread(list_extraction_fields)}
+
+
 @app.get("/api/checks")
 async def list_checks():
     """All defined checks (built-in + custom), for the Define-Rules UI and the

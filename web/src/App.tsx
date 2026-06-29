@@ -61,6 +61,13 @@ interface CheckDomain {
   title: string
   coming_soon: boolean
 }
+interface ExtractField {
+  key: string
+  label: string
+  source: string
+  description: string
+  kind: string
+}
 interface ChecksData {
   checks: CheckDef[]
   domains: CheckDomain[]
@@ -338,7 +345,6 @@ export default function App() {
   const [activeNode, setActiveNode]     = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen]           = useState(true)
   const [enabledSubChecks, setEnabledSubChecks] = useState<Record<string, string[]>>({})
-  const checksInitialized = useRef(false)
   const [expandedCheckCategories, setExpandedCheckCategories] = useState<Set<string>>(new Set())
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set())
   const [expandedGroups,    setExpandedGroups]    = useState<Set<string>>(new Set())
@@ -348,10 +354,13 @@ export default function App() {
   const [viewingEntry,           setViewingEntry]           = useState<HistoryEntry | null>(null)
   const [checksData,      setChecksData]      = useState<ChecksData | null>(null)
   const [checksLoading,   setChecksLoading]   = useState(false)
+  const [checksLoadError, setChecksLoadError] = useState<string | null>(null)
   const [checkDrafts,     setCheckDrafts]     = useState<Record<string, CheckDef>>({})
   const [expandedChecks,  setExpandedChecks]  = useState<Set<string>>(new Set())
   const [checkSaving,     setCheckSaving]     = useState<string | null>(null)  // "domain::key" being saved
   const [checkErrors,     setCheckErrors]     = useState<Record<string, string>>({})
+  const [extractionFields, setExtractionFields] = useState<ExtractField[]>([])
+  const [extractionFieldsOpen, setExtractionFieldsOpen] = useState(false)
   const [annotating,             setAnnotating]             = useState(false)
   const inputRef           = useRef<HTMLInputElement>(null)
   const steelListInputRef  = useRef<HTMLInputElement>(null)
@@ -441,16 +450,39 @@ export default function App() {
   // ── Check definitions (built-in + custom) ───────────────────────────────
   const loadChecks = useCallback(() => {
     setChecksLoading(true)
+    setChecksLoadError(null)
     fetch('/api/checks')
-      .then(r => r.json())
-      .then((d: ChecksData) => setChecksData(d))
-      .catch(() => {})
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        return r.json()
+      })
+      .then((d: ChecksData) => {
+        if (!d?.domains?.length) throw new Error('Empty checks response from server')
+        setChecksData(d)
+      })
+      .catch((err: unknown) => {
+        setChecksLoadError(err instanceof Error ? err.message : 'Failed to load checks')
+      })
       .finally(() => setChecksLoading(false))
   }, [])
 
-  // Load once on mount and refresh whenever the Define Rules view is opened.
+  const loadExtractionFields = useCallback(() => {
+    fetch('/api/extraction-fields')
+      .then(r => r.json())
+      .then((d: { fields?: ExtractField[] }) => setExtractionFields(d.fields ?? []))
+      .catch(() => {})
+  }, [])
+
+  // Load on mount; refresh when Define Rules or Dashboard is opened (retry if prior load failed).
   useEffect(() => { loadChecks() }, [loadChecks])
-  useEffect(() => { if (activeView === 'definerules') loadChecks() }, [activeView, loadChecks])
+  useEffect(() => {
+    if (activeView === 'definerules') {
+      loadChecks()
+      loadExtractionFields()
+    } else if (activeView === 'dashboard' && !checksData && !checksLoading && !checksLoadError) {
+      loadChecks()
+    }
+  }, [activeView, loadChecks, loadExtractionFields, checksData, checksLoading, checksLoadError])
 
   const checkOptions: CheckOption[] = useMemo(() =>
     (checksData?.domains ?? []).map(d => ({
@@ -479,10 +511,11 @@ export default function App() {
   }, [checksData])
 
   useEffect(() => {
-    if (!checksData || checksInitialized.current) return
-    checksInitialized.current = true
-    setEnabledSubChecks(
-      Object.fromEntries(
+    if (!checksData) return
+    setEnabledSubChecks(prev => {
+      const total = Object.values(prev).reduce((n, arr) => n + arr.length, 0)
+      if (total > 0) return prev
+      return Object.fromEntries(
         checksData.domains.map(d => {
           const keys = checksData.checks
             .filter(c => c.domain === d.key)
@@ -490,8 +523,9 @@ export default function App() {
             .map(c => c.key)
           return [d.key, d.coming_soon ? [] : keys]
         }),
-      ),
-    )
+      )
+    })
+    setExpandedCheckCategories(prev => (prev.size > 0 ? prev : new Set(['spell'])))
   }, [checksData])
 
   const ckey = (c: { domain: string; key: string }) => `${c.domain}::${c.key}`
@@ -536,7 +570,16 @@ export default function App() {
         const detail = (await res.json().catch(() => ({}))).detail ?? `HTTP ${res.status}`
         setCheckErrors(p => ({ ...p, [id]: String(detail) })); return
       }
+      const body = await res.json().catch(() => ({})) as { check?: CheckDef }
       setCheckDrafts(prev => { const n = { ...prev }; delete n[id]; return n })
+      if (body.check) {
+        setChecksData(prev => prev ? {
+          ...prev,
+          checks: prev.checks.map(c =>
+            ckey(c) === id ? { ...c, ...body.check! } : c
+          ),
+        } : prev)
+      }
       loadChecks()
     } finally {
       setCheckSaving(null)
@@ -602,13 +645,6 @@ export default function App() {
               </select>
             </label>
           )}
-          {isNew && (
-            <label className="block">
-              <span className={_lbl}>Key (optional)</span>
-              <input value={draft.key} onChange={e => updateDraft(id, { key: e.target.value })}
-                placeholder="auto from name" className={`${_inp} font-mono`} />
-            </label>
-          )}
         </div>
         <label className="block">
           <span className={_lbl}>
@@ -621,6 +657,50 @@ export default function App() {
               : 'Short summary of what this check verifies'}
             className={`${_inp} leading-relaxed resize-y`} />
         </label>
+        {isUserDefined && extractionFields.length > 0 && (
+          <div className="rounded-lg border border-blue-100 bg-blue-50/50 overflow-hidden">
+            <button
+              type="button"
+              onClick={() => setExtractionFieldsOpen(v => !v)}
+              className="w-full px-3 py-2.5 flex items-center gap-2 text-left hover:bg-blue-50 transition-colors"
+            >
+              <ChevronDown size={12} className={`text-blue-500 flex-shrink-0 transition-transform ${extractionFieldsOpen ? 'rotate-180' : ''}`} />
+              <span className="text-[11px] font-bold text-blue-800">
+                Available PDF extraction fields ({extractionFields.length})
+              </span>
+              <span className="text-[10px] text-blue-600 ml-auto">reference for your rule</span>
+            </button>
+            {extractionFieldsOpen && (
+              <div className="border-t border-blue-100 px-3 py-2 max-h-52 overflow-auto space-y-2">
+                <p className="text-[10px] text-blue-700 leading-relaxed">
+                  Backend pre-extracts these values from the PDF. Reference field keys in [brackets] in your description
+                  (e.g. [drawing.element_code_top_left] vs [drawing.element_code_from_title]).
+                </p>
+                {(['drawing', 'steel_list', 'overview_plan'] as const).map(source => {
+                  const items = extractionFields.filter(f => f.source === source)
+                  if (!items.length) return null
+                  const title = source === 'drawing' ? 'Drawing PDF' : source === 'steel_list' ? 'Steel list PDF' : 'Overview plan PDF'
+                  return (
+                    <div key={source}>
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-blue-500">{title}</p>
+                      <ul className="mt-1 space-y-0.5">
+                        {items.map(f => (
+                          <li key={f.key} className="text-[10px] text-gray-600 leading-snug">
+                            <span className="font-mono text-blue-700">[{f.key}]</span>
+                            {' '}{f.label}
+                            {f.kind !== 'scalar' && (
+                              <span className="text-gray-400"> · {f.kind}</span>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        )}
         {!isUserDefined && (showPrompt ? (
           <label className="block">
             <span className={_lbl}>Check Prompt — describe what the AI must verify</span>
@@ -1176,6 +1256,26 @@ export default function App() {
                                           ? <p className="text-[12px] text-gray-600 mt-0.5 whitespace-pre-wrap leading-relaxed">{c.description}</p>
                                           : <p className="text-[12px] italic text-gray-300 mt-0.5">None</p>}
                                       </div>
+                                      <div className={`rounded-lg border p-3 ${c.requires_vision ? 'border-amber-200 bg-amber-50' : 'border-gray-100 bg-gray-50'}`}>
+                                        <p className={`text-[11px] font-bold ${c.requires_vision ? 'text-amber-800' : 'text-gray-600'}`}>
+                                          Requires Vision: {c.requires_vision ? 'Yes' : 'No'}
+                                          <span className="ml-1.5 font-normal">
+                                            {c.requires_vision
+                                              ? '(claude-sonnet-4-6 + PDF)'
+                                              : '(claude-haiku-4-5, text-only)'}
+                                          </span>
+                                        </p>
+                                      </div>
+                                      <div className="grid grid-cols-2 gap-3">
+                                        <div>
+                                          <p className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Pass message</p>
+                                          <p className="text-[12px] text-gray-600 mt-0.5">{c.pass || 'PASS'}</p>
+                                        </div>
+                                        <div>
+                                          <p className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Not-found message</p>
+                                          <p className="text-[12px] text-gray-600 mt-0.5">{c.not_found || 'NOT FOUND'}</p>
+                                        </div>
+                                      </div>
                                       {c.builtin && (c.prompt
                                         ? (
                                           <div>
@@ -1310,11 +1410,31 @@ export default function App() {
                   <div className="flex items-center justify-center py-8 gap-2 text-gray-400">
                     <Loader2 size={16} className="animate-spin" /><span className="text-xs">Loading checks…</span>
                   </div>
+                ) : checksLoadError && !checksData ? (
+                  <div className="rounded-xl border border-red-100 bg-red-50 px-4 py-3 space-y-2">
+                    <p className="text-[11px] font-semibold text-red-600">
+                      Could not load checks — {checksLoadError}
+                    </p>
+                    <p className="text-[10px] text-red-500/80 leading-relaxed">
+                      Start the backend on port 8001 (<span className="font-mono">start_backend.bat</span>) then retry.
+                    </p>
+                    <button
+                      onClick={() => { setChecksLoadError(null); loadChecks() }}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-red-200 text-red-600 text-[10px] font-bold rounded-lg hover:bg-red-100/50 transition-colors"
+                    >
+                      <RefreshCw size={11} /> Retry
+                    </button>
+                  </div>
+                ) : checkOptions.length === 0 ? (
+                  <div className="rounded-xl border border-amber-100 bg-amber-50 px-4 py-3">
+                    <p className="text-[11px] text-amber-700">No check categories available.</p>
+                  </div>
                 ) : (
                 <>
                 <div className="flex gap-2">
                   {checkOptions.map(({ key, label, comingSoon }) => {
-                    const section = nodeSections.find(s => s.key === key)!
+                    const section = nodeSections.find(s => s.key === key)
+                    if (!section) return null
                     const allSubKeys = section.checks.map(c => c.key)
                     const enabledSubs = enabledSubChecks[key] ?? []
                     const allEnabled = allSubKeys.every(k => enabledSubs.includes(k))
@@ -1396,7 +1516,8 @@ export default function App() {
                 {/* Sub-checks panel — full-width, below the row */}
                 {checkOptions.map(({ key, label, comingSoon }) => {
                   if (comingSoon || !expandedCheckCategories.has(key)) return null
-                  const section = nodeSections.find(s => s.key === key)!
+                  const section = nodeSections.find(s => s.key === key)
+                  if (!section) return null
                   const enabledSubs = enabledSubChecks[key] ?? []
                   const someEnabled = enabledSubs.length > 0
                   const disabled = appState === 'analyzing'
