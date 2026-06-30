@@ -13,6 +13,7 @@ from qa_agent.extraction.element_code import (
     normalize_element_code_token,
     resolve_element_code_from_title,
 )
+from qa_agent.extraction.scale import find_section_scales, find_title_block_scales
 
 
 def _char_category(obj: dict) -> str:
@@ -195,6 +196,18 @@ def extract_pdf_content(pdf_path: str) -> dict:
             f"[drawing_code] top_left={title_block['element_code_top_left']!r} "
             f"from_title={title_block['element_code_from_title']!r} "
             f"title_raw={str(title_block.get('drawing_title_value') or '')[:60]!r}"
+        )
+        title_block["scale_title_blocks"] = find_title_block_scales(raw_text, words)
+        title_block["scale_title_block"] = (
+            ", ".join(title_block["scale_title_blocks"])
+            if title_block["scale_title_blocks"]
+            else None
+        )
+        title_block["scale_sections"] = find_section_scales(raw_text, words)
+        print(
+            f"[scale_check] title_block_scales={title_block['scale_title_blocks']!r} "
+            f"section_count={len(title_block['scale_sections'])} "
+            f"sections={[s.get('scale') for s in title_block['scale_sections']]}"
         )
         title_block["planfreigabe_text"] = _find_planfreigabe_text(raw_text)
         title_block["gesamtmasse"] = _find_total_mass(raw_text)

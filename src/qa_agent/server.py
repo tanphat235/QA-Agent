@@ -2,6 +2,7 @@ import asyncio
 import base64
 import os
 import json
+import sys
 import tempfile
 import traceback
 from collections.abc import AsyncIterator
@@ -12,6 +13,29 @@ from dotenv import load_dotenv
 import docx as python_docx
 
 load_dotenv()
+
+
+def _configure_stdio_utf8() -> None:
+    """Windows consoles often default to cp1252; avoid UnicodeEncodeError in logs."""
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
+def _log(msg: str) -> None:
+    """Print a log line without ever raising UnicodeEncodeError."""
+    text = str(msg)
+    try:
+        print(text, flush=True)
+    except UnicodeEncodeError:
+        enc = getattr(sys.stdout, "encoding", None) or "ascii"
+        print(text.encode(enc, errors="replace").decode(enc), flush=True)
+
+
+_configure_stdio_utf8()
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -75,13 +99,13 @@ def _node_sse_events(node_name: str, node_data: dict) -> list[str]:
     """Convert a completed node into SSE event strings."""
     label = NODE_LABELS.get(node_name, node_name)
     events = [_sse({"type": "progress", "node": node_name, "label": label})]
-    print(f"[server] ✓ node: {node_name}  |  keys: {list(node_data.keys()) if isinstance(node_data, dict) else type(node_data)}")
+    _log(f"[server] OK node: {node_name}  |  keys: {list(node_data.keys()) if isinstance(node_data, dict) else type(node_data)}")
 
     if node_name != "return_to_ui":
         return events
 
     ui_response = node_data.get("ui_response") if isinstance(node_data, dict) else None
-    print(f"[server] ui_response summary: {ui_response.get('summary') if ui_response else 'NONE'}")
+    _log(f"[server] ui_response summary: {ui_response.get('summary') if ui_response else 'NONE'}")
     if ui_response:
         events.append(_sse({"type": "result", "data": ui_response}))
     return events
@@ -99,8 +123,8 @@ async def _run_graph(
     thread = await lg.threads.create()
     thread_id = thread["thread_id"]
     studio_url = f"https://smith.langchain.com/studio/?baseUrl={LANGGRAPH_URL}"
-    print(f"[server] thread_id : {thread_id}")
-    print(f"[server] studio    : {studio_url}")
+    _log(f"[server] thread_id : {thread_id}")
+    _log(f"[server] studio    : {studio_url}")
 
     yield _sse({"type": "run_started", "thread_id": thread_id, "studio_url": studio_url})
 
@@ -121,13 +145,13 @@ async def _run_graph(
         if chunk.event == "metadata":
             run_id = chunk.data.get("run_id") if isinstance(chunk.data, dict) else None
             if run_id:
-                print(f"[server] run_id    : {run_id}")
+                _log(f"[server] run_id    : {run_id}")
         elif chunk.event == "updates":
             for node_name, node_data in chunk.data.items():
                 for event in _node_sse_events(node_name, node_data):
                     yield event
         elif chunk.event == "error":
-            print(f"[server] ✗ LangGraph error: {chunk.data}")
+            _log(f"[server] ERR LangGraph error: {chunk.data}")
             yield _sse({"type": "error", "message": str(chunk.data)})
 
 
@@ -149,8 +173,8 @@ async def analyze(
     data = await file.read()
     tmp_path = await _save_upload(data)
 
-    print(f"\n[server] === New analysis: {file.filename} → {tmp_path} | checks: {enabled_checks} | sub_checks: {enabled_sub_checks} ===")
-    print(f"[server] Routing to LangGraph API at {LANGGRAPH_URL}")
+    _log(f"\n[server] === New analysis: {file.filename} -> {tmp_path} | checks: {enabled_checks} | sub_checks: {enabled_sub_checks} ===")
+    _log(f"[server] Routing to LangGraph API at {LANGGRAPH_URL}")
 
     # ── pdfplumber pre-extraction for supplementary files ───────────────────
     steel_list_data: dict | None = None
@@ -165,9 +189,9 @@ async def analyze(
             # rendered document (vision) — pdfplumber text loses cells like the
             # Korrosionsschutz "FV" code that sit in narrow/wrapped columns.
             steel_list_data["pdf_data"] = base64.b64encode(sl_bytes).decode("ascii")
-            print(f"[server] steel_list extracted: gesamtmasse={steel_list_data.get('gesamtmasse')!r}  pages={steel_list_data.get('page_count')}")
+            _log(f"[server] steel_list extracted: gesamtmasse={steel_list_data.get('gesamtmasse')!r}  pages={steel_list_data.get('page_count')}")
         except Exception as exc:
-            print(f"[server] ✗ steel_list extraction failed: {exc}")
+            _log(f"[server] ERR steel_list extraction failed: {exc}")
         finally:
             try:
                 os.unlink(sl_tmp)
@@ -179,9 +203,9 @@ async def analyze(
         op_tmp = await _save_upload(op_bytes)
         try:
             overview_plan_data = await asyncio.to_thread(extract_overview_plan_pdf, op_tmp)
-            print(f"[server] overview_plan extracted: pages={overview_plan_data.get('page_count')}  chars={len(overview_plan_data.get('raw_text', ''))}")
+            _log(f"[server] overview_plan extracted: pages={overview_plan_data.get('page_count')}  chars={len(overview_plan_data.get('raw_text', ''))}")
         except Exception as exc:
-            print(f"[server] ✗ overview_plan extraction failed: {exc}")
+            _log(f"[server] ERR overview_plan extraction failed: {exc}")
         finally:
             try:
                 os.unlink(op_tmp)
@@ -194,7 +218,7 @@ async def analyze(
             async for event in _run_graph(tmp_path, enabled_checks, enabled_sub_checks, steel_list_data, overview_plan_data):
                 yield event
         except Exception as exc:
-            print(f"[server] ✗ EXCEPTION: {exc}")
+            _log(f"[server] ERR EXCEPTION: {exc}")
             traceback.print_exc()
             yield _sse({"type": "error", "message": str(exc)})
         finally:
@@ -202,7 +226,7 @@ async def analyze(
                 os.unlink(tmp_path)
             except OSError:
                 pass
-            print("[server] === Analysis done ===\n")
+            _log("[server] === Analysis done ===\n")
 
     return StreamingResponse(stream(), media_type="text/event-stream")
 
@@ -249,7 +273,7 @@ async def annotate_report(
                 "category":    it.get("category"),
             })
 
-    print(f"[annotate] {len(issues)} failed finding(s) → annotating {file.filename!r}")
+    _log(f"[annotate] {len(issues)} failed finding(s) -> annotating {file.filename!r}")
     try:
         annotated = await asyncio.to_thread(annotate_pdf, pdf_bytes, issues)
     except Exception as exc:

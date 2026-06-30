@@ -66,6 +66,7 @@ def _invalidate_caches() -> None:
     retriever.get_check_prompt.cache_clear()
     retriever.get_check_meta.cache_clear()
     retriever.get_check_requires_vision.cache_clear()
+    retriever.get_check_debug_trace.cache_clear()
 
 
 def read_check(domain: str, key: str) -> dict | None:
@@ -74,6 +75,7 @@ def read_check(domain: str, key: str) -> dict | None:
         return None
     builtin = is_builtin(domain, key)
     rv_raw = _read_md_section(path, "Requires Vision").strip().lower()
+    dt_raw = _read_md_section(path, "Debug Trace").strip().lower()
     return {
         "domain":           domain,
         "key":              key,
@@ -83,6 +85,7 @@ def read_check(domain: str, key: str) -> dict | None:
         "description":      _read_md_section(path, "Description"),
         "prompt":           _read_md_section(path, "Check Prompt"),
         "requires_vision":  rv_raw in ("true", "yes", "1"),
+        "debug_trace":      dt_raw in ("true", "yes", "1"),
         "builtin":          builtin,
         "user_defined":     not builtin,
     }
@@ -120,6 +123,7 @@ def domain_title(domain: str) -> str:
 
 def _render_md(check: dict) -> str:
     rv = "true" if check.get("requires_vision") else "false"
+    dt = "true" if check.get("debug_trace") else "false"
     return (
         f"# {check['display_name']}\n\n"
         f"> **Domain:** {check['domain']} | **Check key:** `{check['key']}`\n\n"
@@ -127,6 +131,7 @@ def _render_md(check: dict) -> str:
         f"## Pass\n\n{check['pass']}\n\n"
         f"## Not Found\n\n{check['not_found']}\n\n"
         f"## Requires Vision\n\n{rv}\n\n"
+        f"## Debug Trace\n\n{dt}\n\n"
         f"## Description\n\n{check.get('description', '')}\n\n"
         f"## Check Prompt\n\n{check['prompt']}\n"
     )
@@ -136,6 +141,7 @@ def save_check(
     *, domain: str, key: str | None, display_name: str, description: str,
     prompt: str, pass_text: str, not_found_text: str,
     requires_vision: bool = False,
+    debug_trace: bool | None = None,
 ) -> dict:
     """Create or overwrite a check .md. Built-in checks may be edited in place;
     new checks can be created in any domain. Returns the saved check."""
@@ -157,6 +163,13 @@ def save_check(
         raise ValueError("A new check needs a description or Check Prompt.")
 
     effective_prompt = (prompt or description or "").strip()
+    is_user = not is_builtin(domain, key)
+    if debug_trace is None:
+        if is_new and is_user:
+            debug_trace = True
+        else:
+            existing = read_check(domain, key)
+            debug_trace = bool(existing and existing.get("debug_trace"))
     check = {
         "domain":           domain,
         "key":              key,
@@ -166,14 +179,21 @@ def save_check(
         "pass":             (pass_text or "PASS").strip(),
         "not_found":        (not_found_text or "NOT FOUND").strip(),
         "requires_vision":  bool(requires_vision),
+        "debug_trace":      bool(debug_trace),
         "builtin":          is_builtin(domain, key),
-        "user_defined":     not is_builtin(domain, key),
+        "user_defined":     is_user,
     }
 
     path = _md_path(domain, key)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(_render_md(check), encoding="utf-8")
     _invalidate_caches()
+    if check.get("debug_trace"):
+        from qa_agent.extraction.evaluators import DETERMINISTIC_EVALUATORS
+        print(
+            f"[checks_registry] saved {domain}/{key} with debug_trace=true "
+            f"(deterministic={key in DETERMINISTIC_EVALUATORS})"
+        )
     return check
 
 

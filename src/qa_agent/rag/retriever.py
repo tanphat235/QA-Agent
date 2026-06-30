@@ -74,6 +74,18 @@ def get_check_requires_vision(domain: str, check_key: str) -> bool:
 
 
 @lru_cache(maxsize=None)
+def get_check_debug_trace(domain: str, check_key: str) -> bool:
+    """Return True if the check's .md declares '## Debug Trace: true'.
+
+    When enabled, analyze logs a structured [trace][check_key] block with
+    extracted values and pass/fail details (visible in backend / LangGraph logs).
+    """
+    md_path = _KNOWLEDGE_DIR / domain / check_key / f"{check_key}.md"
+    val = _read_md_section(md_path, "Debug Trace").strip().lower()
+    return val in ("true", "yes", "1")
+
+
+@lru_cache(maxsize=None)
 def get_node_images(domain: str) -> list[dict]:
     """
     Load all reference images for a domain from the knowledge filesystem.

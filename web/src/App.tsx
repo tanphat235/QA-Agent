@@ -473,16 +473,19 @@ export default function App() {
       .catch(() => {})
   }, [])
 
-  // Load on mount; refresh when Define Rules or Dashboard is opened (retry if prior load failed).
+  // Load on mount; refresh when Define Rules is opened; retry Dashboard if prior load failed.
   useEffect(() => { loadChecks() }, [loadChecks])
   useEffect(() => {
     if (activeView === 'definerules') {
       loadChecks()
       loadExtractionFields()
-    } else if (activeView === 'dashboard' && !checksData && !checksLoading && !checksLoadError) {
+    }
+  }, [activeView, loadChecks, loadExtractionFields])
+  useEffect(() => {
+    if (activeView === 'dashboard' && !checksData && !checksLoading && !checksLoadError) {
       loadChecks()
     }
-  }, [activeView, loadChecks, loadExtractionFields, checksData, checksLoading, checksLoadError])
+  }, [activeView, checksData, checksLoading, checksLoadError, loadChecks])
 
   const checkOptions: CheckOption[] = useMemo(() =>
     (checksData?.domains ?? []).map(d => ({
@@ -571,16 +574,29 @@ export default function App() {
         setCheckErrors(p => ({ ...p, [id]: String(detail) })); return
       }
       const body = await res.json().catch(() => ({})) as { check?: CheckDef }
-      setCheckDrafts(prev => { const n = { ...prev }; delete n[id]; return n })
-      if (body.check) {
-        setChecksData(prev => prev ? {
-          ...prev,
-          checks: prev.checks.map(c =>
-            ckey(c) === id ? { ...c, ...body.check! } : c
-          ),
-        } : prev)
+      const saved = body.check
+      if (saved) {
+        setChecksData(prev => {
+          if (!prev) return prev
+          if (id.startsWith('new::')) {
+            const savedId = ckey(saved)
+            if (prev.checks.some(c => ckey(c) === savedId)) return prev
+            return { ...prev, checks: [...prev.checks, saved] }
+          }
+          return {
+            ...prev,
+            checks: prev.checks.map(c => (ckey(c) === id ? { ...c, ...saved } : c)),
+          }
+        })
       }
-      loadChecks()
+      setCheckDrafts(prev => { const n = { ...prev }; delete n[id]; return n })
+    } catch (err) {
+      setCheckErrors(p => ({
+        ...p,
+        [id]: err instanceof Error
+          ? err.message
+          : 'Could not reach backend — run start_backend.bat on port 8001',
+      }))
     } finally {
       setCheckSaving(null)
     }
@@ -1202,6 +1218,21 @@ export default function App() {
               {checksLoading && !checksData ? (
                 <div className="flex items-center justify-center py-20 gap-2 text-gray-400">
                   <Loader2 size={18} className="animate-spin" /><span className="text-sm">Loading…</span>
+                </div>
+              ) : checksLoadError && !checksData ? (
+                <div className="rounded-xl border border-red-100 bg-red-50 px-5 py-4 space-y-2">
+                  <p className="text-[12px] font-semibold text-red-600">
+                    Could not load checks — {checksLoadError}
+                  </p>
+                  <p className="text-[11px] text-red-500/80 leading-relaxed">
+                    Start the backend on port 8001 (<span className="font-mono">start_backend.bat</span>) then retry.
+                  </p>
+                  <button
+                    onClick={() => { setChecksLoadError(null); loadChecks() }}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-red-200 text-red-600 text-[11px] font-bold rounded-lg hover:bg-red-100/50 transition-colors"
+                  >
+                    <RefreshCw size={11} /> Retry
+                  </button>
                 </div>
               ) : (
                 <>

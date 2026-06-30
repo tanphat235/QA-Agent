@@ -31,7 +31,7 @@ from langchain_core.outputs import LLMResult
 
 from qa_agent.state import GraphState
 from qa_agent import checks_registry as registry
-from qa_agent.rag.retriever import get_check_prompt, get_check_meta, get_check_requires_vision
+from qa_agent.rag.retriever import get_check_prompt, get_check_meta, get_check_requires_vision, get_check_debug_trace
 from qa_agent.nodes.issue_filter import OUTPUT_RULES, accept_finding, build_check_issues
 from qa_agent.extraction import (
     build_extraction_context,
@@ -39,6 +39,7 @@ from qa_agent.extraction import (
     list_extraction_fields,
     run_deterministic_check,
 )
+from qa_agent.extraction.debug_trace import log_check_trace, log_scale_values
 
 logger = logging.getLogger(__name__)
 
@@ -242,6 +243,37 @@ def _invoke_group(
     )
 
 
+def _emit_pre_run_trace(domain: str, keys: list[str], ctx) -> None:
+    """Log extraction snapshot for checks with Debug Trace enabled."""
+    for key in keys:
+        if not get_check_debug_trace(domain, key):
+            continue
+        if key == "scale_check":
+            allowed = ctx.title_block.get("scale_title_blocks") or []
+            if not allowed and ctx.scalars.get("drawing.scale_title_block"):
+                allowed = [s.strip() for s in str(ctx.scalars["drawing.scale_title_block"]).split(",") if s.strip()]
+            log_scale_values(
+                key,
+                title_scales=allowed,
+                sections=ctx.tables.get("drawing.scale_sections") or ctx.title_block.get("scale_sections") or [],
+            )
+        log_check_trace(
+            key,
+            phase="pre-run",
+            inputs={
+                "domain": domain,
+                "title_block_scales": ctx.title_block.get("scale_title_blocks") or ctx.scalars.get("drawing.scale_title_block"),
+                "element_code_top_left": ctx.scalars.get("drawing.element_code_top_left"),
+                "element_code_from_title": ctx.scalars.get("drawing.element_code_from_title"),
+                "drawing_title": ctx.scalars.get("drawing.drawing_title"),
+            },
+            details={
+                "section_scales": ctx.tables.get("drawing.scale_sections") or [],
+            },
+            result="starting check",
+        )
+
+
 def _apply_deterministic_checks(
     state: GraphState,
     active: list[str],
@@ -287,6 +319,8 @@ def run_user_ai_checks(domain: str, state: GraphState) -> list:
     formatted = ctx.drawing_formatted
     facts = format_extraction_for_llm(ctx)
     pdf_data: str | None = state.get("pdf_data")  # type: ignore[assignment]
+
+    _emit_pre_run_trace(domain, active, ctx)
 
     by_check: dict[str, list[_UserAiIssue]] = {k: [] for k in active}
     not_found_set: set[str] = set()

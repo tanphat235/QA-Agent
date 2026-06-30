@@ -32,6 +32,8 @@ EXTRACTION_FIELDS: tuple[ExtractField, ...] = (
     ExtractField("drawing.drawing_name", "Drawing name (top of sheet)", "drawing", "Prominent text cluster at top of sheet", "scalar"),
     ExtractField("drawing.element_code_top_left", "Element code (top-left label)", "drawing", "Element code label at top-left (e.g. 201-851)", "scalar"),
     ExtractField("drawing.element_code_from_title", "Element code (Drawing Title suffix)", "drawing", "Numeric suffix parsed from Drawing Title", "scalar"),
+    ExtractField("drawing.scale_title_block", "Scale (title block)", "drawing", "All Maßstab / Scale ratios in title block (e.g. 1:25, 1:10, 1:5)", "scalar"),
+    ExtractField("drawing.scale_sections", "Scale (section views)", "drawing", "Per-view scales on Schnitt/Ansicht/Detail labels", "table"),
     ExtractField("drawing.letzte_stabstahlposition", "letzte Stabstahlposition", "drawing", "Last bar Pos in title block", "scalar"),
     ExtractField("drawing.letzte_mattenposition", "letzte Mattenposition", "drawing", "Last mesh Pos in title block", "scalar"),
     # ── Drawing — schedules ───────────────────────────────────────────────────

@@ -11,7 +11,7 @@ _SECTION_ORDER = (
         "drawing.betondeckung_cv", "drawing.revision_title_block", "drawing.revision_table_last",
         "drawing.status", "drawing.planfreigabe", "drawing.drawing_no", "drawing.drawing_title",
         "drawing.drawing_name", "drawing.element_code_top_left", "drawing.element_code_from_title",
-        "drawing.letzte_stabstahlposition", "drawing.letzte_mattenposition",
+        "drawing.scale_title_block", "drawing.letzte_stabstahlposition", "drawing.letzte_mattenposition",
     )),
     ("Schedules", (
         "drawing.stabliste_total", "drawing.mattenstahlliste_total",
@@ -44,6 +44,14 @@ def format_extraction_for_llm(ctx: ExtractionContext) -> str:
             lines.extend(section_lines)
 
     ebt = ctx.tables.get("drawing.einbauteilliste") or []
+    scale_secs = ctx.tables.get("drawing.scale_sections") or []
+    if scale_secs:
+        lines.append("[Section view scales]")
+        for sec in scale_secs:
+            lines.append(
+                f"  [{sec.get('scale')}] {sec.get('label', '')[:80]}"
+            )
+
     if ebt:
         lines.append("[Einbauteilliste (drawing) rows]")
         for it in ebt:

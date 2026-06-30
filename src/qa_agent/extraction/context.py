@@ -49,6 +49,7 @@ def build_extraction_context(state: GraphState) -> ExtractionContext:
         "drawing.drawing_name": tb.get("drawing_name"),
         "drawing.element_code_top_left": tb.get("element_code_top_left"),
         "drawing.element_code_from_title": tb.get("element_code_from_title"),
+        "drawing.scale_title_block": tb.get("scale_title_block"),
         "drawing.letzte_stabstahlposition": tb.get("letzte_stabstahlposition"),
         "drawing.letzte_mattenposition": tb.get("letzte_mattenposition"),
         "drawing.stabliste_total": pc.get("stabliste_total"),
@@ -62,6 +63,7 @@ def build_extraction_context(state: GraphState) -> ExtractionContext:
 
     tables: dict[str, list] = {
         "drawing.einbauteilliste": pc.get("einbauteilliste_items") or [],
+        "drawing.scale_sections": tb.get("scale_sections") or [],
         "steel_list.einbauteilliste": sl.get("einbauteilliste_items") or [],
         "overview_plan.element_rows": op.get("element_rows") or [],
     }

@@ -23,7 +23,7 @@ async def stream_analysis(
         yield node_name, event[node_name]
 
 
-def main(pdf_path: str = "C:\\Users\\phat.phamt\\Desktop\\QA AI\\Wall Reinforcement_2100_TXK.pdf") -> dict:
+def main(pdf_path: str = "") -> dict:
     final_state = graph.invoke({"pdf_path": pdf_path, "enabled_checks": _ALL_CHECKS})
     result = final_state["ui_response"]
     print(result)
@@ -31,5 +31,5 @@ def main(pdf_path: str = "C:\\Users\\phat.phamt\\Desktop\\QA AI\\Wall Reinforcem
 
 
 if __name__ == "__main__":
-    path = sys.argv[1] if len(sys.argv) > 1 else "C:\\Users\\phat.phamt\\Desktop\\QA AI\\Wall Reinforcement_2100_TXK.pdf"
+    path = sys.argv[1] if len(sys.argv) > 1 else ""
     main(path)
