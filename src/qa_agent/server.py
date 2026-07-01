@@ -10,8 +10,6 @@ from pathlib import Path
 from typing import Annotated
 from dotenv import load_dotenv
 
-import docx as python_docx
-
 load_dotenv()
 
 
@@ -39,7 +37,7 @@ _configure_stdio_utf8()
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from langgraph_sdk import get_client
 
@@ -49,16 +47,6 @@ from qa_agent import checks_registry as registry
 
 LANGGRAPH_URL = os.getenv("LANGGRAPH_URL", "http://127.0.0.1:2024")
 
-_KNOWLEDGE_DIR = Path(__file__).parent.parent.parent / "QA AI Drawing" / "QA Knowledge"
-_DOCX_PATH     = _KNOWLEDGE_DIR / "structural_qa_rag_knowledge_pack.docx"
-_RAG_CACHE_PATH = Path(__file__).parent / "rag" / "data" / "knowledge_cache.json"
-
-# Domain-section keywords (same as knowledge_builder.py)
-_DOMAIN_KEYWORDS = {
-    "spell": ["spell check node"],
-    "bend":  ["bend check node"],
-    "rebar": ["rebar check node"],
-}
 GRAPH_NAME = "qa_agent"
 
 app = FastAPI(title="Drawing Analyzer API")
@@ -344,100 +332,3 @@ async def delete_check(domain: str, key: str):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"ok": True}
-
-
-@app.get("/api/knowledge-base/download")
-async def download_knowledge_file():
-    def _ensure() -> None:
-        _KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
-        if not _DOCX_PATH.exists():
-            doc = python_docx.Document()
-            doc.add_heading("QA Knowledge Base", level=1)
-            for heading in ("Spell Check Node", "Bend Check Node", "Rebar Check Node"):
-                doc.add_heading(heading, level=2)
-                doc.add_paragraph("Add your QA rules here.")
-            doc.save(str(_DOCX_PATH))
-
-    await asyncio.to_thread(_ensure)
-    return FileResponse(
-        path=str(_DOCX_PATH),
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        filename="structural_qa_rag_knowledge_pack.docx",
-    )
-
-
-_SUPPORTED_IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
-_R_EMBED = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed"
-
-
-@app.post("/api/knowledge-base/upload")
-async def upload_knowledge_file(file: Annotated[UploadFile, File()]):
-    import base64  # noqa: PLC0415
-
-    data = await file.read()
-
-    def _save_and_index() -> tuple[int, int]:
-        _KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
-        _DOCX_PATH.write_bytes(data)
-
-        doc = python_docx.Document(str(_DOCX_PATH))
-
-        # ── Build rId → image map from document relationships ──────────────
-        rid_to_img: dict[str, dict] = {}
-        for rel in doc.part.rels.values():
-            if "image" not in rel.reltype:
-                continue
-            media_type = rel.target_part.content_type
-            if media_type not in _SUPPORTED_IMAGE_TYPES:
-                continue
-            b64 = base64.standard_b64encode(rel.target_part.blob).decode()
-            rid_to_img[rel.rId] = {"data": b64, "media_type": media_type}
-
-        # ── Walk paragraphs: extract text + images, split by domain ────────
-        text_sections: dict[str, list[str]] = {d: [] for d in ("spell", "bend", "rebar")}
-        img_sections:  dict[str, list[dict]] = {d: [] for d in ("spell", "bend", "rebar")}
-        current: str | None = None
-
-        for para in doc.paragraphs:
-            text = para.text.strip()
-            lower = text.lower()
-            for domain, keywords in _DOMAIN_KEYWORDS.items():
-                if any(kw in lower for kw in keywords):
-                    current = domain
-                    break
-            if not current:
-                continue
-            if text:
-                text_sections[current].append(text)
-            for elem in para._element.iter():
-                rid = elem.get(_R_EMBED)
-                if rid and rid in rid_to_img:
-                    img = rid_to_img[rid]
-                    if img not in img_sections[current]:   # deduplicate
-                        img_sections[current].append(img)
-
-        # Fall back: no domain headers found → assign everything to all domains
-        if not any(lines for lines in text_sections.values()):
-            all_text = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
-            all_imgs  = list(rid_to_img.values())
-            for domain in ("spell", "bend", "rebar"):
-                text_sections[domain] = all_text
-                img_sections[domain]  = all_imgs
-
-        cache: dict = {}
-        if _RAG_CACHE_PATH.exists():
-            with open(_RAG_CACHE_PATH, encoding="utf-8") as f:
-                cache = json.load(f)
-        cache["docx_knowledge"] = {d: "\n".join(lines) for d, lines in text_sections.items()}
-        cache["docx_images"]    = img_sections
-        _RAG_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(_RAG_CACHE_PATH, "w", encoding="utf-8") as f:
-            json.dump(cache, f, indent=2, ensure_ascii=False)
-
-        total_imgs = sum(len(v) for v in img_sections.values())
-        return sum(len(v) for v in text_sections.values()), total_imgs
-
-    lines, imgs = await asyncio.to_thread(_save_and_index)
-    from qa_agent.rag.retriever import _load_cache  # noqa: PLC0415
-    _load_cache.cache_clear()
-    return {"ok": True, "lines_indexed": lines, "images_indexed": imgs}

@@ -6,7 +6,6 @@ This module provides cached readers — no pre-built cache file required.
 """
 from __future__ import annotations
 
-import base64
 import logging
 from functools import lru_cache
 from pathlib import Path
@@ -17,14 +16,6 @@ _KNOWLEDGE_DIR = (
     Path(__file__).parent.parent.parent.parent
     / "QA AI Drawing" / "QA Knowledge"
 )
-
-_IMG_EXTS: dict[str, str] = {
-    ".png":  "image/png",
-    ".jpg":  "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif":  "image/gif",
-    ".webp": "image/webp",
-}
 
 
 def _read_md_section(md_path: Path, section: str) -> str:
@@ -83,25 +74,3 @@ def get_check_debug_trace(domain: str, check_key: str) -> bool:
     md_path = _KNOWLEDGE_DIR / domain / check_key / f"{check_key}.md"
     val = _read_md_section(md_path, "Debug Trace").strip().lower()
     return val in ("true", "yes", "1")
-
-
-@lru_cache(maxsize=None)
-def get_node_images(domain: str) -> list[dict]:
-    """
-    Load all reference images for a domain from the knowledge filesystem.
-    Returns Anthropic image content blocks. Cached in memory after first call.
-    """
-    domain_dir = _KNOWLEDGE_DIR / domain
-    if not domain_dir.exists():
-        return []
-    images: list[dict] = []
-    for img_file in sorted(domain_dir.rglob("*")):
-        ext = img_file.suffix.lower()
-        if ext not in _IMG_EXTS:
-            continue
-        data = base64.standard_b64encode(img_file.read_bytes()).decode()
-        images.append({
-            "type": "image",
-            "source": {"type": "base64", "media_type": _IMG_EXTS[ext], "data": data},
-        })
-    return images
