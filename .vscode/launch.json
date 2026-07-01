@@ -13,7 +13,6 @@
             "env": {
                 "PYTHONPATH": "${workspaceFolder}/src"
             },
-            "python": "C:/Users/phat.phamt/AppData/Local/pypoetry/Cache/virtualenvs/qa-agent-Bqh0f-7k-py3.13/Scripts/python.exe",
             "justMyCode": false
         },
         {
@@ -32,7 +31,6 @@
             "env": {
                 "PYTHONPATH": "${workspaceFolder}/src"
             },
-            "python": "C:/Users/phat.phamt/AppData/Local/pypoetry/Cache/virtualenvs/qa-agent-Bqh0f-7k-py3.13/Scripts/python.exe",
             "justMyCode": false
         },
         {
@@ -46,7 +44,6 @@
             "env": {
                 "PYTHONPATH": "${workspaceFolder}/src"
             },
-            "python": "C:/Users/phat.phamt/AppData/Local/pypoetry/Cache/virtualenvs/qa-agent-Bqh0f-7k-py3.13/Scripts/python.exe",
             "justMyCode": false
         }
     ]

@@ -5,6 +5,6 @@ echo Studio UI: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:202
 echo.
 echo [!] Start this BEFORE start_backend.bat
 echo.
-"C:\Users\phat.phamt\AppData\Roaming\Python\Python313\Scripts\poetry.exe" run langgraph dev
+poetry run langgraph dev
 pause
     
