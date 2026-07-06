@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": "https://qa-agent-nine.vercel.app/api/$1"
+    }
+  ]
+}
