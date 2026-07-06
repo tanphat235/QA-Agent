@@ -29,7 +29,7 @@ dependencies = [
 packages = [{include = "qa_agent", from = "src"}]
 
 [tool.vercel]
-entrypoint = "qa_agent.server:app"
+entrypoint = "server:app"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
