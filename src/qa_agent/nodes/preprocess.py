@@ -1,5 +1,7 @@
 import base64
 import logging
+import os
+import tempfile
 from anthropic import Anthropic
 from pypdf import PdfReader
 
@@ -7,6 +9,32 @@ from qa_agent.state import GraphState
 from qa_agent.nodes.pdf_extractor import extract_pdf_content
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_pdf_path(state: GraphState) -> tuple[str, bool]:
+    """Return a local filesystem path to the PDF and whether the caller should delete it.
+
+    When backend and LangGraph run on different hosts, graph input carries base64
+    `pdf_data` instead of a shared temp path.
+    """
+    pdf_path = state.get("pdf_path") or ""
+    if pdf_path and os.path.isfile(pdf_path):
+        return pdf_path, False
+
+    pdf_data = state.get("pdf_data")
+    if not pdf_data:
+        raise FileNotFoundError(
+            f"PDF not found at {pdf_path!r} and no pdf_data was provided in graph state"
+        )
+
+    fd, local_path = tempfile.mkstemp(suffix=".pdf")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(base64.standard_b64decode(pdf_data))
+    except Exception:
+        os.unlink(local_path)
+        raise
+    return local_path, True
 
 _COMMON_SYSTEM = """\
 You are a senior structural rebar detailing QA reviewer performing a visual and technical inspection of a PDF structural drawing.
@@ -37,8 +65,19 @@ Do not include anything else.\
 
 
 def preprocess(state: GraphState) -> dict:
-    pdf_path = state["pdf_path"]
+    pdf_path, cleanup = _resolve_pdf_path(state)
 
+    try:
+        return _preprocess_from_path(pdf_path, state)
+    finally:
+        if cleanup:
+            try:
+                os.unlink(pdf_path)
+            except OSError:
+                pass
+
+
+def _preprocess_from_path(pdf_path: str, state: GraphState) -> dict:
     # ── Code-based checks ──────────────────────────────────────────
     reader = PdfReader(pdf_path)
     page_count = len(reader.pages)

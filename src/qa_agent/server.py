@@ -100,6 +100,7 @@ def _node_sse_events(node_name: str, node_data: dict) -> list[str]:
 
 
 async def _run_graph(
+    pdf_bytes: bytes,
     tmp_path: str,
     enabled_checks: list[str],
     enabled_sub_checks: dict[str, list[str]] | None = None,
@@ -116,7 +117,12 @@ async def _run_graph(
 
     yield _sse({"type": "run_started", "thread_id": thread_id, "studio_url": studio_url})
 
-    graph_input: dict = {"pdf_path": tmp_path, "enabled_checks": enabled_checks}
+    # pdf_data lets LangGraph read the upload when backend and graph run on different hosts.
+    graph_input: dict = {
+        "pdf_path": tmp_path,
+        "pdf_data": base64.b64encode(pdf_bytes).decode("ascii"),
+        "enabled_checks": enabled_checks,
+    }
     if enabled_sub_checks:
         graph_input["enabled_sub_checks"] = enabled_sub_checks
     if steel_list_data:
@@ -203,7 +209,9 @@ async def analyze(
     async def stream():
         yield _sse({"type": "ack"})
         try:
-            async for event in _run_graph(tmp_path, enabled_checks, enabled_sub_checks, steel_list_data, overview_plan_data):
+            async for event in _run_graph(
+                data, tmp_path, enabled_checks, enabled_sub_checks, steel_list_data, overview_plan_data
+            ):
                 yield event
         except Exception as exc:
             _log(f"[server] ERR EXCEPTION: {exc}")
