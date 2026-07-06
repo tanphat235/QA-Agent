@@ -2,7 +2,12 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
+
+
+def _debug_trace_enabled() -> bool:
+    return os.getenv("QA_DEBUG_TRACE", "false").lower() in ("true", "1", "yes")
 
 
 def log_check_trace(
@@ -14,18 +19,23 @@ def log_check_trace(
     result: str = "",
 ) -> None:
     """Print a structured debug block visible in LangGraph / backend logs."""
-    print(f"[trace][{check_key}] === DEBUG TRACE ({phase}) ===")
-    if inputs:
-        try:
-            payload = json.dumps(inputs, ensure_ascii=False, indent=2, default=str)
-        except TypeError:
-            payload = str(inputs)
-        print(f"[trace][{check_key}] inputs:\n{payload}")
-    if details:
-        for k, v in details.items():
-            print(f"[trace][{check_key}]   {k}: {v!r}")
-    if result:
-        print(f"[trace][{check_key}] result: {result}")
+    if not _debug_trace_enabled():
+        return
+    try:
+        print(f"[trace][{check_key}] === DEBUG TRACE ({phase}) ===")
+        if inputs:
+            try:
+                payload = json.dumps(inputs, ensure_ascii=False, indent=2, default=str)
+            except TypeError:
+                payload = str(inputs)
+            print(f"[trace][{check_key}] inputs:\n{payload}")
+        if details:
+            for k, v in details.items():
+                print(f"[trace][{check_key}]   {k}: {v!r}")
+        if result:
+            print(f"[trace][{check_key}] result: {result}")
+    except Exception:
+        pass
 
 
 def log_scale_values(
@@ -36,23 +46,28 @@ def log_scale_values(
     sections: list[dict],
 ) -> None:
     """Dedicated scale_check debug — allowed title-block scales vs each section."""
-    allowed = title_scales if title_scales is not None else ([title_scale] if title_scale else [])
-    allowed_set = set(allowed)
-    print(f"[trace][{check_key}] --- scale values ---")
-    print(f"[trace][{check_key}]   title_block_scales (allowed): {allowed!r}")
-    if not sections:
-        print(f"[trace][{check_key}]   section_scales: (none found)")
+    if not _debug_trace_enabled():
         return
-    for i, sec in enumerate(sections, 1):
-        sec_scale = sec.get("scale")
-        if sec_scale in allowed_set:
-            flag = "OK"
-        elif allowed:
-            flag = "MISMATCH"
-        else:
-            flag = "?"
-        print(
-            f"[trace][{check_key}]   section[{i}] {flag} "
-            f"scale={sec_scale!r} label={sec.get('label')!r} "
-            f"(line {sec.get('line')}, {sec.get('source')})"
-        )
+    try:
+        allowed = title_scales if title_scales is not None else ([title_scale] if title_scale else [])
+        allowed_set = set(allowed)
+        print(f"[trace][{check_key}] --- scale values ---")
+        print(f"[trace][{check_key}]   title_block_scales (allowed): {allowed!r}")
+        if not sections:
+            print(f"[trace][{check_key}]   section_scales: (none found)")
+            return
+        for i, sec in enumerate(sections, 1):
+            sec_scale = sec.get("scale")
+            if sec_scale in allowed_set:
+                flag = "OK"
+            elif allowed:
+                flag = "MISMATCH"
+            else:
+                flag = "?"
+            print(
+                f"[trace][{check_key}]   section[{i}] {flag} "
+                f"scale={sec_scale!r} label={sec.get('label')!r} "
+                f"(line {sec.get('line')}, {sec.get('source')})"
+            )
+    except Exception:
+        pass

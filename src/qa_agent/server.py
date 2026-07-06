@@ -49,6 +49,10 @@ LANGGRAPH_URL = os.getenv("LANGGRAPH_URL", "http://127.0.0.1:2024")
 
 GRAPH_NAME = "qa_agent"
 
+def _langgraph_is_remote() -> bool:
+    url = (LANGGRAPH_URL or "").lower()
+    return not any(host in url for host in ("127.0.0.1", "localhost"))
+
 app = FastAPI(title="Drawing Analyzer API")
 
 app.add_middleware(
@@ -83,20 +87,82 @@ async def _save_upload(data: bytes) -> str:
     return await asyncio.to_thread(_write)
 
 
-def _node_sse_events(node_name: str, node_data: dict) -> list[str]:
-    """Convert a completed node into SSE event strings."""
+def _node_sse_events(node_name: str, node_data: dict) -> tuple[list[str], dict | None]:
+    """Convert a completed node into SSE event strings.
+
+    Returns (events, ui_response) when return_to_ui produced a report.
+    """
     label = NODE_LABELS.get(node_name, node_name)
     events = [_sse({"type": "progress", "node": node_name, "label": label})]
     _log(f"[server] OK node: {node_name}  |  keys: {list(node_data.keys()) if isinstance(node_data, dict) else type(node_data)}")
 
     if node_name != "return_to_ui":
-        return events
+        return events, None
 
     ui_response = node_data.get("ui_response") if isinstance(node_data, dict) else None
     _log(f"[server] ui_response summary: {ui_response.get('summary') if ui_response else 'NONE'}")
     if ui_response:
         events.append(_sse({"type": "result", "data": ui_response}))
-    return events
+    return events, ui_response
+
+
+def _ui_from_state_payload(payload: object) -> dict | None:
+    """Extract ui_response from LangGraph thread/run state payloads."""
+    if not isinstance(payload, dict):
+        return None
+    direct = payload.get("ui_response")
+    if isinstance(direct, dict):
+        return direct
+    values = payload.get("values")
+    if isinstance(values, dict):
+        nested = values.get("ui_response")
+        if isinstance(nested, dict):
+            return nested
+    return None
+
+
+async def _recover_ui_response(lg, thread_id: str, run_id: str | None) -> dict | None:
+    """Best-effort fetch of the final report when the live stream drops early."""
+    try:
+        thread_state = await lg.threads.get_state(thread_id)
+        ui = _ui_from_state_payload(thread_state)
+        if ui:
+            _log("[server] recovered ui_response via threads.get_state")
+            return ui
+    except Exception as exc:
+        _log(f"[server] WARN threads.get_state failed (non-fatal): {exc}")
+
+    if not run_id:
+        return None
+
+    try:
+        joined = await lg.runs.join(thread_id, run_id)
+        ui = _ui_from_state_payload(joined)
+        if ui:
+            _log("[server] recovered ui_response via runs.join")
+            return ui
+    except Exception as exc:
+        _log(f"[server] WARN runs.join failed (non-fatal): {exc}")
+
+    return None
+
+
+async def _create_thread_id(lg) -> str:
+    """Create a LangGraph thread; required for runs but isolated from monitoring."""
+    thread = await lg.threads.create()
+    return thread["thread_id"]
+
+
+def _monitoring_sse(thread_id: str) -> str | None:
+    """Optional Studio/monitoring metadata for LangSmith — must never break the run."""
+    try:
+        studio_url = f"https://smith.langchain.com/studio/?baseUrl={LANGGRAPH_URL}"
+        _log(f"[server] thread_id : {thread_id}")
+        _log(f"[server] studio    : {studio_url}")
+        return _sse({"type": "run_started", "thread_id": thread_id, "studio_url": studio_url})
+    except Exception as exc:
+        _log(f"[server] WARN monitoring metadata skipped (non-fatal): {exc}")
+        return None
 
 
 async def _run_graph(
@@ -109,17 +175,22 @@ async def _run_graph(
 ) -> AsyncIterator[str]:
     """Stream SSE events by routing graph execution through LangGraph API."""
     lg = get_client(url=LANGGRAPH_URL)
-    thread = await lg.threads.create()
-    thread_id = thread["thread_id"]
-    studio_url = f"https://smith.langchain.com/studio/?baseUrl={LANGGRAPH_URL}"
-    _log(f"[server] thread_id : {thread_id}")
-    _log(f"[server] studio    : {studio_url}")
 
-    yield _sse({"type": "run_started", "thread_id": thread_id, "studio_url": studio_url})
+    try:
+        thread_id = await _create_thread_id(lg)
+    except Exception as exc:
+        _log(f"[server] ERR could not create LangGraph thread: {exc}")
+        yield _sse({"type": "error", "message": f"Could not start LangGraph run: {exc}"})
+        return
 
-    # pdf_data lets LangGraph read the upload when backend and graph run on different hosts.
+    # LangSmith Studio link — optional; failures here must not abort analysis.
+    monitoring = _monitoring_sse(thread_id)
+    if monitoring:
+        yield monitoring
+
+    remote = _langgraph_is_remote()
     graph_input: dict = {
-        "pdf_path": tmp_path,
+        "pdf_path": "" if remote else tmp_path,
         "pdf_data": base64.b64encode(pdf_bytes).decode("ascii"),
         "enabled_checks": enabled_checks,
     }
@@ -130,23 +201,45 @@ async def _run_graph(
     if overview_plan_data:
         graph_input["overview_plan_data"] = overview_plan_data
 
-    async for chunk in lg.runs.stream(
-        thread_id,
-        GRAPH_NAME,
-        input=graph_input,
-        stream_mode="updates",
-    ):
-        if chunk.event == "metadata":
-            run_id = chunk.data.get("run_id") if isinstance(chunk.data, dict) else None
-            if run_id:
-                _log(f"[server] run_id    : {run_id}")
-        elif chunk.event == "updates":
-            for node_name, node_data in chunk.data.items():
-                for event in _node_sse_events(node_name, node_data):
-                    yield event
-        elif chunk.event == "error":
-            _log(f"[server] ERR LangGraph error: {chunk.data}")
-            yield _sse({"type": "error", "message": str(chunk.data)})
+    got_result = False
+    run_id: str | None = None
+    stream_error: str | None = None
+
+    try:
+        async for chunk in lg.runs.stream(
+            thread_id,
+            GRAPH_NAME,
+            input=graph_input,
+            stream_mode="updates",
+        ):
+            if chunk.event == "metadata":
+                rid = chunk.data.get("run_id") if isinstance(chunk.data, dict) else None
+                if rid:
+                    run_id = rid
+                    _log(f"[server] run_id    : {run_id}")
+            elif chunk.event == "updates":
+                for node_name, node_data in chunk.data.items():
+                    events, ui_response = _node_sse_events(node_name, node_data)
+                    for event in events:
+                        yield event
+                    if ui_response:
+                        got_result = True
+            elif chunk.event == "error":
+                stream_error = str(chunk.data)
+                _log(f"[server] WARN LangGraph stream error (will try recovery): {chunk.data}")
+    except Exception as exc:
+        stream_error = str(exc)
+        _log(f"[server] WARN LangGraph stream interrupted (will try recovery): {exc}")
+
+    if not got_result:
+        ui_response = await _recover_ui_response(lg, thread_id, run_id)
+        if ui_response:
+            yield _sse({"type": "progress", "node": "return_to_ui", "label": NODE_LABELS["return_to_ui"]})
+            yield _sse({"type": "result", "data": ui_response})
+            got_result = True
+
+    if not got_result and stream_error:
+        yield _sse({"type": "error", "message": stream_error})
 
 
 @app.post("/api/analyze")
