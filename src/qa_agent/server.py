@@ -39,15 +39,20 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from langgraph_sdk import get_client
 
+from qa_agent.graph import graph
 from qa_agent.nodes.pdf_extractor import extract_steel_list_pdf, extract_overview_plan_pdf
 from qa_agent.pdf_annotator import annotate_pdf
 from qa_agent import checks_registry as registry
 
 LANGGRAPH_URL = os.getenv("LANGGRAPH_URL", "http://127.0.0.1:2024")
-
 GRAPH_NAME = "qa_agent"
+
+
+def _use_langgraph_api() -> bool:
+    """Use remote LangGraph API server only when explicitly enabled (local dev + Studio)."""
+    return os.getenv("QA_USE_LANGGRAPH_API", "false").lower() in ("true", "1", "yes")
+
 
 def _langgraph_is_remote() -> bool:
     url = (LANGGRAPH_URL or "").lower()
@@ -165,7 +170,47 @@ def _monitoring_sse(thread_id: str) -> str | None:
         return None
 
 
-async def _run_graph(
+async def _run_graph_inprocess(
+    tmp_path: str,
+    enabled_checks: list[str],
+    enabled_sub_checks: dict[str, list[str]] | None = None,
+    steel_list_data: dict | None = None,
+    overview_plan_data: dict | None = None,
+) -> AsyncIterator[str]:
+    """Run the compiled graph inside the FastAPI process (production default)."""
+    _log("[server] Running graph in-process (no LangGraph API server)")
+
+    graph_input: dict = {
+        "pdf_path": tmp_path,
+        "enabled_checks": enabled_checks,
+    }
+    if enabled_sub_checks:
+        graph_input["enabled_sub_checks"] = enabled_sub_checks
+    if steel_list_data:
+        graph_input["steel_list_data"] = steel_list_data
+    if overview_plan_data:
+        graph_input["overview_plan_data"] = overview_plan_data
+
+    got_result = False
+    try:
+        async for event in graph.astream(graph_input, stream_mode="updates"):
+            for node_name, node_data in event.items():
+                events, ui_response = _node_sse_events(node_name, node_data)
+                for item in events:
+                    yield item
+                if ui_response:
+                    got_result = True
+    except Exception as exc:
+        _log(f"[server] ERR in-process graph failed: {exc}")
+        traceback.print_exc()
+        yield _sse({"type": "error", "message": str(exc)})
+        return
+
+    if not got_result:
+        yield _sse({"type": "error", "message": "Graph finished without ui_response"})
+
+
+async def _run_graph_via_api(
     pdf_bytes: bytes,
     tmp_path: str,
     enabled_checks: list[str],
@@ -173,7 +218,9 @@ async def _run_graph(
     steel_list_data: dict | None = None,
     overview_plan_data: dict | None = None,
 ) -> AsyncIterator[str]:
-    """Stream SSE events by routing graph execution through LangGraph API."""
+    """Stream SSE events via remote LangGraph API (opt-in local dev only)."""
+    from langgraph_sdk import get_client
+
     lg = get_client(url=LANGGRAPH_URL)
 
     try:
@@ -242,6 +289,28 @@ async def _run_graph(
         yield _sse({"type": "error", "message": stream_error})
 
 
+async def _run_graph(
+    pdf_bytes: bytes,
+    tmp_path: str,
+    enabled_checks: list[str],
+    enabled_sub_checks: dict[str, list[str]] | None = None,
+    steel_list_data: dict | None = None,
+    overview_plan_data: dict | None = None,
+) -> AsyncIterator[str]:
+    if _use_langgraph_api():
+        async for event in _run_graph_via_api(
+            pdf_bytes, tmp_path, enabled_checks, enabled_sub_checks,
+            steel_list_data, overview_plan_data,
+        ):
+            yield event
+        return
+
+    async for event in _run_graph_inprocess(
+        tmp_path, enabled_checks, enabled_sub_checks, steel_list_data, overview_plan_data,
+    ):
+        yield event
+
+
 @app.post("/api/analyze")
 async def analyze(
     file: Annotated[UploadFile, File()],
@@ -261,7 +330,10 @@ async def analyze(
     tmp_path = await _save_upload(data)
 
     _log(f"\n[server] === New analysis: {file.filename} -> {tmp_path} | checks: {enabled_checks} | sub_checks: {enabled_sub_checks} ===")
-    _log(f"[server] Routing to LangGraph API at {LANGGRAPH_URL}")
+    if _use_langgraph_api():
+        _log(f"[server] Routing to LangGraph API at {LANGGRAPH_URL}")
+    else:
+        _log("[server] Graph mode: in-process")
 
     # ── pdfplumber pre-extraction for supplementary files ───────────────────
     steel_list_data: dict | None = None
