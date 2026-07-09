@@ -11,9 +11,16 @@ from __future__ import annotations
 
 import re
 import shutil
+from pathlib import Path
 
+from qa_agent.rag.knowledge_paths import (
+    knowledge_roots,
+    resolve_md_path,
+    writable_knowledge_dir,
+    writable_md_path,
+)
 from qa_agent.rag import retriever
-from qa_agent.rag.retriever import _KNOWLEDGE_DIR, _read_md_section
+from qa_agent.rag.retriever import _read_md_section
 
 BUILTIN_DOMAINS = ["spell", "bend", "rebar"]
 ALL_DOMAINS = BUILTIN_DOMAINS
@@ -43,8 +50,8 @@ _DOMAIN_TITLES = {
 _KEY_RE = re.compile(r"^[a-z][a-z0-9_]{1,48}$")
 
 
-def _md_path(domain: str, key: str):
-    return _KNOWLEDGE_DIR / domain / key / f"{key}.md"
+def _md_path(domain: str, key: str) -> Path | None:
+    return resolve_md_path(domain, key)
 
 
 def is_builtin(domain: str, key: str) -> bool:
@@ -71,7 +78,7 @@ def _invalidate_caches() -> None:
 
 def read_check(domain: str, key: str) -> dict | None:
     path = _md_path(domain, key)
-    if not path.exists():
+    if path is None:
         return None
     builtin = is_builtin(domain, key)
     rv_raw = _read_md_section(path, "Requires Vision").strip().lower()
@@ -92,13 +99,15 @@ def read_check(domain: str, key: str) -> dict | None:
 
 
 def list_domain_check_keys(domain: str) -> list[str]:
-    domain_dir = _KNOWLEDGE_DIR / domain
-    if not domain_dir.exists():
-        return []
-    return sorted(
-        p.name for p in domain_dir.iterdir()
-        if p.is_dir() and (p / f"{p.name}.md").exists()
-    )
+    keys: set[str] = set()
+    for root in knowledge_roots():
+        domain_dir = root / domain
+        if not domain_dir.is_dir():
+            continue
+        for p in domain_dir.iterdir():
+            if p.is_dir() and (p / f"{p.name}.md").is_file():
+                keys.add(p.name)
+    return sorted(keys)
 
 
 def list_user_ai_check_keys(domain: str) -> list[str]:
@@ -156,7 +165,7 @@ def save_check(
             "(must start with a letter)."
         )
 
-    is_new = not _md_path(domain, key).exists()
+    is_new = _md_path(domain, key) is None
     if is_new and is_builtin(domain, key):
         raise ValueError(f"Check key {key!r} is reserved for a built-in check.")
     if is_new and not (prompt or description or "").strip():
@@ -184,8 +193,7 @@ def save_check(
         "user_defined":     is_user,
     }
 
-    path = _md_path(domain, key)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path = writable_md_path(domain, key)
     path.write_text(_render_md(check), encoding="utf-8")
     _invalidate_caches()
     if check.get("debug_trace"):
@@ -204,7 +212,8 @@ def delete_check(domain: str, key: str) -> None:
         raise ValueError(f"Unknown domain: {domain!r}")
     if is_builtin(domain, key):
         raise ValueError("Built-in checks cannot be deleted.")
-    folder = _md_path(domain, key).parent
-    if folder.exists():
-        shutil.rmtree(folder)
+    overlay_path = writable_knowledge_dir() / domain / key / f"{key}.md"
+    if not overlay_path.is_file():
+        raise ValueError(f"Check {domain}/{key} not found or cannot be deleted on this host.")
+    shutil.rmtree(overlay_path.parent)
     _invalidate_caches()

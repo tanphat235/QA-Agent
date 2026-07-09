@@ -495,6 +495,9 @@ async def save_check(body: _CheckBody):
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except OSError as exc:
+        _log(f"[server] ERR save_check filesystem: {exc}")
+        raise HTTPException(status_code=500, detail=f"Could not save check: {exc}")
     return {"ok": True, "check": saved}
 
 
