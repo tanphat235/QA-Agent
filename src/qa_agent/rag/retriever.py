@@ -10,7 +10,7 @@ import logging
 from functools import lru_cache
 from pathlib import Path
 
-from qa_agent.rag.knowledge_paths import resolve_md_path
+from qa_agent.rag.knowledge_paths import list_check_image_paths, resolve_md_path
 
 logger = logging.getLogger(__name__)
 
@@ -66,10 +66,14 @@ def get_check_requires_vision(domain: str, check_key: str) -> bool:
 
     Defaults to False — text-only checks run on the cheaper Haiku model.
     Vision checks receive the rendered PDF document and run on Sonnet.
+    A check with attached reference images always requires vision — the
+    images can only be read by a vision model.
     """
     md_path = resolve_md_path(domain, check_key)
     if md_path is None:
         return False
+    if list_check_image_paths(domain, check_key):
+        return True
     val = _read_md_section(md_path, "Requires Vision").strip().lower()
     return val in ("true", "yes", "1")
 

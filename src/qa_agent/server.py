@@ -508,3 +508,46 @@ async def delete_check(domain: str, key: str):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"ok": True}
+
+
+@app.post("/api/checks/{domain}/{key}/images")
+async def upload_check_image(domain: str, key: str, file: UploadFile = File(...)):
+    """Attach a reference image to a user-defined check. The image is stored
+    next to the check's .md and sent to the vision model during analysis."""
+    data = await file.read()
+    try:
+        name = await asyncio.to_thread(
+            registry.save_check_image, domain, key, file.filename or "image.png", data,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except OSError as exc:
+        _log(f"[server] ERR upload_check_image filesystem: {exc}")
+        raise HTTPException(status_code=500, detail=f"Could not save image: {exc}")
+    check = await asyncio.to_thread(registry.read_check, domain, key)
+    return {"ok": True, "filename": name, "check": check}
+
+
+@app.delete("/api/checks/{domain}/{key}/images/{filename}")
+async def delete_check_image(domain: str, key: str, filename: str):
+    try:
+        await asyncio.to_thread(registry.delete_check_image, domain, key, filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    check = await asyncio.to_thread(registry.read_check, domain, key)
+    return {"ok": True, "check": check}
+
+
+@app.get("/api/checks/{domain}/{key}/images/{filename}")
+async def get_check_image(domain: str, key: str, filename: str):
+    """Serve a check's reference image for preview in the Define Rules UI."""
+    try:
+        path = await asyncio.to_thread(registry.resolve_check_image_path, domain, key, filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if path is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+    from qa_agent.rag.knowledge_paths import IMAGE_MEDIA_TYPES
+    media_type = IMAGE_MEDIA_TYPES.get(path.suffix.lower(), "application/octet-stream")
+    data = await asyncio.to_thread(path.read_bytes)
+    return Response(content=data, media_type=media_type)

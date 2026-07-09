@@ -15,9 +15,13 @@ Text-only checks (requires_vision=false, the default):
   • Input  : drawing formatted text + extraction context block
   • Model  : claude-haiku-4-5
 
-Vision checks (requires_vision=true):
-  • Input  : PDF document + formatted text + extraction context block
+Vision checks (requires_vision=true, or any check with attached reference images):
+  • Input  : PDF document + reference images + formatted text + extraction context block
   • Model  : claude-sonnet-4-6
+
+Reference images attached in the Define Rules UI are stored per check
+(<knowledge>/<domain>/<key>/images/) and inlined into the vision prompt,
+labelled with the check key they belong to.
 """
 from __future__ import annotations
 
@@ -189,6 +193,35 @@ def _build_task(keys: list[str], meta: dict, domain: str) -> str:
     )
 
 
+def _reference_image_blocks(
+    keys: list[str],
+    meta: dict,
+    check_images: dict[str, list[dict]] | None,
+) -> list[dict]:
+    """Per-check reference images as labelled prompt blocks (vision group only)."""
+    blocks: list[dict] = []
+    for key in keys:
+        for img in (check_images or {}).get(key, []):
+            name = meta[key][0]
+            blocks.append({
+                "type": "text",
+                "text": (
+                    f"REFERENCE IMAGE for check \"{name}\" ({key}) — {img['filename']}. "
+                    "Use it as visual guidance for what this rule refers to when "
+                    "inspecting the drawing:"
+                ),
+            })
+            blocks.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": img["media_type"],
+                    "data": img["data"],
+                },
+            })
+    return blocks
+
+
 def _invoke_group(
     keys: list[str],
     meta: dict,
@@ -197,6 +230,7 @@ def _invoke_group(
     formatted: str,
     pdf_data: str | None,
     use_vision: bool,
+    check_images: dict[str, list[dict]] | None = None,
 ) -> _UserAiResult:
     """Call the LLM for one routing group (text-only or vision)."""
     task = _build_task(keys, meta, domain)
@@ -211,6 +245,7 @@ def _invoke_group(
                 "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data},
                 "cache_control": {"type": "ephemeral"},
             })
+        human_content.extend(_reference_image_blocks(keys, meta, check_images))
         if formatted:
             human_content.append({"type": "text", "text": formatted})
         human_content.append({"type": "text", "text": facts})
@@ -331,18 +366,34 @@ def run_user_ai_checks(domain: str, state: GraphState) -> list:
     text_keys = [k for k in llm_active if not get_check_requires_vision(domain, k)]
     vision_keys = [k for k in llm_active if get_check_requires_vision(domain, k)]
 
+    # Reference images attached in Define Rules — sent inline to the vision model.
+    check_images = {
+        k: imgs for k in vision_keys
+        if (imgs := registry.load_check_images_b64(domain, k))
+    }
+    if check_images:
+        counts = {k: len(v) for k, v in check_images.items()}
+        print(f"[user_ai_checks][{domain}] attaching reference images: {counts}")
+
     if vision_keys and not pdf_data:
-        print(
-            f"[user_ai_checks][{domain}] WARNING: {vision_keys} require vision but "
-            f"pdf_data is absent — falling back to text-only (claude-haiku-4-5)"
-        )
-        text_keys = llm_active
-        vision_keys = []
+        # Without the PDF, vision only still makes sense for checks that carry
+        # their own reference images; the rest fall back to text-only.
+        demoted = [k for k in vision_keys if k not in check_images]
+        if demoted:
+            print(
+                f"[user_ai_checks][{domain}] WARNING: {demoted} require vision but "
+                f"pdf_data is absent — falling back to text-only (claude-haiku-4-5)"
+            )
+        text_keys += demoted
+        vision_keys = [k for k in vision_keys if k in check_images]
 
     for group_keys, use_vision in ((text_keys, False), (vision_keys, True)):
         if not group_keys:
             continue
-        result = _invoke_group(group_keys, meta, domain, facts, formatted, pdf_data, use_vision)
+        result = _invoke_group(
+            group_keys, meta, domain, facts, formatted, pdf_data, use_vision,
+            check_images=check_images,
+        )
         print(f"[user_ai_checks][{domain}] {'vision' if use_vision else 'text'} raw items: {len(result.issues)}")
 
         for item in result.issues:

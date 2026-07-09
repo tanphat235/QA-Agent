@@ -55,6 +55,7 @@ interface CheckDef {
   builtin: boolean
   user_defined?: boolean
   requires_vision?: boolean
+  images?: string[]     // reference images stored per check, sent to the vision model
 }
 interface CheckDomain {
   key: string
@@ -359,6 +360,7 @@ export default function App() {
   const [expandedChecks,  setExpandedChecks]  = useState<Set<string>>(new Set())
   const [checkSaving,     setCheckSaving]     = useState<string | null>(null)  // "domain::key" being saved
   const [checkErrors,     setCheckErrors]     = useState<Record<string, string>>({})
+  const [pendingImages,   setPendingImages]   = useState<Record<string, File[]>>({})  // images to upload on Save, keyed by draft id
   const [extractionFields, setExtractionFields] = useState<ExtractField[]>([])
   const [extractionFieldsOpen, setExtractionFieldsOpen] = useState(false)
   const [annotating,             setAnnotating]             = useState(false)
@@ -445,6 +447,14 @@ export default function App() {
   const clearHistory = () => {
     localStorage.removeItem(HISTORY_KEY)
     setHistoryEntries([])
+  }
+
+  const deleteHistoryEntry = (id: string) => {
+    setHistoryEntries(prev => {
+      const next = prev.filter(e => e.id !== id)
+      saveHistory(next)
+      return next
+    })
   }
 
   // ── Check definitions (built-in + custom) ───────────────────────────────
@@ -540,6 +550,7 @@ export default function App() {
   const cancelEdit = (id: string) => {
     setCheckDrafts(prev => { const n = { ...prev }; delete n[id]; return n })
     setCheckErrors(prev => { const n = { ...prev }; delete n[id]; return n })
+    setPendingImages(prev => { const n = { ...prev }; delete n[id]; return n })
   }
   const updateDraft = (id: string, patch: Partial<CheckDef>) =>
     setCheckDrafts(prev => ({ ...prev, [id]: { ...prev[id], ...patch } }))
@@ -557,6 +568,8 @@ export default function App() {
     if (!isUserDefined && !!original?.prompt?.trim() && !draft.prompt.trim()) {
       setCheckErrors(p => ({ ...p, [id]: 'Check prompt is required' })); return
     }
+    const pending = pendingImages[id] ?? []
+    const hasImages = (draft.images?.length ?? 0) > 0 || pending.length > 0
     setCheckSaving(id)
     setCheckErrors(p => { const n = { ...p }; delete n[id]; return n })
     try {
@@ -566,7 +579,8 @@ export default function App() {
           domain: draft.domain, key: draft.builtin ? draft.key : (draft.key || null),
           display_name: draft.display_name, description: draft.description,
           prompt: promptToSend, pass_text: draft.pass, not_found_text: draft.not_found,
-          requires_vision: draft.requires_vision ?? false,
+          // Attached reference images force vision — they can only be read visually.
+          requires_vision: (draft.requires_vision ?? false) || hasImages,
         }),
       })
       if (!res.ok) {
@@ -574,7 +588,36 @@ export default function App() {
         setCheckErrors(p => ({ ...p, [id]: String(detail) })); return
       }
       const body = await res.json().catch(() => ({})) as { check?: CheckDef }
-      const saved = body.check
+      let saved = body.check
+
+      // Upload newly attached reference images to the saved check.
+      let uploadErr: string | null = null
+      if (saved && pending.length) {
+        const remaining: File[] = []
+        for (const f of pending) {
+          if (uploadErr) { remaining.push(f); continue }
+          try {
+            const fd = new FormData()
+            fd.append('file', f)
+            const up = await fetch(`/api/checks/${saved.domain}/${saved.key}/images`, { method: 'POST', body: fd })
+            if (!up.ok) {
+              const detail = (await up.json().catch(() => ({}))).detail ?? `HTTP ${up.status}`
+              uploadErr = `Image "${f.name}": ${detail}`
+              remaining.push(f)
+            } else {
+              const upBody = await up.json().catch(() => ({})) as { check?: CheckDef }
+              if (upBody.check) saved = upBody.check
+            }
+          } catch {
+            uploadErr = `Image "${f.name}" could not be uploaded`
+            remaining.push(f)
+          }
+        }
+        setPendingImages(prev => remaining.length
+          ? { ...prev, [id]: remaining }
+          : (() => { const n = { ...prev }; delete n[id]; return n })())
+      }
+
       if (saved) {
         setChecksData(prev => {
           if (!prev) return prev
@@ -588,6 +631,23 @@ export default function App() {
             checks: prev.checks.map(c => (ckey(c) === id ? { ...c, ...saved } : c)),
           }
         })
+      }
+      if (saved && id.startsWith('new::')) {
+        // A newly created check starts enabled in the Dashboard check list.
+        const { domain: savedDomain, key: savedKey } = saved
+        setEnabledSubChecks(prev => {
+          const current = prev[savedDomain] ?? []
+          return current.includes(savedKey)
+            ? prev
+            : { ...prev, [savedDomain]: [...current, savedKey] }
+        })
+      }
+      if (uploadErr) {
+        // Check saved but at least one image failed — keep the editor open so
+        // the remaining pending images and the error stay visible.
+        if (saved) updateDraft(id, { images: saved.images ?? [], requires_vision: saved.requires_vision })
+        setCheckErrors(p => ({ ...p, [id]: `Check saved, but image upload failed — ${uploadErr}` }))
+        return
       }
       setCheckDrafts(prev => { const n = { ...prev }; delete n[id]; return n })
     } catch (err) {
@@ -616,13 +676,58 @@ export default function App() {
     setCheckDrafts(prev => ({ ...prev, [id]: {
       domain, key: '', display_name: '', description: '',
       prompt: '', pass: 'PASS', not_found: 'NOT FOUND', builtin: false, user_defined: true,
-      requires_vision: false,
+      requires_vision: false, images: [],
     } }))
     setExpandedChecks(prev => new Set([...prev, id]))
   }
 
   const toggleCheckExpanded = (id: string) =>
     setExpandedChecks(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n })
+
+  // ── Reference images (attached per check, sent to the vision model) ──────
+  const CHECK_IMG_MAX = 5
+  const CHECK_IMG_MAX_MB = 5
+
+  const addPendingImages = (id: string, draft: CheckDef, files: FileList | null) => {
+    if (!files?.length) return
+    const already = (draft.images?.length ?? 0) + (pendingImages[id]?.length ?? 0)
+    const accepted: File[] = []
+    let err: string | null = null
+    for (const f of Array.from(files)) {
+      if (already + accepted.length >= CHECK_IMG_MAX) { err = `A check can have at most ${CHECK_IMG_MAX} images`; break }
+      if (!/\.(png|jpe?g|gif|webp)$/i.test(f.name)) { err = `"${f.name}" is not a supported image (png / jpg / gif / webp)`; continue }
+      if (f.size > CHECK_IMG_MAX_MB * 1024 * 1024) { err = `"${f.name}" exceeds the ${CHECK_IMG_MAX_MB} MB limit`; continue }
+      accepted.push(f)
+    }
+    if (accepted.length) {
+      setPendingImages(prev => ({ ...prev, [id]: [...(prev[id] ?? []), ...accepted] }))
+      updateDraft(id, { requires_vision: true })  // images require the vision model
+    }
+    if (err) setCheckErrors(p => ({ ...p, [id]: err! }))
+  }
+
+  const removePendingImage = (id: string, idx: number) =>
+    setPendingImages(prev => ({ ...prev, [id]: (prev[id] ?? []).filter((_, i) => i !== idx) }))
+
+  const deleteSavedImage = async (id: string, draft: CheckDef, name: string) => {
+    const res = await fetch(
+      `/api/checks/${draft.domain}/${draft.key}/images/${encodeURIComponent(name)}`,
+      { method: 'DELETE' },
+    )
+    if (!res.ok) {
+      const detail = (await res.json().catch(() => ({}))).detail ?? `HTTP ${res.status}`
+      setCheckErrors(p => ({ ...p, [id]: String(detail) })); return
+    }
+    const body = await res.json().catch(() => ({})) as { check?: CheckDef }
+    const images = body.check?.images ?? (draft.images ?? []).filter(n => n !== name)
+    updateDraft(id, { images })
+    setChecksData(prev => prev
+      ? { ...prev, checks: prev.checks.map(c => (ckey(c) === id ? { ...c, images } : c)) }
+      : prev)
+  }
+
+  const checkImageUrl = (c: { domain: string; key?: string }, name: string) =>
+    `/api/checks/${c.domain}/${c.key}/images/${encodeURIComponent(name)}`
 
   // Editable form for a check draft (new custom or an existing check being edited).
   const _lbl = 'text-[10px] font-bold uppercase tracking-wider text-gray-400'
@@ -656,7 +761,9 @@ export default function App() {
                 className={_inp}
               >
                 {(checksData?.domains ?? []).map(d => (
-                  <option key={d.key} value={d.key}>{d.title}</option>
+                  <option key={d.key} value={d.key} disabled={d.coming_soon} className={d.coming_soon ? 'text-gray-300' : ''}>
+                    {d.title}{d.coming_soon ? ' — Coming soon' : ''}
+                  </option>
                 ))}
               </select>
             </label>
@@ -729,20 +836,81 @@ export default function App() {
             This is a built-in computed check — its logic is in code, so there is no editable prompt.
           </p>
         ))}
+        {isUserDefined && (() => {
+          const pendingList = pendingImages[id] ?? []
+          const savedList = draft.images ?? []
+          return (
+            <div className="rounded-lg border border-gray-100 bg-gray-50 p-3 space-y-2">
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-bold text-gray-600">Reference Images</span>
+                <span className="text-[10px] text-gray-400 hidden sm:inline">
+                  sent to the vision AI with this rule · max {CHECK_IMG_MAX} · png / jpg / gif / webp ≤ {CHECK_IMG_MAX_MB} MB
+                </span>
+                <label className="ml-auto flex items-center gap-1 px-2.5 py-1 bg-white border border-gray-200 rounded-lg text-[10px] font-bold text-gray-600 hover:border-blue-300 hover:text-blue-600 cursor-pointer transition-colors flex-shrink-0">
+                  <Paperclip size={10} /> Attach
+                  <input
+                    type="file" accept=".png,.jpg,.jpeg,.gif,.webp" multiple className="hidden"
+                    onChange={e => { addPendingImages(id, draft, e.target.files); e.target.value = '' }}
+                  />
+                </label>
+              </div>
+              {savedList.length || pendingList.length ? (
+                <div className="flex flex-wrap gap-2">
+                  {savedList.map(name => (
+                    <div key={name} className="relative w-20">
+                      <img
+                        src={checkImageUrl(draft, name)} alt={name}
+                        className="w-20 h-20 object-cover rounded-lg border border-gray-200 bg-white"
+                      />
+                      <button
+                        onClick={() => deleteSavedImage(id, draft, name)} title="Remove image"
+                        className="absolute -top-1.5 -right-1.5 w-[18px] h-[18px] flex items-center justify-center bg-white border border-gray-200 rounded-full text-red-500 hover:bg-red-50 hover:border-red-200 shadow-sm"
+                      >
+                        <Trash2 size={9} />
+                      </button>
+                      <p className="text-[9px] text-gray-400 truncate mt-0.5" title={name}>{name}</p>
+                    </div>
+                  ))}
+                  {pendingList.map((f, i) => (
+                    <div key={`${f.name}-${i}`} className="relative w-20">
+                      <div className="w-20 h-20 flex flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-blue-300 bg-blue-50/50 px-1">
+                        <Paperclip size={12} className="text-blue-400" />
+                        <span className="text-[8px] text-blue-600 font-semibold text-center break-all leading-tight max-h-8 overflow-hidden">{f.name}</span>
+                        <span className="text-[8px] text-blue-400">uploads on Save</span>
+                      </div>
+                      <button
+                        onClick={() => removePendingImage(id, i)} title="Remove image"
+                        className="absolute -top-1.5 -right-1.5 w-[18px] h-[18px] flex items-center justify-center bg-white border border-gray-200 rounded-full text-red-500 hover:bg-red-50 hover:border-red-200 shadow-sm"
+                      >
+                        <Trash2 size={9} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-[10px] text-gray-400 italic">
+                  No images attached. Attach example crops or annotated snippets to show the AI exactly what this rule refers to.
+                </p>
+              )}
+            </div>
+          )
+        })()}
         {(() => {
-          const isVision = draft.requires_vision ?? false
+          const hasImages = (draft.images?.length ?? 0) > 0 || (pendingImages[id]?.length ?? 0) > 0
+          const isVision = (draft.requires_vision ?? false) || hasImages
+          const canToggle = isUserDefined && !hasImages
           const borderCls = isVision ? 'border-amber-200 bg-amber-50' : 'border-gray-100 bg-gray-50'
           const labelCls  = isVision ? 'text-amber-800' : 'text-gray-600'
           const noteCls   = isVision ? 'text-amber-700' : 'text-gray-500'
           return (
             <div className={`rounded-lg border p-3 space-y-2 ${borderCls}`}>
-              <label className={`flex items-center gap-2.5 select-none ${isUserDefined ? 'cursor-pointer' : 'cursor-default'}`}>
+              <label className={`flex items-center gap-2.5 select-none ${canToggle ? 'cursor-pointer' : 'cursor-default'}`}>
                 <input
                   type="checkbox"
                   checked={isVision}
-                  disabled={!isUserDefined}
-                  onChange={isUserDefined ? e => updateDraft(id, { requires_vision: e.target.checked }) : undefined}
-                  className={`w-3.5 h-3.5 rounded ${isUserDefined ? 'accent-amber-500 cursor-pointer' : 'cursor-default opacity-60'}`}
+                  disabled={!canToggle}
+                  onChange={canToggle ? e => updateDraft(id, { requires_vision: e.target.checked }) : undefined}
+                  className={`w-3.5 h-3.5 rounded ${canToggle ? 'accent-amber-500 cursor-pointer' : 'cursor-default opacity-60'}`}
                 />
                 <span className={`text-[11px] font-bold ${labelCls}`}>
                   Requires Vision
@@ -754,11 +922,15 @@ export default function App() {
                 {!isUserDefined && (
                   <span className="ml-auto text-[10px] text-gray-400">read-only for built-in checks</span>
                 )}
+                {isUserDefined && hasImages && (
+                  <span className="ml-auto text-[10px] text-amber-600">auto-enabled — reference images attached</span>
+                )}
               </label>
               <p className={`text-[10px] leading-relaxed pl-[22px] ${noteCls}`}>
                 {isVision
                   ? <>
-                      <span className="font-semibold">Enabled</span> — the AI receives the full rendered PDF and uses{' '}
+                      <span className="font-semibold">Enabled</span> — the AI receives the full rendered PDF
+                      {hasImages && <> plus this rule's reference images</>} and uses{' '}
                       <span className="font-mono">claude-sonnet-4-6</span> to read values directly from graphical views
                       (cross-sections, dimension lines, narrow table columns that text extraction may drop).
                     </>
@@ -1184,6 +1356,12 @@ export default function App() {
                             className="flex-shrink-0 flex items-center gap-1.5 px-4 py-2 bg-slate-900 text-white text-xs font-bold rounded-xl hover:bg-blue-600 transition-colors self-center">
                             View <ChevronRight size={12} />
                           </button>
+                          <button
+                            onClick={() => deleteHistoryEntry(entry.id)}
+                            title="Delete this entry"
+                            className="flex-shrink-0 w-8 h-8 flex items-center justify-center text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-xl transition-colors self-center">
+                            <Trash2 size={14} />
+                          </button>
                         </div>
                       </div>
                     )
@@ -1295,8 +1473,27 @@ export default function App() {
                                               ? '(claude-sonnet-4-6 + PDF)'
                                               : '(claude-haiku-4-5, text-only)'}
                                           </span>
+                                          {(c.images?.length ?? 0) > 0 && (
+                                            <span className="ml-1.5 font-normal text-amber-600">· {c.images!.length} reference image{c.images!.length > 1 ? 's' : ''} attached</span>
+                                          )}
                                         </p>
                                       </div>
+                                      {(c.images?.length ?? 0) > 0 && (
+                                        <div>
+                                          <p className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Reference images</p>
+                                          <div className="flex flex-wrap gap-2 mt-1">
+                                            {c.images!.map(name => (
+                                              <div key={name} className="w-16">
+                                                <img
+                                                  src={checkImageUrl(c, name)} alt={name}
+                                                  className="w-16 h-16 object-cover rounded-lg border border-gray-200 bg-white"
+                                                />
+                                                <p className="text-[9px] text-gray-400 truncate mt-0.5" title={name}>{name}</p>
+                                              </div>
+                                            ))}
+                                          </div>
+                                        </div>
+                                      )}
                                       <div className="grid grid-cols-2 gap-3">
                                         <div>
                                           <p className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Pass message</p>

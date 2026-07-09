@@ -48,3 +48,37 @@ def knowledge_roots() -> list[Path]:
     if BUILTIN_KNOWLEDGE_DIR not in roots:
         roots.append(BUILTIN_KNOWLEDGE_DIR)
     return roots
+
+
+# Reference images attached to a check live next to its .md file:
+#   <root>/<domain>/<key>/images/<filename>
+IMAGE_MEDIA_TYPES = {
+    ".png":  "image/png",
+    ".jpg":  "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif":  "image/gif",
+    ".webp": "image/webp",
+}
+
+
+def writable_images_dir(domain: str, key: str) -> Path:
+    """Directory for saving a check's reference images (created on demand)."""
+    path = writable_knowledge_dir() / domain / key / "images"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def list_check_image_paths(domain: str, key: str) -> list[Path]:
+    """All reference images attached to a check, across knowledge roots.
+
+    Writable overlay wins on filename collision (same rule as the .md files).
+    """
+    seen: dict[str, Path] = {}
+    for root in knowledge_roots():
+        images_dir = root / domain / key / "images"
+        if not images_dir.is_dir():
+            continue
+        for p in sorted(images_dir.iterdir()):
+            if p.is_file() and p.suffix.lower() in IMAGE_MEDIA_TYPES and p.name not in seen:
+                seen[p.name] = p
+    return [seen[name] for name in sorted(seen)]

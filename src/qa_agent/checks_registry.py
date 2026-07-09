@@ -9,13 +9,17 @@ executed as AI prose rules during analysis.
 """
 from __future__ import annotations
 
+import base64
 import re
 import shutil
 from pathlib import Path
 
 from qa_agent.rag.knowledge_paths import (
+    IMAGE_MEDIA_TYPES,
     knowledge_roots,
+    list_check_image_paths,
     resolve_md_path,
+    writable_images_dir,
     writable_knowledge_dir,
     writable_md_path,
 )
@@ -83,6 +87,7 @@ def read_check(domain: str, key: str) -> dict | None:
     builtin = is_builtin(domain, key)
     rv_raw = _read_md_section(path, "Requires Vision").strip().lower()
     dt_raw = _read_md_section(path, "Debug Trace").strip().lower()
+    images = list_check_images(domain, key)
     return {
         "domain":           domain,
         "key":              key,
@@ -91,8 +96,11 @@ def read_check(domain: str, key: str) -> dict | None:
         "not_found":        _read_md_section(path, "Not Found") or "NOT FOUND",
         "description":      _read_md_section(path, "Description"),
         "prompt":           _read_md_section(path, "Check Prompt"),
-        "requires_vision":  rv_raw in ("true", "yes", "1"),
+        # Attached reference images can only be read by a vision model, so
+        # they force requires_vision on regardless of the .md flag.
+        "requires_vision":  rv_raw in ("true", "yes", "1") or bool(images),
         "debug_trace":      dt_raw in ("true", "yes", "1"),
+        "images":           images,
         "builtin":          builtin,
         "user_defined":     not builtin,
     }
@@ -179,6 +187,7 @@ def save_check(
         else:
             existing = read_check(domain, key)
             debug_trace = bool(existing and existing.get("debug_trace"))
+    images = list_check_images(domain, key)
     check = {
         "domain":           domain,
         "key":              key,
@@ -187,8 +196,10 @@ def save_check(
         "prompt":           effective_prompt,
         "pass":             (pass_text or "PASS").strip(),
         "not_found":        (not_found_text or "NOT FOUND").strip(),
-        "requires_vision":  bool(requires_vision),
+        # Attached reference images force vision — they can't be read as text.
+        "requires_vision":  bool(requires_vision) or bool(images),
         "debug_trace":      bool(debug_trace),
+        "images":           images,
         "builtin":          is_builtin(domain, key),
         "user_defined":     is_user,
     }
@@ -206,7 +217,8 @@ def save_check(
 
 
 def delete_check(domain: str, key: str) -> None:
-    """Delete a user-defined check. Built-in checks cannot be deleted."""
+    """Delete a user-defined check (including its attached reference images).
+    Built-in checks cannot be deleted."""
     domain = (domain or "").strip().lower()
     if domain not in ALL_DOMAINS:
         raise ValueError(f"Unknown domain: {domain!r}")
@@ -217,3 +229,94 @@ def delete_check(domain: str, key: str) -> None:
         raise ValueError(f"Check {domain}/{key} not found or cannot be deleted on this host.")
     shutil.rmtree(overlay_path.parent)
     _invalidate_caches()
+
+
+# ── Reference images ─────────────────────────────────────────────────────────
+# Images are stored per check at <knowledge>/<domain>/<key>/images/<filename>
+# and sent to the vision model alongside the drawing PDF during analysis.
+
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+MAX_IMAGES_PER_CHECK = 5
+
+_IMAGE_NAME_RE = re.compile(r"[^a-zA-Z0-9._-]+")
+
+
+def _safe_image_name(filename: str) -> str:
+    """Sanitize an uploaded filename (no paths, safe charset, valid extension)."""
+    name = Path(filename or "").name
+    stem, ext = Path(name).stem, Path(name).suffix.lower()
+    if ext not in IMAGE_MEDIA_TYPES:
+        raise ValueError(
+            f"Unsupported image type {ext or '(none)'!r} — use "
+            + ", ".join(sorted(IMAGE_MEDIA_TYPES))
+        )
+    stem = _IMAGE_NAME_RE.sub("_", stem).strip("._-") or "image"
+    return f"{stem[:64]}{ext}"
+
+
+def list_check_images(domain: str, key: str) -> list[str]:
+    """Filenames of the reference images attached to a check."""
+    return [p.name for p in list_check_image_paths(domain, key)]
+
+
+def save_check_image(domain: str, key: str, filename: str, data: bytes) -> str:
+    """Attach a reference image to a user-defined check. Returns the stored name."""
+    domain = (domain or "").strip().lower()
+    if domain not in ALL_DOMAINS:
+        raise ValueError(f"Unknown domain: {domain!r}")
+    if is_builtin(domain, key):
+        raise ValueError("Reference images can only be attached to user-defined checks.")
+    if _md_path(domain, key) is None:
+        raise ValueError(f"Check {domain}/{key} not found — save the check first.")
+    if not data:
+        raise ValueError("Empty image file.")
+    if len(data) > MAX_IMAGE_BYTES:
+        raise ValueError(f"Image exceeds {MAX_IMAGE_BYTES // (1024 * 1024)} MB limit.")
+
+    name = _safe_image_name(filename)
+    existing = list_check_images(domain, key)
+    if name not in existing and len(existing) >= MAX_IMAGES_PER_CHECK:
+        raise ValueError(f"A check can have at most {MAX_IMAGES_PER_CHECK} images.")
+
+    (writable_images_dir(domain, key) / name).write_bytes(data)
+    _invalidate_caches()
+    return name
+
+
+def delete_check_image(domain: str, key: str, filename: str) -> None:
+    """Remove a reference image from a user-defined check."""
+    domain = (domain or "").strip().lower()
+    if domain not in ALL_DOMAINS:
+        raise ValueError(f"Unknown domain: {domain!r}")
+    name = _safe_image_name(filename)
+    path = writable_knowledge_dir() / domain / key / "images" / name
+    if not path.is_file():
+        raise ValueError(f"Image {name!r} not found on check {domain}/{key}.")
+    path.unlink()
+    _invalidate_caches()
+
+
+def resolve_check_image_path(domain: str, key: str, filename: str) -> Path | None:
+    """Path of a stored reference image (for serving to the UI), or None."""
+    name = _safe_image_name(filename)
+    for p in list_check_image_paths(domain, key):
+        if p.name == name:
+            return p
+    return None
+
+
+def load_check_images_b64(domain: str, key: str) -> list[dict]:
+    """Reference images as base64 blocks ready for the vision prompt:
+    [{"filename", "media_type", "data"}, ...]"""
+    out: list[dict] = []
+    for p in list_check_image_paths(domain, key):
+        try:
+            raw = p.read_bytes()
+        except OSError:
+            continue
+        out.append({
+            "filename":   p.name,
+            "media_type": IMAGE_MEDIA_TYPES[p.suffix.lower()],
+            "data":       base64.b64encode(raw).decode("ascii"),
+        })
+    return out
