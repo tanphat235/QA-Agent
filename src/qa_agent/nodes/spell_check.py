@@ -10,7 +10,7 @@ from qa_agent.state import GraphState
 from qa_agent.rag.retriever import get_check_prompt, get_check_meta
 from qa_agent.nodes.issue_filter import OUTPUT_RULES, accept_finding, build_check_issues
 from qa_agent.nodes.pdf_extractor import _normalize_ebt_nr, _ebt_field_matches
-from qa_agent.nodes.user_ai_checks import run_user_ai_checks
+from qa_agent.nodes.user_ai_checks import run_user_ai_checks, _SYSTEM_VISION
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,12 @@ The drawing content below was extracted from a precast wall structural drawing P
 Inspect the text and tables and report ONLY issues you can directly observe.\
 """
 
+_TASK_INTRO_VISION = """\
+A precast wall structural drawing is attached as a rendered PDF document, followed by its
+extracted text (supplementary cross-reference only). Inspect the rendered drawing and report
+ONLY issues you can directly observe.\
+"""
+
 # section_name checks only marker → view. View-without-marker items are false
 # positives (marker labels are often unreadable in extracted text) — drop them.
 _VIEW_TO_MARKER_RE = re.compile(
@@ -63,6 +69,11 @@ _EXTRACTION_ARTIFACT_RE = re.compile(
 
 # pos_count and revision_check are handled entirely by Python — not sent to LLM
 _LLM_CHECKS = ["spelling", "section_name", "parts_label"]
+
+# Checks that must read the rendered PDF (labels drawn rotated/vertical in
+# graphical views are dropped or fragmented by pdfplumber text extraction).
+# Run on Sonnet with the PDF attached; fall back to the text call without one.
+_VISION_CHECKS = frozenset({"parts_label"})
 _ALL_CHECKS = _LLM_CHECKS + ["pos_count", "revision_check", "drawing_status", "exposition_class", "steel_content", "lastausgleich", "overview_plan_check", "steel_list_check"]
 
 # Expected concrete cover values per exposition class — BẢNG 3.1, φ10 default
@@ -104,11 +115,11 @@ RULES:
 """ + OUTPUT_RULES
 
 
-def _build_spell_task(enabled_sub: list[str] | None) -> str:
-    active = [k for k in _LLM_CHECKS if enabled_sub is None or k in (enabled_sub or [])]
+def _build_spell_task(active: list[str], use_vision: bool = False) -> str:
     check_keys = " | ".join(f'"{k}"' for k in active)
     blocks = "\n\n".join(_CHECK_PROMPTS[k] for k in active)
-    return _TASK_INTRO + "\n\n" + blocks + _TASK_OUTRO_TPL.format(check_keys=check_keys)
+    intro = _TASK_INTRO_VISION if use_vision else _TASK_INTRO
+    return intro + "\n\n" + blocks + _TASK_OUTRO_TPL.format(check_keys=check_keys)
 
 
 class _UsageCallback(BaseCallbackHandler):
@@ -144,6 +155,51 @@ class _SpellResult(BaseModel):
     issues: list[_SpellIssue]
     not_found: list[str] = Field(default_factory=list, description="Check keys where prerequisite drawing elements were absent")
     debug_notes: list[str] = Field(default_factory=list, description="One debug entry per active check showing extracted values")
+
+
+def _run_spell_llm(keys: list[str], formatted: str, pdf_data: str | None) -> _SpellResult:
+    """Run one group of LLM spell checks — text-only (Haiku) or vision (Sonnet + PDF)."""
+    use_vision = bool(pdf_data)
+    task = _build_spell_task(keys, use_vision=use_vision)
+
+    if use_vision:
+        model = "claude-sonnet-4-6"
+        system = _SYSTEM_VISION
+        human_content: list[dict] = [
+            {
+                "type": "document",
+                "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data},
+                "cache_control": {"type": "ephemeral"},
+            },
+        ]
+        if formatted:
+            human_content.append({"type": "text", "text": formatted})
+        human_content.append({"type": "text", "text": task})
+    else:
+        model = "claude-haiku-4-5"
+        system = _COMMON_SYSTEM
+        human_content = [
+            {
+                "type": "text",
+                "text": formatted,
+                "cache_control": {"type": "ephemeral"},
+            },
+            {"type": "text", "text": task},
+        ]
+
+    label = f"spell_check_{'vision' if use_vision else 'text'}"
+    print(f"[spell_check] {'vision' if use_vision else 'text'} group → {model}: {keys}")
+
+    llm = ChatAnthropic(  # type: ignore[call-arg]
+        model=model,  # type: ignore[call-arg]
+        temperature=0,  # type: ignore[call-arg]
+        max_tokens=4096,  # type: ignore[call-arg]
+    ).with_structured_output(_SpellResult).with_retry(stop_after_attempt=2)
+
+    return llm.invoke(  # type: ignore[return-value]
+        [SystemMessage(content=system), HumanMessage(content=human_content)],
+        config={"callbacks": [_UsageCallback(label)]},
+    )
 
 
 # ── Steel-list Einbauteilliste extraction (LLM, column-aware) ────────────────
@@ -379,50 +435,46 @@ def spell_check(state: GraphState) -> dict:
     print(f"[overview_plan_check] title={op_title[:60]!r}  rows={len(overview_plan_data.get('element_rows', []))}")
     print(f"[lastausgleich] ebt_table_found={la_ebt_found}  rd_max_qty={la_rd_qty}  text_present={la_text_present}")
 
-    # ── LLM call for the other spell checks ─────────────────────────────────
-    # Text-only input (no PDF/vision) — Haiku is sufficient.
-    llm = ChatAnthropic(  # type: ignore[call-arg]
-        model="claude-haiku-4-5",  # type: ignore[call-arg]
-        temperature=0,  # type: ignore[call-arg]
-        max_tokens=4096,  # type: ignore[call-arg]
-    ).with_structured_output(_SpellResult).with_retry(stop_after_attempt=2)
+    # ── LLM calls for the other spell checks ─────────────────────────────────
+    # Text checks run on Haiku with extracted text. Vision checks (parts_label)
+    # must read labels drawn in graphical views, so they run on Sonnet with the
+    # rendered PDF attached — pdfplumber drops/fragments rotated view labels.
+    active_llm = [k for k in _LLM_CHECKS if enabled_sub is None or k in (enabled_sub or [])]
+    pdf_data: str | None = state.get("pdf_data")  # type: ignore[assignment]
+    vision_keys = [k for k in active_llm if k in _VISION_CHECKS] if pdf_data else []
+    text_keys = [k for k in active_llm if k not in vision_keys]
+    if not pdf_data and any(k in _VISION_CHECKS for k in active_llm):
+        print(
+            f"[spell_check] WARNING: {sorted(_VISION_CHECKS & set(active_llm))} need the rendered "
+            f"PDF but pdf_data is absent — falling back to text-only extraction"
+        )
 
-    human_content: list[dict] = [
-        {
-            "type": "text",
-            "text": formatted,
-            "cache_control": {"type": "ephemeral"},
-        },
-        {"type": "text", "text": _build_spell_task(enabled_sub)},
-    ]
-
-    result: _SpellResult = llm.invoke(  # type: ignore[assignment]
-        [
-            SystemMessage(content=_COMMON_SYSTEM),
-            HumanMessage(content=human_content),
-        ],
-        config={"callbacks": [_UsageCallback("spell_check")]},
-    )
-    print(f"[spell_check] raw items from LLM: {len(result.issues)}")
-    for note in result.debug_notes:
-        print(f"[debug][spell_check] {note}")
+    results: list[_SpellResult] = []
+    if text_keys:
+        results.append(_run_spell_llm(text_keys, formatted, None))
+    if vision_keys:
+        results.append(_run_spell_llm(vision_keys, formatted, pdf_data))
 
     by_check: dict[str, list[_SpellIssue]] = {k: [] for k in _CHECK_META}
-    for item in result.issues:
-        if item.check not in by_check:
-            continue
-        if not accept_finding(item.description, item.confidence):
-            print(f"[{item.check}] dropped non-violation item: {item.description[:100]!r}")
-            continue
-        if item.check == "section_name" and _VIEW_TO_MARKER_RE.search(item.description):
-            print(f"[section_name] dropped view→marker item: {item.description[:80]!r}")
-            continue
-        if item.check == "spelling" and _EXTRACTION_ARTIFACT_RE.search(item.description):
-            print(f"[spelling] dropped extraction-artifact item: {item.description[:100]!r}")
-            continue
-        by_check[item.check].append(item)
-
-    not_found_set = set(result.not_found or [])
+    not_found_set: set[str] = set()
+    for result in results:
+        print(f"[spell_check] raw items from LLM: {len(result.issues)}")
+        for note in result.debug_notes:
+            print(f"[debug][spell_check] {note}")
+        not_found_set |= set(result.not_found or [])
+        for item in result.issues:
+            if item.check not in by_check:
+                continue
+            if not accept_finding(item.description, item.confidence):
+                print(f"[{item.check}] dropped non-violation item: {item.description[:100]!r}")
+                continue
+            if item.check == "section_name" and _VIEW_TO_MARKER_RE.search(item.description):
+                print(f"[section_name] dropped view→marker item: {item.description[:80]!r}")
+                continue
+            if item.check == "spelling" and _EXTRACTION_ARTIFACT_RE.search(item.description):
+                print(f"[spelling] dropped extraction-artifact item: {item.description[:100]!r}")
+                continue
+            by_check[item.check].append(item)
 
     # ── pos_count Python comparison ──────────────────────────────────────────
     pos_enabled = enabled_sub is None or "pos_count" in (enabled_sub or [])
