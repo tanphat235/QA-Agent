@@ -481,6 +481,7 @@ class _CheckBody(BaseModel):
     pass_text: str = "PASS"
     not_found_text: str = "NOT FOUND"
     requires_vision: bool = False
+    rebar_diameter: int | None = None
 
 
 @app.post("/api/checks")
@@ -492,6 +493,7 @@ async def save_check(body: _CheckBody):
             description=body.description, prompt=body.prompt,
             pass_text=body.pass_text, not_found_text=body.not_found_text,
             requires_vision=body.requires_vision,
+            rebar_diameter=body.rebar_diameter,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

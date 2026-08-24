@@ -56,6 +56,9 @@ interface CheckDef {
   user_defined?: boolean
   requires_vision?: boolean
   images?: string[]     // reference images stored per check, sent to the vision model
+  // Set only for checks compared against a per-diameter Table 3.1 column.
+  rebar_diameter?: number | null
+  rebar_diameter_options?: number[]
 }
 interface CheckDomain {
   key: string
@@ -581,6 +584,7 @@ export default function App() {
           prompt: promptToSend, pass_text: draft.pass, not_found_text: draft.not_found,
           // Attached reference images force vision — they can only be read visually.
           requires_vision: (draft.requires_vision ?? false) || hasImages,
+          rebar_diameter: draft.rebar_diameter ?? null,
         }),
       })
       if (!res.ok) {
@@ -895,6 +899,26 @@ export default function App() {
             </div>
           )
         })()}
+        {(draft.rebar_diameter_options?.length ?? 0) > 0 && (
+          <div className="rounded-lg border border-blue-100 bg-blue-50/50 p-3">
+            <label className="block">
+              <span className={_lbl}>Rebar Diameter</span>
+              <select
+                value={String(draft.rebar_diameter ?? '')}
+                onChange={e => updateDraft(id, { rebar_diameter: Number(e.target.value) })}
+                className={`${_inp} max-w-[160px]`}
+              >
+                {(draft.rebar_diameter_options ?? []).map(d => (
+                  <option key={d} value={d}>Ø{d} mm</option>
+                ))}
+              </select>
+            </label>
+            <p className="text-[10px] text-blue-700 leading-relaxed mt-2">
+              Selects which Table 3.1 column the title-block cover values are compared against.
+              Cmin,dur and Cv come from this column; ΔCdev depends only on the exposition class.
+            </p>
+          </div>
+        )}
         {(() => {
           const hasImages = (draft.images?.length ?? 0) > 0 || (pendingImages[id]?.length ?? 0) > 0
           const isVision = (draft.requires_vision ?? false) || hasImages

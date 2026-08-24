@@ -10,6 +10,7 @@ import logging
 from functools import lru_cache
 from pathlib import Path
 
+from qa_agent.concrete_cover import DEFAULT_DIAMETER, parse_diameter
 from qa_agent.rag.knowledge_paths import list_check_image_paths, resolve_md_path
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,22 @@ def get_check_requires_vision(domain: str, check_key: str) -> bool:
         return True
     val = _read_md_section(md_path, "Requires Vision").strip().lower()
     return val in ("true", "yes", "1")
+
+
+@lru_cache(maxsize=None)
+def get_check_rebar_diameter(domain: str, check_key: str) -> int:
+    """Rebar diameter [mm] selected for a cover check, from '## Rebar Diameter'.
+
+    Falls back to the Table 3.1 default column when the section is absent or
+    holds a diameter the table has no column for.
+    """
+    md_path = resolve_md_path(domain, check_key)
+    if md_path is None:
+        return DEFAULT_DIAMETER
+    parsed = parse_diameter(_read_md_section(md_path, "Rebar Diameter"))
+    if parsed is None:
+        return DEFAULT_DIAMETER
+    return parsed
 
 
 @lru_cache(maxsize=None)

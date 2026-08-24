@@ -356,16 +356,6 @@ def _find_drawing_name(words: list[dict], page_height: float) -> str | None:
 
 # ── Exposition class and BETONDECKUNG concrete cover ────────────────────────
 
-# Lookup table: Cmin,dur = Cnom(φ10), ΔCdev = ΔC, Cv = Cnom(φ10) + ΔC
-# Source: BẢNG 3.1 – BÊ TÔNG BẢO VỆ (Vietnamese standard)
-_EXPOSITION_COVER_TABLE: dict[str, tuple[int, int, int]] = {
-    #         (Cmin,dur, ΔCdev, Cv)
-    "XC1": (20, 10, 30),
-    "XC2": (35, 15, 50),
-    "XC3": (35, 15, 50),
-    "XC4": (40, 15, 55),
-}
-
 _XC_CODE_RE = re.compile(r"XC\s*[-]?\s*([1-4])", re.IGNORECASE)
 _INT_WORD_RE = re.compile(r"^\d+$")
 

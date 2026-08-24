@@ -7,7 +7,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.outputs import LLMResult
 
 from qa_agent.state import GraphState
-from qa_agent.rag.retriever import get_check_prompt, get_check_meta
+from qa_agent.concrete_cover import expected_cover
+from qa_agent.rag.retriever import get_check_prompt, get_check_meta, get_check_rebar_diameter
 from qa_agent.nodes.issue_filter import OUTPUT_RULES, accept_finding, build_check_issues
 from qa_agent.nodes.pdf_extractor import _normalize_ebt_nr, _ebt_field_matches
 from qa_agent.nodes.user_ai_checks import run_user_ai_checks, _SYSTEM_VISION
@@ -75,15 +76,6 @@ _LLM_CHECKS = ["spelling", "section_name", "parts_label"]
 # Run on Sonnet with the PDF attached; fall back to the text call without one.
 _VISION_CHECKS = frozenset({"parts_label"})
 _ALL_CHECKS = _LLM_CHECKS + ["pos_count", "revision_check", "drawing_status", "exposition_class", "steel_content", "lastausgleich", "overview_plan_check", "steel_list_check"]
-
-# Expected concrete cover values per exposition class — BẢNG 3.1, φ10 default
-# (Cmin,dur, ΔCdev, Cv)
-_EXPOSITION_COVER: dict[str, tuple[int, int, int]] = {
-    "XC1": (20, 10, 30),
-    "XC2": (35, 15, 50),
-    "XC3": (35, 15, 50),
-    "XC4": (40, 15, 55),
-}
 
 _CHECK_PROMPTS: dict[str, str] = {k: get_check_prompt("spell", k) for k in _LLM_CHECKS}
 _CHECK_META: dict[str, tuple[str, str, str]] = {k: get_check_meta("spell", k) for k in _ALL_CHECKS}
@@ -535,14 +527,21 @@ def spell_check(state: GraphState) -> dict:
     # ── exposition_class Python comparison ───────────────────────────────────
     ec_enabled = enabled_sub is None or "exposition_class" in (enabled_sub or [])
     if ec_enabled:
-        if not xc_code or xc_code not in _EXPOSITION_COVER:
+        # Which Table 3.1 c_nom column to compare against — Ø10 unless the user
+        # picked another diameter in Define Rules.
+        ec_diameter = get_check_rebar_diameter("spell", "exposition_class")
+        expected = expected_cover(xc_code, ec_diameter)
+        if expected is None:
             not_found_set.add("exposition_class")
-            print(f"[exposition_class] NOT FOUND — xc_code={xc_code!r} not in lookup table")
+            print(
+                f"[exposition_class] NOT FOUND — no cover table entry for "
+                f"xc_code={xc_code!r} at Ø{ec_diameter}"
+            )
         elif not btd_cmin and not btd_dc and not btd_cv:
             not_found_set.add("exposition_class")
             print("[exposition_class] NOT FOUND — all betondeckung values are empty")
         else:
-            exp_cmin, exp_dc, exp_cv = _EXPOSITION_COVER[xc_code]
+            exp_cmin, exp_dc, exp_cv = expected
 
             def _safe_int(v: str) -> int | None:
                 try:
@@ -555,10 +554,14 @@ def spell_check(state: GraphState) -> dict:
             act_cv   = _safe_int(btd_cv)
 
             print(
-                f"[exposition_class] {xc_code} | "
+                f"[exposition_class] {xc_code} @ Ø{ec_diameter} | "
                 f"Cmin,dur: actual={act_cmin} expected={exp_cmin} {'✓' if act_cmin == exp_cmin else '✗'} | "
                 f"ΔCdev: actual={act_dc} expected={exp_dc} {'✓' if act_dc == exp_dc else '✗'} | "
                 f"Cv: actual={act_cv} expected={exp_cv} {'✓' if act_cv == exp_cv else '✗'}"
+            )
+            dynamic_pass_descs["exposition_class"] = (
+                f"PASS — {xc_code} at Ø{ec_diameter}: Cmin,dur={exp_cmin}, "
+                f"ΔCdev={exp_dc}, Cv={exp_cv} (Table 3.1)"
             )
 
             if act_cmin is not None and act_cmin != exp_cmin:
@@ -566,7 +569,7 @@ def spell_check(state: GraphState) -> dict:
                     check="exposition_class", severity="error",
                     description=(
                         f"Cmin,dur mismatch for {xc_code}: "
-                        f"drawing={act_cmin}, expected={exp_cmin} (Cnom φ10)"
+                        f"drawing={act_cmin}, expected={exp_cmin} (Cnom Ø{ec_diameter})"
                     ),
                     page=1, location="title block BETONDECKUNG", confidence=1.0,
                 ))
@@ -583,7 +586,7 @@ def spell_check(state: GraphState) -> dict:
                 by_check["exposition_class"].append(_SpellIssue(
                     check="exposition_class", severity="error",
                     description=(
-                        f"Cv mismatch for {xc_code}: "
+                        f"Cv mismatch for {xc_code} at Ø{ec_diameter}: "
                         f"drawing={act_cv}, expected={exp_cmin}+{exp_dc}={exp_cv}"
                     ),
                     page=1, location="title block BETONDECKUNG", confidence=1.0,

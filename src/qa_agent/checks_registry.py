@@ -23,6 +23,7 @@ from qa_agent.rag.knowledge_paths import (
     writable_knowledge_dir,
     writable_md_path,
 )
+from qa_agent.concrete_cover import COVER_DIAMETERS, DEFAULT_DIAMETER, parse_diameter
 from qa_agent.rag import retriever
 from qa_agent.rag.retriever import _read_md_section
 
@@ -45,6 +46,12 @@ SHIPPED_BUILTIN_KEYS: dict[str, frozenset[str]] = {
     }),
 }
 
+# Checks whose expected values come from a per-diameter column of Table 3.1,
+# so the user picks which column to compare against.
+REBAR_DIAMETER_CHECKS: dict[str, frozenset[str]] = {
+    "spell": frozenset({"exposition_class"}),
+}
+
 _DOMAIN_TITLES = {
     "spell":  "Spelling & Title Block",
     "bend":   "Bending & Schedule",
@@ -60,6 +67,11 @@ def _md_path(domain: str, key: str) -> Path | None:
 
 def is_builtin(domain: str, key: str) -> bool:
     return key in SHIPPED_BUILTIN_KEYS.get(domain, frozenset())
+
+
+def takes_rebar_diameter(domain: str, key: str) -> bool:
+    """True when the check compares against a per-diameter Table 3.1 column."""
+    return key in REBAR_DIAMETER_CHECKS.get(domain, frozenset())
 
 
 def slugify(name: str) -> str:
@@ -78,6 +90,20 @@ def _invalidate_caches() -> None:
     retriever.get_check_meta.cache_clear()
     retriever.get_check_requires_vision.cache_clear()
     retriever.get_check_debug_trace.cache_clear()
+    retriever.get_check_rebar_diameter.cache_clear()
+
+
+def _read_rebar_diameter(path: Path, domain: str, key: str) -> int | None:
+    """Stored diameter for a cover check; None when the check takes no column."""
+    if not takes_rebar_diameter(domain, key):
+        return None
+    parsed = parse_diameter(_read_md_section(path, "Rebar Diameter"))
+    return DEFAULT_DIAMETER if parsed is None else parsed
+
+
+def _rebar_diameter_options(domain: str, key: str) -> list[int]:
+    """Diameters the frontend may offer for a check — empty when not applicable."""
+    return list(COVER_DIAMETERS) if takes_rebar_diameter(domain, key) else []
 
 
 def read_check(domain: str, key: str) -> dict | None:
@@ -103,6 +129,9 @@ def read_check(domain: str, key: str) -> dict | None:
         "images":           images,
         "builtin":          builtin,
         "user_defined":     not builtin,
+        "rebar_diameter":   _read_rebar_diameter(path, domain, key),
+        # Frontend renders a diameter picker from these; empty when not applicable.
+        "rebar_diameter_options": _rebar_diameter_options(domain, key),
     }
 
 
@@ -141,6 +170,8 @@ def domain_title(domain: str) -> str:
 def _render_md(check: dict) -> str:
     rv = "true" if check.get("requires_vision") else "false"
     dt = "true" if check.get("debug_trace") else "false"
+    diameter = check.get("rebar_diameter")
+    diameter_section = "" if diameter is None else f"## Rebar Diameter\n\n{diameter}\n\n"
     return (
         f"# {check['display_name']}\n\n"
         f"> **Domain:** {check['domain']} | **Check key:** `{check['key']}`\n\n"
@@ -149,9 +180,26 @@ def _render_md(check: dict) -> str:
         f"## Not Found\n\n{check['not_found']}\n\n"
         f"## Requires Vision\n\n{rv}\n\n"
         f"## Debug Trace\n\n{dt}\n\n"
+        f"{diameter_section}"
         f"## Description\n\n{check.get('description', '')}\n\n"
         f"## Check Prompt\n\n{check['prompt']}\n"
     )
+
+
+def _resolve_rebar_diameter(domain: str, key: str, requested: int | str | None) -> int | None:
+    """Validate a requested diameter, or keep the stored one when unspecified."""
+    if not takes_rebar_diameter(domain, key):
+        return None
+    if requested is None:
+        existing = read_check(domain, key) or {}
+        return existing.get("rebar_diameter") or DEFAULT_DIAMETER
+    parsed = parse_diameter(requested)
+    if parsed is None:
+        raise ValueError(
+            "Rebar diameter must be one of the cover table columns: "
+            + ", ".join(f"Ø{d}" for d in COVER_DIAMETERS)
+        )
+    return parsed
 
 
 def save_check(
@@ -159,6 +207,7 @@ def save_check(
     prompt: str, pass_text: str, not_found_text: str,
     requires_vision: bool = False,
     debug_trace: bool | None = None,
+    rebar_diameter: int | str | None = None,
 ) -> dict:
     """Create or overwrite a check .md. Built-in checks may be edited in place;
     new checks can be created in any domain. Returns the saved check."""
@@ -202,6 +251,8 @@ def save_check(
         "images":           images,
         "builtin":          is_builtin(domain, key),
         "user_defined":     is_user,
+        "rebar_diameter":   _resolve_rebar_diameter(domain, key, rebar_diameter),
+        "rebar_diameter_options": _rebar_diameter_options(domain, key),
     }
 
     path = writable_md_path(domain, key)
