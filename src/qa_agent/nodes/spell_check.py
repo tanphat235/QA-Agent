@@ -1,5 +1,7 @@
 import logging
 import re
+from typing import NamedTuple
+
 from pydantic import BaseModel, Field
 from langchain_anthropic import ChatAnthropic
 from langchain_core.callbacks import BaseCallbackHandler
@@ -8,6 +10,12 @@ from langchain_core.outputs import LLMResult
 
 from qa_agent.state import GraphState
 from qa_agent.concrete_cover import expected_cover
+from qa_agent.element_type import (
+    display_name,
+    element_name_candidates,
+    normalize_element_type,
+    steel_content_range,
+)
 from qa_agent.rag.retriever import get_check_prompt, get_check_meta, get_check_rebar_diameter
 from qa_agent.nodes.issue_filter import OUTPUT_RULES, accept_finding, build_check_issues
 from qa_agent.nodes.pdf_extractor import _normalize_ebt_nr, _ebt_field_matches
@@ -76,6 +84,8 @@ _LLM_CHECKS = ["spelling", "section_name", "parts_label"]
 # Run on Sonnet with the PDF attached; fall back to the text call without one.
 _VISION_CHECKS = frozenset({"parts_label"})
 _ALL_CHECKS = _LLM_CHECKS + ["pos_count", "revision_check", "drawing_status", "exposition_class", "steel_content", "lastausgleich", "overview_plan_check", "steel_list_check"]
+
+_LOC_TITLE_BLOCK = "title block"
 
 _CHECK_PROMPTS: dict[str, str] = {k: get_check_prompt("spell", k) for k in _LLM_CHECKS}
 _CHECK_META: dict[str, tuple[str, str, str]] = {k: get_check_meta("spell", k) for k in _ALL_CHECKS}
@@ -192,6 +202,143 @@ def _run_spell_llm(keys: list[str], formatted: str, pdf_data: str | None) -> _Sp
         [SystemMessage(content=system), HumanMessage(content=human_content)],
         config={"callbacks": [_UsageCallback(label)]},
     )
+
+
+# ── Element type from the drawing title (LLM) ────────────────────────────────
+# The title block always names the element, but never cleanly: the name sits
+# inside a German compound, next to project codes and axis labels, and shares a
+# text line with whatever rebar callouts fall on the same y-band. Pattern
+# matching on that has proven unreliable, so the model reads the name from a set
+# of candidate lines and the plausible-range comparison below stays plain
+# deterministic Python.
+
+class _ElementTypeResult(BaseModel):
+    element_type: str = Field(description="wall | column | beam | slab | unknown")
+    evidence: str = Field(default="", description="The exact wording the type was read from")
+
+
+_ELEMENT_TYPE_SYSTEM = """\
+You identify which precast concrete element a drawing details, from text lines
+taken off the sheet.
+
+Answer with exactly one of:
+  wall    — Wand, Wandplatte, Wandscheibe, Wandelement, wall panel
+  column  — Stütze, Säule, Pfeiler, column, pillar
+  beam    — Balken, Träger, Unterzug, Riegel, beam, girder
+  slab    — Platte, Decke, Deckenplatte, Bodenplatte, Rippenplatte, TT-Plate,
+            double-tee, slab
+  unknown — no line names an element type
+
+Worked examples:
+  "Schalung und Bewehrung FT.- Wandplatte-Achse A-W503.1"      -> wall
+  "20 44 ø 8 L=144cm Formwork and reinforcement Pr.- TT-Plate" -> slab
+  "Bauteil : FT.-TT Platte Betonfestigkeit : C40/50"           -> slab
+
+CRITICAL:
+  • The lines are ordered most-trustworthy first. Prefer the drawing title and
+    the Bauteil / Component field over any other mention.
+  • A line may name an element belonging to a DIFFERENT drawing. Ignore mentions
+    introduced by "Übersichtsplan" / "Overview plan" or a cross-reference to
+    another sheet; classify the element this sheet details.
+  • Lines are polluted with rebar callouts, dimensions, scales and part numbers
+    ("4 ø 10 /5", "M 1:25", "03012"). Ignore that noise.
+  • Any compound beginning with "Wand" is a wall: "Wandplatte" is a precast wall
+    panel, NOT a slab, even though it ends in "-platte".
+  • "TT-Plate" / "TT-Platte" / "TT Platte" is a double-tee floor slab.
+  • Umlauts may be missing from the extracted text ("Stuetze", "Stutze",
+    "Traeger"); treat those spellings as the same word.
+  • Read only from the lines given. Never infer the element from project codes,
+    drawing numbers or projects you recognise.
+  • If no line names an element, answer "unknown". Never fall back to a default.
+  • Put the exact wording you read the type from into "evidence".\
+"""
+
+
+def _classify_element_type(candidates: list[str]) -> tuple[str | None, str]:
+    """Element type named in *candidates*, plus the wording it was read from.
+
+    Returns (None, "") when no line names one or the call fails — the caller
+    then has no range to compare against and reports NOT FOUND.
+    """
+    llm = ChatAnthropic(  # type: ignore[call-arg]
+        model="claude-haiku-4-5",  # type: ignore[call-arg]
+        temperature=0,  # type: ignore[call-arg]
+        max_tokens=512,  # type: ignore[call-arg]
+    ).with_structured_output(_ElementTypeResult).with_retry(stop_after_attempt=2)
+
+    numbered = "\n".join(f"{i}. {line}" for i, line in enumerate(candidates, 1))
+    try:
+        result: _ElementTypeResult = llm.invoke(  # type: ignore[assignment]
+            [
+                SystemMessage(content=_ELEMENT_TYPE_SYSTEM),
+                HumanMessage(content=f"Candidate lines from the sheet:\n{numbered}"),
+            ],
+            config={"callbacks": [_UsageCallback("element_type")]},
+        )
+    except Exception as exc:
+        print(f"[steel_content] element type classification failed: {exc}")
+        return None, ""
+
+    return normalize_element_type(result.element_type), (result.evidence or "").strip()
+
+
+class _SteelContentOutcome(NamedTuple):
+    not_found: bool
+    issue: _SpellIssue | None
+    pass_desc: str | None
+
+
+def _evaluate_steel_content(
+    mass_str: str, vol_str: str, candidates: list[str],
+) -> _SteelContentOutcome:
+    """Steel content ratio against the plausible band for the element on the sheet."""
+    if not mass_str or not vol_str:
+        print("[steel_content] NOT FOUND — mass or volume is empty")
+        return _SteelContentOutcome(True, None, None)
+    try:
+        mass = float(mass_str.replace(",", "."))
+        vol = float(vol_str.replace(",", "."))
+    except ValueError as exc:
+        print(f"[steel_content] NOT FOUND — parse error: {exc}")
+        return _SteelContentOutcome(True, None, None)
+    if vol <= 0:
+        print("[steel_content] NOT FOUND — volume is zero")
+        return _SteelContentOutcome(True, None, None)
+    if not candidates:
+        print("[steel_content] NOT FOUND — no sheet text names an element")
+        return _SteelContentOutcome(True, None, None)
+
+    element_type, evidence = _classify_element_type(candidates)
+    print(
+        f"[steel_content] element_type={element_type or '(unknown)'} "
+        f"evidence={evidence[:60]!r} from {len(candidates)} candidate line(s)"
+    )
+    sc_range = steel_content_range(element_type)
+    if sc_range is None:
+        print("[steel_content] NOT FOUND — drawing title names no known element type")
+        return _SteelContentOutcome(True, None, None)
+
+    ratio = mass / vol
+    low, high = sc_range
+    label = display_name(element_type)
+    in_range = low <= ratio <= high
+    print(
+        f"[steel_content] {mass:.2f} / {vol:.2f} = {ratio:.1f} kg/m3 | "
+        f"{label} range {low}-{high} {'OK' if in_range else 'OUT OF RANGE'}"
+    )
+    if in_range:
+        return _SteelContentOutcome(False, None, (
+            f"PASS — Steel content: {mass:.2f} kg / {vol:.2f} m³ = {ratio:.1f} kg/m³ "
+            f"— within {label} range {low}–{high} kg/m³"
+        ))
+    return _SteelContentOutcome(False, _SpellIssue(
+        check="steel_content", severity="error",
+        description=(
+            f"Steel content {ratio:.1f} kg/m³ ({mass:.2f} kg / {vol:.2f} m³) is outside "
+            f"the {label} range {low}–{high} kg/m³"
+        ),
+        page=1, location=_LOC_TITLE_BLOCK, confidence=1.0,
+    ), None)
 
 
 # ── Steel-list Einbauteilliste extraction (LLM, column-aware) ────────────────
@@ -408,7 +555,18 @@ def spell_check(state: GraphState) -> dict:
     # ── steel_content: log pre-extracted values ──────────────────────────────
     mass_str = str(title_block.get("gesamtmasse") or "").strip()
     vol_str  = str(title_block.get("volumen") or "").strip()
-    print(f"[steel_content] gesamtmasse={mass_str!r}  volumen={vol_str!r}")
+    # The plausible ratio band depends on which element the sheet details, so
+    # collect every line that might name it — drawing_title_value alone is not
+    # enough, as the title-block label often extracts without its value.
+    sc_candidates = element_name_candidates(
+        str(pdf_content.get("raw_text") or ""),
+        title_block.get("drawing_title_value"),
+        title_block.get("drawing_name"),
+    )
+    print(
+        f"[steel_content] gesamtmasse={mass_str!r}  volumen={vol_str!r}  "
+        f"element_name_candidates={len(sc_candidates)}"
+    )
 
     # ── lastausgleich: log pre-extracted values ───────────────────────────────
     la_ebt_found   = bool(title_block.get("rd_ebt_table_found"))
@@ -478,13 +636,13 @@ def spell_check(state: GraphState) -> dict:
                 by_check["pos_count"].append(_SpellIssue(
                     check="pos_count", severity="error",
                     description=f"letzte Stabstahlposition: title block={ts}, Stabliste max={ms}",
-                    page=1, location="title block", confidence=1.0,
+                    page=1, location=_LOC_TITLE_BLOCK, confidence=1.0,
                 ))
             if tm and mm and tm != mm:
                 by_check["pos_count"].append(_SpellIssue(
                     check="pos_count", severity="error",
                     description=f"letzte Mattenposition: title block={tm}, Mattenstahlliste max={mm}",
-                    page=1, location="title block", confidence=1.0,
+                    page=1, location=_LOC_TITLE_BLOCK, confidence=1.0,
                 ))
 
     # ── revision_check Python comparison ────────────────────────────────────
@@ -595,25 +753,13 @@ def spell_check(state: GraphState) -> dict:
     # ── steel_content Python computation ────────────────────────────────────
     sc_enabled = enabled_sub is None or "steel_content" in (enabled_sub or [])
     if sc_enabled:
-        if not mass_str or not vol_str:
+        sc_outcome = _evaluate_steel_content(mass_str, vol_str, sc_candidates)
+        if sc_outcome.not_found:
             not_found_set.add("steel_content")
-            print("[steel_content] NOT FOUND — mass or volume is empty")
-        else:
-            try:
-                mass = float(mass_str.replace(",", "."))
-                vol  = float(vol_str.replace(",", "."))
-                if vol > 0:
-                    ratio = mass / vol
-                    dynamic_pass_descs["steel_content"] = (
-                        f"PASS — Steel content: {mass:.2f} kg / {vol:.2f} m³ = {ratio:.1f} kg/m³"
-                    )
-                    print(f"[steel_content] {mass:.2f} / {vol:.2f} = {ratio:.1f} kg/m³")
-                else:
-                    not_found_set.add("steel_content")
-                    print("[steel_content] NOT FOUND — volume is zero")
-            except ValueError as exc:
-                not_found_set.add("steel_content")
-                print(f"[steel_content] NOT FOUND — parse error: {exc}")
+        if sc_outcome.issue is not None:
+            by_check["steel_content"].append(sc_outcome.issue)
+        if sc_outcome.pass_desc:
+            dynamic_pass_descs["steel_content"] = sc_outcome.pass_desc
 
     # ── lastausgleich Python check ────────────────────────────────────────────
     la_enabled = enabled_sub is None or "lastausgleich" in (enabled_sub or [])
