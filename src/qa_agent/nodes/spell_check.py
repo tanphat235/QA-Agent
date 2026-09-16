@@ -64,13 +64,6 @@ extracted text (supplementary cross-reference only). Inspect the rendered drawin
 ONLY issues you can directly observe.\
 """
 
-# section_name checks only marker → view. View-without-marker items are false
-# positives (marker labels are often unreadable in extracted text) — drop them.
-_VIEW_TO_MARKER_RE = re.compile(
-    r"\bview\b.{0,60}\bno\s+correspond\w*\b.{0,40}\bmarker\b",
-    re.IGNORECASE,
-)
-
 # Spelling false positives: LLM flags pdfplumber extraction noise as "garbled text".
 _EXTRACTION_ARTIFACT_RE = re.compile(
     r"\b(?:garbled|corrupted)\b"
@@ -84,10 +77,13 @@ _EXTRACTION_ARTIFACT_RE = re.compile(
 # pos_count and revision_check are handled entirely by Python — not sent to LLM
 _LLM_CHECKS = ["spelling", "section_name", "parts_label"]
 
-# Checks that must read the rendered PDF (labels drawn rotated/vertical in
-# graphical views are dropped or fragmented by pdfplumber text extraction).
+# Checks that must read the rendered PDF. parts_label: labels drawn rotated or
+# vertical in graphical views are dropped or fragmented by pdfplumber text
+# extraction. section_name: judging whether a view draws the cut its marker
+# defines needs the cut lines, the arrow directions and the view geometry, none
+# of which survive text extraction.
 # Run on Sonnet with the PDF attached; fall back to the text call without one.
-_VISION_CHECKS = frozenset({"parts_label"})
+_VISION_CHECKS = frozenset({"parts_label", "section_name"})
 _ALL_CHECKS = _LLM_CHECKS + ["pos_count", "revision_check", "drawing_status", "exposition_class", "steel_content", "lastausgleich", "overview_plan_check", "steel_list_check"]
 
 _LOC_TITLE_BLOCK = "title block"
@@ -110,7 +106,7 @@ OUTPUT FORMAT — one item per finding
 
 DEBUG NOTES — always populate one entry per active check, regardless of pass/fail:
   spelling:      "spelling: language=<language you judged the sheet to be in> | scanned=[<areas checked>] | misspellings=[<word: correction>,...] | foreign_language=[<quoted text: its language>,...] | overlap/truncated=[<locations>]"
-  section_name:  "section_name: MARKERS=[<list from Ansicht/Bewehrung>] | VIEWS=[<list of Schnitt/Draufsicht titles>] | unmatched_markers=[...]"
+  section_name:  "section_name: MARKERS=[<designation:orientation:viewed-from:position>,...] | VIEWS=[<designation:orientation drawn>,...] | matched=[...] | unmatched_markers=[...] | orphan_titles=[...] | misplaced=[<title: marker it really draws>,...]"
   parts_label:   "parts_label: EBT found=[<part codes>] | MT found=[<part codes>] | missing_label=[...] | wrong_label=[...]"
 
 RULES:
@@ -681,9 +677,6 @@ def spell_check(state: GraphState) -> dict:
                 continue
             if not accept_finding(item.description, item.confidence):
                 print(f"[{item.check}] dropped non-violation item: {item.description[:100]!r}")
-                continue
-            if item.check == "section_name" and _VIEW_TO_MARKER_RE.search(item.description):
-                print(f"[section_name] dropped view→marker item: {item.description[:80]!r}")
                 continue
             if item.check == "spelling" and _EXTRACTION_ARTIFACT_RE.search(item.description):
                 print(f"[spelling] dropped extraction-artifact item: {item.description[:100]!r}")
