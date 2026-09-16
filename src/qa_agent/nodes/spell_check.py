@@ -557,6 +557,336 @@ def _extract_ebt_tables(
     return (dr_rows, sl_rows)
 
 
+# ── Stabliste / Mattenstahlliste rows (LLM read, Python compare) ─────────────
+# The totals alone hide the defect that matters: both documents can sum to the
+# same mass while a single position carries a different number, count, diameter
+# or length. Both schedules are therefore read row by row from both documents
+# and compared position by position by the plain Python below.
+
+class _SteelRow(BaseModel):
+    pos: str = Field(description="Pos. / Position column, exactly as printed")
+    stck: str = Field(default="", description="Stck / Stück / quantity column")
+    dia: str = Field(default="", description="Ø [mm] column on a bar row; the mesh type or Ø designation on a mesh row")
+    einzel: str = Field(default="", description="Einzellänge [m] column")
+    gesamt: str = Field(default="", description="Gesamtlänge [m] column")
+    masse: str = Field(default="", description="Masse / Gewicht [kg] column")
+
+
+class _SteelSchedules(BaseModel):
+    drawing_bar_found: bool = Field(description="true if a Stabliste is present in the DRAWING")
+    steel_list_bar_found: bool = Field(description="true if a Stabliste is present in the STEEL LIST")
+    drawing_bar_rows: list[_SteelRow] = Field(default_factory=list, description="DRAWING Stabliste rows, top-to-bottom")
+    steel_list_bar_rows: list[_SteelRow] = Field(default_factory=list, description="STEEL LIST Stabliste rows, top-to-bottom")
+    drawing_mesh_found: bool = Field(description="true if a Mattenstahlliste is present in the DRAWING")
+    steel_list_mesh_found: bool = Field(description="true if a Mattenstahlliste is present in the STEEL LIST")
+    drawing_mesh_rows: list[_SteelRow] = Field(default_factory=list, description="DRAWING Mattenstahlliste rows, top-to-bottom")
+    steel_list_mesh_rows: list[_SteelRow] = Field(default_factory=list, description="STEEL LIST Mattenstahlliste rows, top-to-bottom")
+
+
+_SCHEDULE_EXTRACT_SYSTEM = """\
+You are a precise table-extraction tool for German precast-concrete rebar schedules.
+Read each table row by row from the rendered grid. Never translate, normalize,
+reorder, round, infer or invent any value — copy each cell exactly as printed and
+place every value under its correct column header. Return EVERY data row of every
+table; a dropped row is a worse error than an uncertain one. Apply the SAME column
+logic identically to both documents.\
+"""
+
+_SCHEDULE_EXTRACT_PROMPT = """\
+TASK — Extract the rebar schedules from BOTH inputs above, row by row.
+
+You are given two inputs, in this order:
+  • DRAWING    — the structural drawing (first PDF document, or the text under "=== DRAWING TEXT ===")
+  • STEEL LIST — the supplementary steel list (second PDF document, or the text under "=== STEEL LIST TEXT ===")
+
+Two schedules are to be read from EACH input:
+  • Stabliste — the bar schedule (also "Stabliste (1x)", "Stabliste - Biegeformen", bar list)
+  • Mattenstahlliste — the mesh schedule (also mesh list, Matten, Mattenliste)
+
+COLUMNS — the same six slots for both schedules, left to right:
+  pos     Pos. / Position                — the position number, as printed
+  stck    Stck / Stück / Anzahl / Pcs    — the piece count
+  dia     Ø [mm]                         — the bar diameter; on a mesh row, the mesh
+                                           type or Ø designation printed in that
+                                           column (e.g. Q188A)
+  einzel  Einzellänge [m] / Einzel Länge — the length of ONE piece
+  gesamt  Gesamtlänge [m] / Gesamt Länge — the total length of the position
+  masse   Masse [kg] / Gewicht [kg]      — the mass of the position
+
+When PDF documents are supplied, READ EACH TABLE FROM THE RENDERED GRID — that is the
+source of truth. Trace every column header straight down its column and read the cell
+that lines up with each row's Pos. number.
+
+READING THE STEEL LIST (the document that is most often mis-read):
+  • The steel list draws a BENDING-SHAPE SKETCH for each position, between the Ø column
+    and the length columns. The small numbers printed on that sketch are bending segment
+    dimensions in cm (e.g. 112, 19, 76, 85) — they are NOT table columns. Ignore them
+    completely. Read `einzel`, `gesamt` and `masse` from the numeric columns to the RIGHT
+    of the sketch.
+  • Rows continue across pages. Collect every row of a schedule from every page it spans.
+  • The schedule may be grouped per element (e.g. "Summe ST-11"). Collect the data rows
+    and skip the summary lines.
+
+STRICT RULES:
+  • Copy every cell EXACTLY as printed, including the decimal separator.
+  • One object per DATA row. NEVER emit a row for a header, a section title, a bending
+    sketch, a subtotal ("Summe …") or a total ("Gesamtmasse", "Gesamtgewicht",
+    "Summe über alle Bauteile") — totals are compared separately.
+  • Never merge two positions into one row and never split one position across two rows.
+  • Leave a field as an empty string only when that cell is genuinely blank in the grid.
+  • If a document has no Stabliste (or no Mattenstahlliste), set that *_found flag false
+    and return an empty list for it. Do NOT substitute the other schedule's rows.
+
+FINAL RE-CHECK (before returning):
+  The two documents describe the SAME steel. Count the rows you read for each schedule on
+  each side. If the counts differ, go back and re-read the grid of the shorter one — you
+  most likely dropped a row that continues onto another page or sits beside a sketch.
+  Report the rows you actually see; never pad a table to make the counts agree.
+"""
+
+
+def _extract_steel_schedules(
+    drawing_text: str,
+    steel_list_text: str,
+    drawing_pdf: str | None = None,
+    steel_list_pdf: str | None = None,
+) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
+    """Read both rebar schedules from both documents in one call.
+
+    Returns (drawing_bar, steel_list_bar, drawing_mesh, steel_list_mesh).
+    Prefers the rendered PDF documents — pdfplumber interleaves the steel list's
+    bending-sketch dimensions with the real columns — and falls back to text.
+    """
+    def _to_rows(rows: list[_SteelRow]) -> list[dict]:
+        return [
+            {
+                "pos":    (r.pos or "").strip(),
+                "stck":   (r.stck or "").strip(),
+                "dia":    (r.dia or "").strip(),
+                "einzel": (r.einzel or "").strip(),
+                "gesamt": (r.gesamt or "").strip(),
+                "masse":  (r.masse or "").strip(),
+            }
+            for r in rows
+            if (r.pos or "").strip()
+        ]
+
+    use_vision = bool(drawing_pdf) and bool(steel_list_pdf)
+    if not use_vision and not (drawing_text or "").strip() and not (steel_list_text or "").strip():
+        print("[steel_list_check] no input to extract schedules from")
+        return ([], [], [], [])
+
+    def _doc(b64: str) -> dict:
+        return {
+            "type": "document",
+            "source": {"type": "base64", "media_type": "application/pdf", "data": b64},
+            "cache_control": {"type": "ephemeral"},
+        }
+
+    if use_vision:
+        print("[steel_list_check] extracting schedules via rendered PDF documents (vision)")
+        human_content: list[dict] = [
+            {"type": "text", "text": "=== DRAWING (PDF document) ==="},
+            _doc(drawing_pdf),  # type: ignore[arg-type]
+            {"type": "text", "text": "=== STEEL LIST (PDF document) ==="},
+            _doc(steel_list_pdf),  # type: ignore[arg-type]
+            {"type": "text", "text": _SCHEDULE_EXTRACT_PROMPT},
+        ]
+    else:
+        print("[steel_list_check] extracting schedules via pdfplumber text (no PDF available)")
+        human_content = [
+            {"type": "text", "text": "=== DRAWING TEXT ===\n" + (drawing_text or ""),
+             "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": "=== STEEL LIST TEXT ===\n" + (steel_list_text or "")},
+            {"type": "text", "text": _SCHEDULE_EXTRACT_PROMPT},
+        ]
+
+    llm = ChatAnthropic(  # type: ignore[call-arg]
+        model="claude-sonnet-4-6",  # type: ignore[call-arg]
+        temperature=0,  # type: ignore[call-arg]
+        max_tokens=8192,  # type: ignore[call-arg]
+    ).with_structured_output(_SteelSchedules).with_retry(stop_after_attempt=2)
+
+    result: _SteelSchedules = llm.invoke(  # type: ignore[assignment]
+        [
+            SystemMessage(content=_SCHEDULE_EXTRACT_SYSTEM),
+            HumanMessage(content=human_content),
+        ],
+        config={"callbacks": [_UsageCallback("schedule_extract")]},
+    )
+
+    out = (
+        _to_rows(result.drawing_bar_rows),
+        _to_rows(result.steel_list_bar_rows),
+        _to_rows(result.drawing_mesh_rows),
+        _to_rows(result.steel_list_mesh_rows),
+    )
+    print(
+        f"[steel_list_check] LLM-extracted rows — "
+        f"Stabliste: drawing={len(out[0])} (found={result.drawing_bar_found}) "
+        f"steel_list={len(out[1])} (found={result.steel_list_bar_found}) | "
+        f"Mattenstahlliste: drawing={len(out[2])} (found={result.drawing_mesh_found}) "
+        f"steel_list={len(out[3])} (found={result.steel_list_mesh_found})"
+    )
+    for label, rows in (
+        ("drawing Stabliste", out[0]), ("steel list Stabliste", out[1]),
+        ("drawing Mattenliste", out[2]), ("steel list Mattenliste", out[3]),
+    ):
+        for r in rows:
+            print(
+                f"[steel_list_check]   [{label}] Pos {r['pos']}: stck={r['stck']!r} "
+                f"dia={r['dia']!r} einzel={r['einzel']!r} gesamt={r['gesamt']!r} masse={r['masse']!r}"
+            )
+    return out
+
+
+# Every column of a schedule row except Pos, which is the key rows are matched on.
+_SCHEDULE_FIELDS: list[tuple[str, str]] = [
+    ("stck",   "Stück"),
+    ("dia",    "Ø [mm]"),
+    ("einzel", "Einzellänge [m]"),
+    ("gesamt", "Gesamtlänge [m]"),
+    ("masse",  "Masse [kg]"),
+]
+
+_NUM_RE = re.compile(r"^[+-]?\d+(?:[.,]\d+)?$")
+
+
+def _parse_schedule_num(text: str) -> float | None:
+    """The number in a schedule cell, or None when the cell is not a plain number."""
+    t = (text or "").strip().replace(" ", "")
+    if not _NUM_RE.match(t):
+        return None
+    return float(t.replace(",", "."))
+
+
+def _norm_pos(value: str) -> str:
+    """Position key — printed as an integer, sometimes with a trailing dot."""
+    return (value or "").strip().rstrip(".").lstrip("0") or "0"
+
+
+def _schedule_value_matches(dr_val: str, sl_val: str) -> bool:
+    """True when two schedule cells hold the same value.
+
+    Numbers compare as numbers, so a decimal comma or a trailing zero ("3,50"
+    against "3.5") is formatting, not a difference. Anything else compares as
+    text, ignoring case and spacing. There is no tolerance here — a per-position
+    value must agree exactly; only the schedule totals carry one.
+    """
+    d, s = (dr_val or "").strip(), (sl_val or "").strip()
+    if d == s:
+        return True
+    dn, sn = _parse_schedule_num(d), _parse_schedule_num(s)
+    if dn is not None and sn is not None:
+        return abs(dn - sn) < 1e-9
+    return d.replace(" ", "").lower() == s.replace(" ", "").lower()
+
+
+def _row_summary(row: dict) -> str:
+    """Short "4 × Ø14, 3.27 m, 15.83 kg" description of a schedule row."""
+    bits = []
+    if row.get("stck") and row.get("dia"):
+        bits.append(f"{row['stck']} × Ø{row['dia']}")
+    elif row.get("dia"):
+        bits.append(f"Ø{row['dia']}")
+    if row.get("einzel"):
+        bits.append(f"{row['einzel']} m")
+    if row.get("masse"):
+        bits.append(f"{row['masse']} kg")
+    return ", ".join(bits)
+
+
+def _index_by_pos(rows: list[dict]) -> tuple[dict[str, dict], list[str]]:
+    """Map rows by normalized Pos, plus the positions that occur more than once."""
+    by_pos: dict[str, dict] = {}
+    dups: list[str] = []
+    for row in rows:
+        key = _norm_pos(row.get("pos", ""))
+        if not key:
+            continue
+        if key in by_pos:
+            if key not in dups:
+                dups.append(key)
+            continue
+        by_pos[key] = row
+    return by_pos, dups
+
+
+def _compare_schedule(
+    label: str, dr_rows: list[dict], sl_rows: list[dict],
+) -> list[_SpellIssue]:
+    """Compare one schedule position by position — one issue per difference.
+
+    Identical logic serves the Stabliste and the Mattenstahlliste; only the label
+    carried into the descriptions differs.
+    """
+    def _issue(desc: str) -> _SpellIssue:
+        return _SpellIssue(
+            check="steel_list_check", severity="error", description=desc,
+            page=1, location=label, confidence=1.0,
+        )
+
+    found: list[_SpellIssue] = []
+    dr_map, dr_dups = _index_by_pos(dr_rows)
+    sl_map, sl_dups = _index_by_pos(sl_rows)
+
+    for side, dups in (("drawing", dr_dups), ("steel list", sl_dups)):
+        for pos in dups:
+            print(f"[steel_list_check]   DUPLICATE {label} Pos {pos} in {side}")
+            found.append(_issue(f"{label}: Pos {pos} appears more than once in the {side}"))
+
+    missing = [p for p in dr_map if p not in sl_map]
+    extra   = [p for p in sl_map if p not in dr_map]
+
+    # A position renumbered between the two documents surfaces as one missing and
+    # one extra row holding identical values. That is one defect, not two — pair
+    # them up and report the renumbering itself.
+    for dp in list(missing):
+        for sp in list(extra):
+            if all(
+                _schedule_value_matches(dr_map[dp].get(k, ""), sl_map[sp].get(k, ""))
+                for k, _ in _SCHEDULE_FIELDS
+            ):
+                missing.remove(dp)
+                extra.remove(sp)
+                print(f"[steel_list_check]   RENUMBERED {label}: drawing Pos {dp} = steel list Pos {sp}")
+                found.append(_issue(
+                    f"{label}: Pos {dp} in the drawing is Pos {sp} in the steel list "
+                    f"— same {_row_summary(dr_map[dp])}, different position number"
+                ))
+                break
+
+    for pos in missing:
+        print(f"[steel_list_check]   MISSING in steel list: {label} Pos {pos}")
+        found.append(_issue(
+            f"{label}: Pos {pos} ({_row_summary(dr_map[pos])}) is in the drawing "
+            f"but missing from the steel list"
+        ))
+    for pos in extra:
+        print(f"[steel_list_check]   EXTRA in steel list: {label} Pos {pos}")
+        found.append(_issue(
+            f"{label}: Pos {pos} ({_row_summary(sl_map[pos])}) is in the steel list "
+            f"but missing from the drawing"
+        ))
+
+    for pos, dr_row in dr_map.items():
+        sl_row = sl_map.get(pos)
+        if sl_row is None:
+            continue
+        diffs = [
+            f"{field_label}: drawing={dr_row.get(key, '')!r} vs steel list={sl_row.get(key, '')!r}"
+            for key, field_label in _SCHEDULE_FIELDS
+            if not _schedule_value_matches(dr_row.get(key, ""), sl_row.get(key, ""))
+        ]
+        if diffs:
+            print(f"[steel_list_check]   MISMATCH {label} Pos {pos}: " + "; ".join(diffs))
+            found.append(_issue(f"{label}: Pos {pos} mismatch — " + "; ".join(diffs)))
+        else:
+            print(f"[steel_list_check]   OK {label} Pos {pos}")
+
+    return found
+
+
 def spell_check(state: GraphState) -> dict:
     pdf_content = state.get("pdf_content") or {}
     formatted: str = pdf_content.get("formatted") or ""
@@ -1015,9 +1345,21 @@ def spell_check(state: GraphState) -> dict:
                 steel_list_pdf=sl_data.get("pdf_data"),
             )
 
+            # Row-by-row schedules. Matching totals prove nothing on their own —
+            # a position can be renumbered, or carry a different count or length,
+            # while both documents still sum to the same mass.
+            dr_bar, sl_bar, dr_mesh, sl_mesh = _extract_steel_schedules(
+                str(pdf_c.get("raw_text") or ""),
+                str(sl_data.get("raw_text") or ""),
+                drawing_pdf=state.get("pdf_data"),
+                steel_list_pdf=sl_data.get("pdf_data"),
+            )
+
             print(f"[steel_list_check] ── Comparison ──────────────────────────────────")
             print(f"[steel_list_check]   Stabliste Gesamtmasse   : drawing={dr_stab!r}  steel_list={sl_stab!r}")
             print(f"[steel_list_check]   Mattenstahl Gesamtgewicht: drawing={dr_matt!r}  steel_list={sl_matt!r}")
+            print(f"[steel_list_check]   Stabliste rows          : drawing={len(dr_bar)}  steel_list={len(sl_bar)}")
+            print(f"[steel_list_check]   Mattenstahlliste rows   : drawing={len(dr_mesh)}  steel_list={len(sl_mesh)}")
             print(f"[steel_list_check]   EBT items               : drawing={len(dr_ebt)}  steel_list={len(sl_ebt)}")
             print(f"[steel_list_check] ────────────────────────────────────────────────")
 
@@ -1054,11 +1396,26 @@ def spell_check(state: GraphState) -> dict:
             _sl_cmp_float("Stabliste Gesamtmasse",       dr_stab, sl_stab)
             _sl_cmp_float("Mattenstahlliste Gesamtgewicht", dr_matt, sl_matt)
 
-            # If neither document yields an Einbauteilliste table, the prerequisite
-            # is absent — report NOT FOUND rather than flagging every row as extra.
-            if not dr_ebt and not sl_ebt:
+            # Per-position comparison of both schedules — identical rules for the
+            # bar list and the mesh list, and no tolerance: every column of a
+            # position must agree exactly. Only the totals above carry one.
+            by_check["steel_list_check"].extend(
+                _compare_schedule("Stabliste", dr_bar, sl_bar)
+            )
+            by_check["steel_list_check"].extend(
+                _compare_schedule("Mattenstahlliste", dr_mesh, sl_mesh)
+            )
+
+            # NOT FOUND only when nothing at all could be compared. A schedule the
+            # drawing does not carry is not a defect, and it must not suppress the
+            # findings of the comparisons that did run.
+            compared_anything = bool(
+                dr_ebt or sl_ebt or dr_bar or sl_bar or dr_mesh or sl_mesh
+                or (dr_stab and sl_stab) or (dr_matt and sl_matt)
+            )
+            if not compared_anything:
                 not_found_set.add("steel_list_check")
-                print("[steel_list_check] NOT FOUND — no Einbauteilliste table in drawing or steel list")
+                print("[steel_list_check] NOT FOUND — no schedule or parts table in drawing or steel list")
 
             # EBT comparison — all 5 fields must match exactly
             dr_ebt_map = {_normalize_ebt_nr(item["ebt_nr"]): item for item in dr_ebt}
