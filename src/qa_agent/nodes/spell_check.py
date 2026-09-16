@@ -10,6 +10,11 @@ from langchain_core.outputs import LLMResult
 
 from qa_agent.state import GraphState
 from qa_agent.concrete_cover import expected_cover
+from qa_agent.drawing_language import (
+    DrawingLanguage,
+    detect_drawing_language,
+    language_name,
+)
 from qa_agent.element_type import (
     display_name,
     element_name_candidates,
@@ -104,7 +109,7 @@ OUTPUT FORMAT — one item per finding
   not_found:   list of check keys where prerequisite drawing elements were absent
 
 DEBUG NOTES — always populate one entry per active check, regardless of pass/fail:
-  spelling:      "spelling: scanned=[<areas checked>] | misspellings=[<word: correction>,...] | overlap/truncated=[<locations>]"
+  spelling:      "spelling: language=<language you judged the sheet to be in> | scanned=[<areas checked>] | misspellings=[<word: correction>,...] | foreign_language=[<quoted text: its language>,...] | overlap/truncated=[<locations>]"
   section_name:  "section_name: MARKERS=[<list from Ansicht/Bewehrung>] | VIEWS=[<list of Schnitt/Draufsicht titles>] | unmatched_markers=[...]"
   parts_label:   "parts_label: EBT found=[<part codes>] | MT found=[<part codes>] | missing_label=[...] | wrong_label=[...]"
 
@@ -117,11 +122,44 @@ RULES:
 """ + OUTPUT_RULES
 
 
-def _build_spell_task(active: list[str], use_vision: bool = False) -> str:
+def _build_spell_task(
+    active: list[str], use_vision: bool = False, extra_context: str = "",
+) -> str:
     check_keys = " | ".join(f'"{k}"' for k in active)
     blocks = "\n\n".join(_CHECK_PROMPTS[k] for k in active)
     intro = _TASK_INTRO_VISION if use_vision else _TASK_INTRO
+    if extra_context:
+        intro = intro + "\n\n" + extra_context
     return intro + "\n\n" + blocks + _TASK_OUTRO_TPL.format(check_keys=check_keys)
+
+
+def _language_context(lang: DrawingLanguage) -> str:
+    """The DRAWING LANGUAGE CONTEXT block the spelling prompt reads its step 1 from."""
+    if lang.code == "unknown":
+        return """\
+DRAWING LANGUAGE CONTEXT
+  Automatic detection found too little prose to name the sheet's language.
+  Determine the primary language yourself from the title block labels, view
+  titles and note text before applying the language-consistency rule.\
+"""
+    scores = ", ".join(f"{language_name(c)}={n}" for c, n in lang.scores.items())
+    lines = [
+        "DRAWING LANGUAGE CONTEXT",
+        f"  Detected primary language: {lang.name}",
+        f"  Marker-word hits: {scores}",
+        f"  Read from: {', '.join(lang.markers[:15])}",
+    ]
+    if lang.secondary:
+        lines.append(
+            f"  A second language is also present in the extracted text: "
+            f"{language_name(lang.secondary)} — locate that text and report it "
+            f"under the language-consistency rule."
+        )
+    lines.append(
+        "  Treat the detected language as the sheet's language unless the readable\n"
+        "  text plainly contradicts it."
+    )
+    return "\n".join(lines)
 
 
 class _UsageCallback(BaseCallbackHandler):
@@ -159,10 +197,18 @@ class _SpellResult(BaseModel):
     debug_notes: list[str] = Field(default_factory=list, description="One debug entry per active check showing extracted values")
 
 
-def _run_spell_llm(keys: list[str], formatted: str, pdf_data: str | None) -> _SpellResult:
+def _run_spell_llm(
+    keys: list[str],
+    formatted: str,
+    pdf_data: str | None,
+    lang: DrawingLanguage | None = None,
+) -> _SpellResult:
     """Run one group of LLM spell checks — text-only (Haiku) or vision (Sonnet + PDF)."""
     use_vision = bool(pdf_data)
-    task = _build_spell_task(keys, use_vision=use_vision)
+    # Only the spelling check reads the language block; the other checks would
+    # pay for the tokens without using them.
+    context = _language_context(lang) if (lang and "spelling" in keys) else ""
+    task = _build_spell_task(keys, use_vision=use_vision, extra_context=context)
 
     if use_vision:
         model = "claude-sonnet-4-6"
@@ -521,7 +567,7 @@ def spell_check(state: GraphState) -> dict:
     title_block: dict = pdf_content.get("title_block") or {}
     enabled_sub = (state.get("enabled_sub_checks") or {}).get("spell")
 
-    # Holds dynamically computed pass messages (only used for steel_content currently)
+    # Holds dynamically computed pass messages (steel_content range, spelling language)
     dynamic_pass_descs: dict[str, str] = {}
 
     # ── pos_count: fully Python-based, no LLM ───────────────────────────────
@@ -591,6 +637,24 @@ def spell_check(state: GraphState) -> dict:
     # rendered PDF attached — pdfplumber drops/fragments rotated view labels.
     active_llm = [k for k in _LLM_CHECKS if enabled_sub is None or k in (enabled_sub or [])]
     pdf_data: str | None = state.get("pdf_data")  # type: ignore[assignment]
+
+    # ── spelling: which language is the sheet written in? ────────────────────
+    # Detected here in Python so the answer is the same on every run, then handed
+    # to the model — it decides nothing about the language, it only locates text
+    # that does not belong to it. Detect on raw_text, never on `formatted`: the
+    # formatter's own English section headers would count toward English.
+    lang = detect_drawing_language(str(pdf_content.get("raw_text") or ""))
+    print(
+        f"[spelling] language={lang.code} ({lang.name})  confidence={lang.confidence:.2f}  "
+        f"scores={lang.scores}  secondary={lang.secondary or '-'}"
+    )
+    print(f"[spelling] language markers={lang.markers[:15]}")
+    if lang.code != "unknown":
+        dynamic_pass_descs["spelling"] = (
+            f"PASS — no spelling or language errors found "
+            f"(drawing language: {lang.name})."
+        )
+
     vision_keys = [k for k in active_llm if k in _VISION_CHECKS] if pdf_data else []
     text_keys = [k for k in active_llm if k not in vision_keys]
     if not pdf_data and any(k in _VISION_CHECKS for k in active_llm):
@@ -601,9 +665,9 @@ def spell_check(state: GraphState) -> dict:
 
     results: list[_SpellResult] = []
     if text_keys:
-        results.append(_run_spell_llm(text_keys, formatted, None))
+        results.append(_run_spell_llm(text_keys, formatted, None, lang))
     if vision_keys:
-        results.append(_run_spell_llm(vision_keys, formatted, pdf_data))
+        results.append(_run_spell_llm(vision_keys, formatted, pdf_data, lang))
 
     by_check: dict[str, list[_SpellIssue]] = {k: [] for k in _CHECK_META}
     not_found_set: set[str] = set()
