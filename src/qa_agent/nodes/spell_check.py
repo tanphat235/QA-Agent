@@ -1266,10 +1266,16 @@ def spell_check(state: GraphState) -> dict:
         if rev_tb and rev_tbl:
             rev_compared = True
             if rev_tb != rev_tbl:
-                src = "title block" if rev_field else f"drawing name {plan_id}"
+                src = (
+                    f"the title block states {rev_tb}" if rev_field
+                    else f"the drawing name {plan_id} ends in {rev_tb}"
+                )
                 by_check["revision_check"].append(_SpellIssue(
                     check="revision_check", severity="error",
-                    description=f"Revision mismatch: {src}={rev_tb}, last revision in table={rev_tbl}",
+                    description=(
+                        f"Revision mismatch: {src}, but the newest row of the revision "
+                        f"history table is {rev_tbl}"
+                    ),
                     page=1, location="title block / revision history table", confidence=1.0,
                 ))
         if rev_field and rev_name:
@@ -1305,21 +1311,12 @@ def spell_check(state: GraphState) -> dict:
     # ── drawing_status Python comparison ─────────────────────────────────────
     ds_enabled = enabled_sub is None or "drawing_status" in (enabled_sub or [])
     if ds_enabled:
+        # This check compares the status code against the Planfreigabe approval
+        # text and nothing else. The code is read from the title block Status
+        # field, or from the end of the drawing name when the sheet has no such
+        # field, but the two are never played off against each other — that is
+        # not what this check is for.
         status_compared = False
-
-        # The Status field and the code at the end of the drawing name state the
-        # same thing — when the sheet carries both, they must agree.
-        if status_field and status_name:
-            status_compared = True
-            if status_field != status_name:
-                by_check["drawing_status"].append(_SpellIssue(
-                    check="drawing_status", severity="error",
-                    description=(
-                        f"Status mismatch: title block Status field={status_field}, "
-                        f"drawing name {plan_id} ends in {status_name}"
-                    ),
-                    page=1, location="title block / drawing name", confidence=1.0,
-                ))
 
         if status_code and planfreigabe:
             pf_upper = planfreigabe.upper()
@@ -1347,12 +1344,15 @@ def spell_check(state: GraphState) -> dict:
         if not status_compared:
             if status_code:
                 src = "title block" if status_field else f"drawing name {plan_id}"
-                dynamic_pass_descs["drawing_status"] = (
-                    f"PASS — Status {status_code}, read from the {src}. "
-                    f"The sheet carries no Planfreigabe text and no second statement of the status, "
-                    f"so there is nothing to compare it against."
+                why = (
+                    "the sheet carries no Planfreigabe text to compare it against"
+                    if not planfreigabe
+                    else f"its first letter {status_code[0]!r} is not P, A or F, so no Planfreigabe rule applies"
                 )
-                print(f"[drawing_status] PASS — status {status_code!r} from {src}, single source")
+                dynamic_pass_descs["drawing_status"] = (
+                    f"PASS — Status {status_code}, read from the {src}; {why}."
+                )
+                print(f"[drawing_status] PASS — status {status_code!r} from {src}; {why}")
             else:
                 not_found_set.add("drawing_status")
                 print(

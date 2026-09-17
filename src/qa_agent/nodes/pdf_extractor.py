@@ -5,6 +5,8 @@ Uses word-coordinate spatial analysis instead of extract_tables() because
 structural drawings use drawn lines for borders rather than proper table structures.
 """
 import re
+from datetime import datetime
+
 import pdfplumber
 
 from qa_agent.extraction.element_code import (
@@ -1686,29 +1688,125 @@ def _find_revision_in_title_block(words: list[dict]) -> str | None:
     return None
 
 
+# ── Revision history table ───────────────────────────────────────────────────
+# The table is headed "Rev. | Date | Details | By | App" on English sheets and
+# "Nr. | Art der Änderung | Datum | Name | Verteiler" on German ones, and the
+# newest entry is at the TOP on some and at the BOTTOM on others. Which row is
+# newest is therefore decided by its Datum, not by where it sits, and only when
+# no date can be read does the code itself order the rows.
+
+# The code in the Nr. column: "A", "C", "02", "C02", "A1".
+_REV_ENTRY_RE = re.compile(r"^(?:[A-Z]{1,2}\d{0,3}|\d{1,3})$", re.IGNORECASE)
+# The header that names the code column, in either language.
+_REV_NR_HEADER_RE = re.compile(r"^(?:Rev\.?|Nr\.?|Index|Ind\.?)$", re.IGNORECASE)
+# A word on the header row that proves this is the revision table and not some
+# other column also headed "Nr.".
+_REV_TABLE_MARK_RE = re.compile(r"änderung|anderung|description|details|revision|beschreibung", re.IGNORECASE)
+_REV_DATE_HEADER_RE = re.compile(r"^(?:Datum|Date)$", re.IGNORECASE)
+
+_REV_HEADER_BAND = 8    # pt — one header row
+_REV_TABLE_DEPTH = 400  # pt — how far below the header the table can run
+_REV_ROW_BAND = 6       # pt — one body row
+
+_REV_DATE_FORMATS = ("%d/%m/%Y", "%d.%m.%Y", "%Y-%m-%d", "%d/%m/%y", "%d.%m.%y")
+
+
+def _parse_rev_date(text: str):
+    """The date in a Datum cell, or None when the cell holds something else."""
+    cleaned = (text or "").strip()
+    for fmt in _REV_DATE_FORMATS:
+        try:
+            return datetime.strptime(cleaned, fmt)
+        except ValueError:
+            continue
+    return None
+
+
 def _find_last_revision_in_table(words: list[dict]) -> str | None:
-    """Return the topmost (most recent) revision code in the revision history table."""
-    rev_header = next(
-        (w for w in words if re.fullmatch(r"Rev\.?", w["text"].strip(), re.IGNORECASE)),
-        None,
-    )
-    if rev_header is None:
-        return None
+    """The most recent revision code in the revision history table.
 
-    col_x0 = rev_header["x0"] - _REV_COL_MARGIN
-    col_x1 = rev_header["x1"] + _REV_COL_MARGIN
+    Most recent means the largest Datum — not the first row. German sheets append
+    new revisions downwards (A, B, C with C newest at the bottom) while others
+    insert them at the top, so reading a fixed end of the table reports the wrong
+    revision on half of them.
+    """
+    # A sheet carries the revision table more than once — the filled-in one and a
+    # blank copy whose column picks up a stray token from behind it. Every header
+    # is read and the one with DATED rows wins; only if none has a readable Datum
+    # does the fullest undated table decide.
+    all_dated: list[tuple[object, str]] = []
+    undated_best: list[str] = []
 
-    entries = [
-        w for w in words
-        if w["top"] > rev_header["bottom"]
-        and w["x0"] >= col_x0
-        and w["x1"] <= col_x1
-        and _REV_CODE_RE.fullmatch(w["text"].strip())
-    ]
-    if not entries:
-        return None
+    for header in sorted(
+        (w for w in words if _REV_NR_HEADER_RE.fullmatch(w["text"].strip())),
+        key=lambda w: w["top"],
+    ):
+        mid = (header["top"] + header["bottom"]) / 2
+        header_row = [
+            w for w in words
+            if abs((w["top"] + w["bottom"]) / 2 - mid) <= _REV_HEADER_BAND
+            and w["x0"] > header["x0"]
+        ]
+        if not any(_REV_TABLE_MARK_RE.search(w["text"]) for w in header_row):
+            continue   # a "Nr." that heads some other column
 
-    return min(entries, key=lambda w: w["top"])["text"].strip()
+        date_header = next(
+            (w for w in sorted(header_row, key=lambda w: w["x0"])
+             if _REV_DATE_HEADER_RE.fullmatch(w["text"].strip())),
+            None,
+        )
+
+        lo, hi = header["x0"] - _REV_COL_MARGIN, header["x1"] + _REV_COL_MARGIN
+        entries = [
+            w for w in words
+            if header["bottom"] < w["top"] <= header["bottom"] + _REV_TABLE_DEPTH
+            and w["x0"] >= lo and w["x1"] <= hi
+            and _REV_ENTRY_RE.fullmatch(w["text"].strip())
+        ]
+        if not entries:
+            continue
+
+        dated: list[tuple[object, str]] = []
+        for entry in entries:
+            if date_header is None:
+                continue
+            row_mid = (entry["top"] + entry["bottom"]) / 2
+            for w in words:
+                if abs((w["top"] + w["bottom"]) / 2 - row_mid) > _REV_ROW_BAND:
+                    continue
+                # The Änderung cell is full of dates too ("Freigabe Prüfingenieur
+                # 04.08.2026 …"), so only the Datum column counts.
+                if not (date_header["x0"] - _REV_COL_MARGIN <= w["x0"] <= date_header["x1"] + _REV_COL_MARGIN):
+                    continue
+                when = _parse_rev_date(w["text"])
+                if when is not None:
+                    dated.append((when, entry["text"].strip()))
+                    break
+
+        if dated:
+            print(
+                f"[revision_check] table at x={round(header['x0'])} y={round(header['top'])}: "
+                f"{[(d.strftime('%Y-%m-%d'), c) for d, c in dated]}"
+            )
+            all_dated.extend(dated)
+        else:
+            codes = sorted(w["text"].strip().upper() for w in entries)
+            print(
+                f"[revision_check] table at x={round(header['x0'])} y={round(header['top'])}: "
+                f"codes {codes}, no readable Datum"
+            )
+            if len(codes) > len(undated_best):
+                undated_best = codes
+
+    if all_dated:
+        newest = max(all_dated, key=lambda t: t[0])
+        print(f"[revision_check] newest revision by Datum → {newest[1]!r}")
+        return newest[1]
+    if undated_best:
+        # No readable Datum column — order by the code itself, which ascends.
+        print(f"[revision_check] no Datum anywhere → highest code {undated_best[-1]!r}")
+        return undated_best[-1]
+    return None
 
 
 # ── Steel list cross-check extractors ────────────────────────────────────────
