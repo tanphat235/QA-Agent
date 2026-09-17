@@ -107,10 +107,12 @@ def build_check_issues(
     not_found_set: set[str],
     enabled_sub: list[str] | None,
     dynamic_pass_descs: dict[str, str] | None = None,
+    dynamic_not_found_descs: dict[str, str] | None = None,
 ) -> list[Issue]:
     """Assemble per-check PASS / FAIL / NOT FOUND summaries plus filtered findings."""
     issues: list[Issue] = []
     pass_overrides = dynamic_pass_descs or {}
+    nf_overrides = dynamic_not_found_descs or {}
 
     for check_key, (check_name, pass_desc, nf_desc) in check_meta.items():
         if enabled_sub is not None and check_key not in enabled_sub:
@@ -122,7 +124,7 @@ def build_check_issues(
                 "check_name": check_name,
                 "not_found": True,
                 "severity": "info",
-                "description": nf_desc,
+                "description": nf_overrides.get(check_key, nf_desc),
                 "page": 1,
                 "location": "drawing",
                 "confidence": 1.0,

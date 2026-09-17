@@ -772,11 +772,20 @@ def _find_total_mass(raw_text: str) -> str | None:
     # Matches: "Gesamtmasse [kg] : 392.29", "Gesamtmasse[kg]:392,29",
     # and the bilingual "Gesamtmasse/ Total mass [kg] : 442.15".
     matches = re.findall(
-        r"Gesamtmasse\s*(?:/\s*Total\s+mass\s*)?\[?\s*kg\s*\]?\s*:?\s*([\d.,]+)",
+        r"Gesamt(?:masse|gewicht)\s*(?:/\s*Total\s+(?:mass|weight)\s*)?\[?\s*kg\s*\]?\s*:?\s*([\d.,]+)",
         raw_text,
         re.IGNORECASE,
     )
     print(f"[steel_content] Gesamtmasse raw_text matches: {matches}")
+    if not matches:
+        # The total sits in a cell of its own at the far edge of the table, so
+        # pdfplumber can put it on the line BELOW its label instead of beside it.
+        matches = re.findall(
+            r"Gesamt(?:masse|gewicht)\s*(?:/\s*Total\s+(?:mass|weight)\s*)?\[?\s*kg\s*\]?\s*:?[^\d\n]*\n[ \t]*([\d.,]+)",
+            raw_text,
+            re.IGNORECASE,
+        )
+        print(f"[steel_content] Gesamtmasse next-line matches: {matches}")
     if matches:
         total = 0.0
         for m in matches:
@@ -916,6 +925,21 @@ def _find_bilingual_value(raw_text: str, german: str, english: str, integer_only
     if m:
         val = m.group(1).replace(",", ".")
         print(f"[bilingual_raw] '{german}/{english}' next-line → {val!r}")
+        return val
+    # German-only, labels on one row and values on the next:
+    #   'Volumen Gewicht Anzahl Statische Positionsnummer'
+    #   '2.90 m³ 7.90 T 5 ST-12'
+    # Many title blocks carry no English wording at all, so the bilingual patterns
+    # above never fire. Restricted to a label that OPENS its line — then it is the
+    # leftmost column and the first number on the next row is its value. A label
+    # further along the row gives no such anchor and is left to the caller.
+    m = re.search(
+        rf"^[ \t]*{german}\b[^\d\n]*\n[ \t]*({num_pat})\b",
+        raw_text, re.IGNORECASE | re.MULTILINE,
+    )
+    if m:
+        val = m.group(1).replace(",", ".")
+        print(f"[bilingual_raw] '{german}' first-column, value row below → {val!r}")
         return val
     # Last resort: just find the first number after the German label anywhere on its line
     m = re.search(rf"{german}[^\n]*?({num_pat})", raw_text, re.IGNORECASE)

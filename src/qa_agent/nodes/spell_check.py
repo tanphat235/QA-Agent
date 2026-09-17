@@ -324,31 +324,139 @@ def _classify_element_type(candidates: list[str]) -> tuple[str | None, str]:
     return normalize_element_type(result.element_type), (result.evidence or "").strip()
 
 
+# ── Gesamtmasse / Volumen fallback (LLM reads the rendered sheet) ────────────
+# The deterministic readers anchor on label coordinates, and every drawing type
+# lays its title block out differently: the value sits right of the label on one
+# sheet, on the row below it on the next, in a cell of its own two columns over
+# on a third. A layout the coordinate rules do not fit yields nothing, and the
+# check then reports NOT FOUND on a sheet that plainly carries both numbers.
+# When either value is missing, the model reads it off the rendered PDF — the
+# ratio arithmetic and the range comparison stay in the Python above.
+
+class _MassVolume(BaseModel):
+    gesamtmasse: str = Field(default="", description="Stabliste Gesamtmasse / Gesamtgewicht in kg, digits only as printed; empty if not on the sheet")
+    volumen: str = Field(default="", description="Title block Volumen in m³, digits only as printed; empty if not on the sheet")
+    mass_location: str = Field(default="", description="Where the mass was read from")
+    volume_location: str = Field(default="", description="Where the volume was read from")
+
+
+_MASS_VOLUME_SYSTEM = """\
+You read two numbers off a precast concrete drawing and nothing else.
+Copy each value exactly as printed, digits only — no unit, no thousands
+separator, no rounding. Return an empty string for a value that is not on the
+sheet. Never calculate, estimate or infer a value, and never carry one over
+from another drawing.\
+"""
+
+_MASS_VOLUME_PROMPT = """\
+Read these two values off the attached drawing:
+
+1. gesamtmasse — the TOTAL STEEL MASS in kg, printed as the closing total row of the
+   Stabliste (bar schedule). Its label is "Gesamtmasse [kg]", "Gesamtgewicht [kg]" or
+   the bilingual "Gesamtmasse / Total mass [kg]", and the value sits to the right of
+   that label, often in a cell of its own at the far edge of the table.
+   • If the sheet carries BOTH a Stabliste and a Mattenstahlliste, each with its own
+     total, ADD the two totals and return the sum — the value wanted is the total
+     steel on the sheet.
+   • Do NOT return a Gesamtlänge, a per-row Masse, or a column header.
+
+2. volumen — the CONCRETE VOLUME in m³ from the title block, labelled "Volumen" or
+   "Volumen / Volume". The value is in that label's own cell: to the right of the
+   label, or on the row directly below it. The unit m³ is printed beside it.
+   • The neighbouring cells are Gewicht (weight in t) and Anzahl (a piece count).
+     Do NOT return either of those. The volume is the value under the "Volumen"
+     label and nothing else.
+
+Put into mass_location and volume_location where you read each value from
+(e.g. "Stabliste total row" / "title block Volumen cell"), so the read can be checked.
+If a value is genuinely not printed anywhere on the sheet, return an empty string for
+it — an empty value is handled; a wrong one is not.
+"""
+
+
+def _read_mass_volume_from_pdf(pdf_data: str | None) -> tuple[str, str]:
+    """(gesamtmasse, volumen) read off the rendered drawing, or ("", "")."""
+    if not pdf_data:
+        print("[steel_content] no rendered PDF — cannot fall back to a visual read")
+        return ("", "")
+
+    llm = ChatAnthropic(  # type: ignore[call-arg]
+        model="claude-sonnet-4-6",  # type: ignore[call-arg]
+        temperature=0,  # type: ignore[call-arg]
+        max_tokens=1024,  # type: ignore[call-arg]
+    ).with_structured_output(_MassVolume).with_retry(stop_after_attempt=2)
+
+    try:
+        result: _MassVolume = llm.invoke(  # type: ignore[assignment]
+            [
+                SystemMessage(content=_MASS_VOLUME_SYSTEM),
+                HumanMessage(content=[
+                    {
+                        "type": "document",
+                        "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_data},
+                        "cache_control": {"type": "ephemeral"},
+                    },
+                    {"type": "text", "text": _MASS_VOLUME_PROMPT},
+                ]),
+            ],
+            config={"callbacks": [_UsageCallback("mass_volume")]},
+        )
+    except Exception as exc:
+        print(f"[steel_content] visual read failed: {exc}")
+        return ("", "")
+
+    mass = _clean_number(result.gesamtmasse)
+    vol = _clean_number(result.volumen)
+    print(
+        f"[steel_content] visual read — gesamtmasse={mass!r} (from {result.mass_location[:50]!r})  "
+        f"volumen={vol!r} (from {result.volume_location[:50]!r})"
+    )
+    return (mass, vol)
+
+
+_CLEAN_NUM_RE = re.compile(r"[-+]?\d+(?:[.,]\d+)?")
+
+
+def _clean_number(text: str) -> str:
+    """The bare number in a value the model returned, decimal dot, or ""."""
+    m = _CLEAN_NUM_RE.search((text or "").replace(" ", ""))
+    return m.group(0).replace(",", ".") if m else ""
+
+
 class _SteelContentOutcome(NamedTuple):
     not_found: bool
     issue: _SpellIssue | None
     pass_desc: str | None
+    # What was missing, shown to the user in place of the generic NOT FOUND text.
+    # "Volumen not found" is actionable; "NOT FOUND" alone is not.
+    not_found_desc: str | None = None
 
 
 def _evaluate_steel_content(
     mass_str: str, vol_str: str, candidates: list[str],
 ) -> _SteelContentOutcome:
     """Steel content ratio against the plausible band for the element on the sheet."""
-    if not mass_str or not vol_str:
-        print("[steel_content] NOT FOUND — mass or volume is empty")
-        return _SteelContentOutcome(True, None, None)
+    def _nf(reason: str) -> _SteelContentOutcome:
+        print(f"[steel_content] NOT FOUND — {reason}")
+        return _SteelContentOutcome(True, None, None, f"NOT FOUND — {reason}.")
+
+    if not mass_str and not vol_str:
+        return _nf(
+            "neither the Stabliste Gesamtmasse nor the title block Volumen could be read"
+        )
+    if not mass_str:
+        return _nf("Gesamtmasse not found in the Stabliste")
+    if not vol_str:
+        return _nf("Volumen not found in the title block")
     try:
         mass = float(mass_str.replace(",", "."))
         vol = float(vol_str.replace(",", "."))
-    except ValueError as exc:
-        print(f"[steel_content] NOT FOUND — parse error: {exc}")
-        return _SteelContentOutcome(True, None, None)
+    except ValueError:
+        return _nf(f"Gesamtmasse {mass_str!r} or Volumen {vol_str!r} is not a number")
     if vol <= 0:
-        print("[steel_content] NOT FOUND — volume is zero")
-        return _SteelContentOutcome(True, None, None)
+        return _nf(f"Volumen is {vol_str}, so no ratio can be formed")
     if not candidates:
-        print("[steel_content] NOT FOUND — no sheet text names an element")
-        return _SteelContentOutcome(True, None, None)
+        return _nf("no text on the sheet names the element this drawing details")
 
     element_type, evidence = _classify_element_type(candidates)
     print(
@@ -357,8 +465,11 @@ def _evaluate_steel_content(
     )
     sc_range = steel_content_range(element_type)
     if sc_range is None:
-        print("[steel_content] NOT FOUND — drawing title names no known element type")
-        return _SteelContentOutcome(True, None, None)
+        return _nf(
+            "the drawing title names no element type with a known steel content range "
+            f"(read {evidence[:60]!r})" if evidence
+            else "the drawing title names no element type with a known steel content range"
+        )
 
     ratio = mass / vol
     low, high = sc_range
@@ -895,6 +1006,8 @@ def spell_check(state: GraphState) -> dict:
 
     # Holds dynamically computed pass messages (steel_content range, spelling language)
     dynamic_pass_descs: dict[str, str] = {}
+    # Replaces a check's generic NOT FOUND text with what was actually missing.
+    dynamic_not_found_descs: dict[str, str] = {}
 
     # ── pos_count: fully Python-based, no LLM ───────────────────────────────
     ts = str(title_block.get("letzte_stabstahlposition") or "").strip()
@@ -1205,9 +1318,27 @@ def spell_check(state: GraphState) -> dict:
     # ── steel_content Python computation ────────────────────────────────────
     sc_enabled = enabled_sub is None or "steel_content" in (enabled_sub or [])
     if sc_enabled:
+        # Almost every sheet prints both numbers, so a missing one means the
+        # coordinate rules did not fit this title block layout, not that the
+        # value is absent. Read it off the rendered sheet before giving up.
+        if not mass_str or not vol_str:
+            print(
+                f"[steel_content] gesamtmasse={mass_str!r} volumen={vol_str!r} — "
+                f"falling back to a visual read of the rendered drawing"
+            )
+            vis_mass, vis_vol = _read_mass_volume_from_pdf(state.get("pdf_data"))
+            if not mass_str and vis_mass:
+                mass_str = vis_mass
+                print(f"[steel_content] gesamtmasse taken from the visual read: {mass_str!r}")
+            if not vol_str and vis_vol:
+                vol_str = vis_vol
+                print(f"[steel_content] volumen taken from the visual read: {vol_str!r}")
+
         sc_outcome = _evaluate_steel_content(mass_str, vol_str, sc_candidates)
         if sc_outcome.not_found:
             not_found_set.add("steel_content")
+            if sc_outcome.not_found_desc:
+                dynamic_not_found_descs["steel_content"] = sc_outcome.not_found_desc
         if sc_outcome.issue is not None:
             by_check["steel_content"].append(sc_outcome.issue)
         if sc_outcome.pass_desc:
@@ -1543,6 +1674,7 @@ def spell_check(state: GraphState) -> dict:
         not_found_set,
         enabled_sub,
         dynamic_pass_descs,
+        dynamic_not_found_descs,
     )
     issues.extend(run_user_ai_checks("spell", state))
 
