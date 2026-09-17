@@ -232,9 +232,9 @@ def extract_pdf_content(pdf_path: str) -> dict:
         title_block["volumen"]     = _find_volumen(words, raw_text)
         title_block["gewicht"]     = _find_gewicht(words, raw_text)
         title_block["anzahl"]      = _find_anzahl(words, raw_text)
-        _rd_found, _rd_max_qty = _find_rd_ebt_data(raw_text)
-        title_block["rd_ebt_table_found"] = _rd_found
-        title_block["rd_ebt_max_qty"] = _rd_max_qty
+        _anchor_found, _anchor_max_qty = _find_lifting_anchor_ebt_data(raw_text)
+        title_block["rd_ebt_table_found"] = _anchor_found
+        title_block["rd_ebt_max_qty"] = _anchor_max_qty
         # Match just the stem "lastausgleich" — covers both spellings
         # (Lastausgleichgehänge / Lastausgleichsgehänge) and tolerates pdfplumber
         # encoding variations for the umlaut ä.
@@ -705,15 +705,46 @@ def _find_betondeckung_values(words: list[dict], raw_text: str = "") -> dict:
     return merged
 
 
-# ── Lastausgleichgehänge: RD-type EBT quantities in Einbauteilliste ──────────
+# ── Lastausgleichgehänge: lifting-anchor quantities in the Einbauteilliste ───
 
-def _find_rd_ebt_data(raw_text: str) -> tuple[bool, int]:
-    """Return (einbauteilliste_found, max_menge_of_RD_type_EBTs).
+# A lifting anchor is named, not coded. Suppliers write it several ways and only
+# some carry an RD thread code, so the product wording is what identifies it:
+#   "Philipp Kugelkopf-Transportanker 7.5, L=300mm …"   ← no RD code at all
+#   "… Frimeda Transportanker RD24 …"                    ← RD code as well
+_ANCHOR_TERMS_RE = re.compile(
+    r"transportanker|kugelkopf|hebeanker|lastanker|ankerkopf"
+    r"|transportschlaufe|seilschlaufe|transportsystem|transportsystem"
+    r"|lifting\s+(?:anchor|loop|insert|socket)"
+    r"|\bRD\d+",              # threaded anchor code, no space: "RD24", "RD42"
+    re.IGNORECASE,
+)
+
+# Products that carry an RD code but lift nothing. "DEHN RD 10 STTZN R81M" is a
+# lightning-protection conductor; without this a drawing writing it as "RD10"
+# would count as a lifting anchor.
+_NOT_ANCHOR_RE = re.compile(
+    r"\bDEHN\b|blitzschutz|erdung|rundleiter|potentialausgleich|fangstange",
+    re.IGNORECASE,
+)
+
+# An Einbauteilliste data row opens with its EBT number and its Menge:
+#   "92004 2 Stk Philipp Kugelkopf-Transportanker 7.5, L=300mm …"
+# Reading the Menge from that position beats scanning the row for numbers: the
+# Bezeichnung is full of them ("7.5", "L=300mm", "D=118mm") and a wide sheet can
+# merge a schedule row onto the same extracted line.
+_EBT_ROW_QTY_RE = re.compile(r"^(\d{3,6})\s+(\d{1,4})\b")
+
+# Second reading of the Menge, for a row whose EBT number did not extract: the
+# quantity printed against its unit column ("… 4 Stk Frimeda Transportanker …").
+_EBT_QTY_UNIT_RE = re.compile(r"\b(\d{1,4})\s*(?:Stk|Stck|St\.|Stück|Stueck|pcs)\b", re.IGNORECASE)
+
+
+def _find_lifting_anchor_ebt_data(raw_text: str) -> tuple[bool, int]:
+    """Return (einbauteilliste_found, max_menge_over_lifting_anchor_rows).
 
     Detection uses multiple fallback markers so that bold-font extraction
     failures for the compound title word don't cause false NOT FOUND.
-    RD-type rows are scanned across the full raw_text (the EBT table is the
-    only place in a structural drawing where RD\\d+ product codes appear).
+    Anchor rows are scanned across the full raw_text.
     """
     # ── Step 1: detect Einbauteilliste via any identifiable marker ────────────
     _MARKERS = [
@@ -737,26 +768,35 @@ def _find_rd_ebt_data(raw_text: str) -> tuple[bool, int]:
 
     print(f"[lastausgleich] Einbauteilliste detected via: {detected_by!r} ✓")
 
-    # ── Step 2: scan ALL lines for RD\d+ codes ───────────────────────────────
-    # \b\d+\b = standalone integer (word-boundary on both sides):
-    #   "RD42"  → no \b before '4' (D is also a word char) → "42" NOT matched
-    #   "385mm" → no \b after  '5' (m is also a word char) → "385" NOT matched
-    #   " 4 "   → \b on both sides → "4" IS matched
-    # So the last element of standalone_nums is always the Menge.
+    # ── Step 2: scan every line for a lifting anchor ─────────────────────────
     max_qty = 0
     for line in raw_text.splitlines():
         stripped = line.strip()
-        if not stripped:
+        if not stripped or not _ANCHOR_TERMS_RE.search(stripped):
             continue
-        if not re.search(r"RD\d+", stripped, re.IGNORECASE):
+        if _NOT_ANCHOR_RE.search(stripped):
+            print(f"[lastausgleich]   not an anchor (lightning protection): {stripped[:90]!r}")
             continue
-        standalone_nums = re.findall(r"\b\d+\b", stripped)
-        print(f"[lastausgleich]   RD line  : {stripped!r}")
-        print(f"[lastausgleich]   numbers  : {standalone_nums}  → Menge={standalone_nums[-1] if standalone_nums else 'none'}")
-        if standalone_nums:
-            max_qty = max(max_qty, int(standalone_nums[-1]))
 
-    print(f"[lastausgleich] max RD-type Menge={max_qty}")
+        # Only a table ROW carries a Menge. A sheet also names anchors in prose
+        # ("Die Lage der Transporthölzer … unterhalb der Transportanker"), and on
+        # a wide sheet such a note extracts onto a line that opens with unrelated
+        # numbers — reading a quantity out of it invents one, so those are skipped.
+        row = _EBT_ROW_QTY_RE.match(stripped)
+        unit = _EBT_QTY_UNIT_RE.search(stripped)
+        if row:
+            qty, how = int(row.group(2)), f"EBT {row.group(1)} Menge column"
+        elif unit:
+            qty, how = int(unit.group(1)), "quantity before its unit"
+        else:
+            print(f"[lastausgleich]   names an anchor but is not a table row: {stripped[:90]!r}")
+            continue
+
+        print(f"[lastausgleich]   anchor row: {stripped[:110]!r}")
+        print(f"[lastausgleich]     Menge={qty} (via {how})")
+        max_qty = max(max_qty, qty)
+
+    print(f"[lastausgleich] max lifting-anchor Menge={max_qty}")
     return (True, max_qty)
 
 

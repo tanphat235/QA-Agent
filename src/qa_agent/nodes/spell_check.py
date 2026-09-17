@@ -1163,7 +1163,7 @@ def spell_check(state: GraphState) -> dict:
 
     # ── lastausgleich: log pre-extracted values ───────────────────────────────
     la_ebt_found   = bool(title_block.get("rd_ebt_table_found"))
-    la_rd_qty      = int(title_block.get("rd_ebt_max_qty") or 0)
+    la_anchor_qty  = int(title_block.get("rd_ebt_max_qty") or 0)
     la_text_present = bool(title_block.get("lastausgleich_present"))
 
     # ── overview_plan_check: log pre-extracted values ─────────────────────────
@@ -1176,7 +1176,7 @@ def spell_check(state: GraphState) -> dict:
     op_title      = str(title_block.get("drawing_title_value") or "").strip()
     print(f"[overview_plan_check] vol={op_vol_str!r}  wt={op_wt_str!r}  qty={op_qty_str!r}  drawing_no={op_drawing_no!r}")
     print(f"[overview_plan_check] title={op_title[:60]!r}  rows={len(overview_plan_data.get('element_rows', []))}")
-    print(f"[lastausgleich] ebt_table_found={la_ebt_found}  rd_max_qty={la_rd_qty}  text_present={la_text_present}")
+    print(f"[lastausgleich] ebt_table_found={la_ebt_found}  anchor_max_qty={la_anchor_qty}  text_present={la_text_present}")
 
     # ── LLM calls for the other spell checks ─────────────────────────────────
     # Text checks run on Haiku with extracted text. Vision checks (parts_label)
@@ -1439,32 +1439,32 @@ def spell_check(state: GraphState) -> dict:
         if not la_ebt_found:
             not_found_set.add("lastausgleich")
             print("[lastausgleich] NOT FOUND — Einbauteilliste not in drawing")
-        elif la_rd_qty >= 4:
+        elif la_anchor_qty >= 4:
             if not la_text_present:
                 by_check["lastausgleich"].append(_SpellIssue(
                     check="lastausgleich", severity="error",
                     description=(
-                        f"RD-type EBT (max Menge={la_rd_qty}) requires 'Lastausgleichgehänge' "
-                        f"note in the drawing — not found"
+                        f"Lifting anchors in the Einbauteilliste (max Menge={la_anchor_qty}) require "
+                        f"a 'Lastausgleichgehänge' note in the drawing — not found"
                     ),
                     page=1, location="drawing / Einbauteilliste", confidence=1.0,
                 ))
-                print(f"[lastausgleich] FAIL — qty={la_rd_qty} >= 4 but Lastausgleichgehänge missing")
+                print(f"[lastausgleich] FAIL — anchor qty={la_anchor_qty} >= 4 but Lastausgleichgehänge missing")
             else:
-                print(f"[lastausgleich] PASS — qty={la_rd_qty} >= 4 and Lastausgleichgehänge present")
-        else:  # la_rd_qty < 4 (includes 0 = no RD EBTs)
+                print(f"[lastausgleich] PASS — anchor qty={la_anchor_qty} >= 4 and Lastausgleichgehänge present")
+        else:  # < 4, including 0 = no lifting anchor in the Einbauteilliste
             if la_text_present:
                 by_check["lastausgleich"].append(_SpellIssue(
                     check="lastausgleich", severity="error",
                     description=(
-                        f"'Lastausgleichgehänge' note is present but RD-type EBT "
-                        f"max Menge ({la_rd_qty}) is below 4 — note not required"
+                        f"'Lastausgleichgehänge' note is present but the largest lifting-anchor "
+                        f"Menge in the Einbauteilliste ({la_anchor_qty}) is below 4 — note not required"
                     ),
                     page=1, location="drawing", confidence=1.0,
                 ))
-                print(f"[lastausgleich] FAIL — qty={la_rd_qty} < 4 but Lastausgleichgehänge present")
+                print(f"[lastausgleich] FAIL — qty={la_anchor_qty} < 4 but Lastausgleichgehänge present")
             else:
-                print(f"[lastausgleich] PASS — qty={la_rd_qty} < 4 and Lastausgleichgehänge absent")
+                print(f"[lastausgleich] PASS — qty={la_anchor_qty} < 4 and Lastausgleichgehänge absent")
 
     # ── overview_plan_check: compare title block with overview plan table ──────
     op_enabled = enabled_sub is None or "overview_plan_check" in (enabled_sub or [])
