@@ -145,22 +145,17 @@ def _find_rect(
     page: "fitz.Page",
     tokens: list[str],
     prefer_bottom: bool = False,
-    taken: set | None = None,
     region: "fitz.Rect | None" = None,
 ) -> "fitz.Rect | None":
-    """The best free spot on the page for this finding.
+    """Where on the page this finding belongs — the first token that matches.
 
-    Tokens are tried in order; within a token every occurrence is tried, so a
-    second finding whose best anchor is already carrying a note moves to the
-    next occurrence rather than stacking invisibly on top of the first. When
-    every occurrence of every token is taken, None sends the finding to the
-    margin — one note per finding, always, and never two in the same place.
+    Two findings are free to resolve to the same rectangle; the caller merges
+    them into one note rather than stacking two highlights on the same word.
 
     prefer_bottom (title-block findings) reads the lowest occurrence first: the
     title block is the bottom-most element, so identical labels in the body and
     the schedules are skipped.
     """
-    used = taken if taken is not None else set()
     # Two passes: inside the area the location names first, anywhere second.
     for inside_only in (True, False) if region is not None else (False,):
         for tok in tokens:
@@ -170,12 +165,8 @@ def _find_rect(
                 hits = []
             if inside_only and region is not None:
                 hits = [r for r in hits if region.contains(r)]
-            if not hits:
-                continue
-            hits.sort(key=lambda r: r.y0, reverse=prefer_bottom)
-            for rect in hits:
-                if _rect_key(rect) not in used:
-                    return rect
+            if hits:
+                return max(hits, key=lambda r: r.y0) if prefer_bottom else hits[0]
     return None
 
 
@@ -200,13 +191,46 @@ def _add_comment(annot: "fitz.Annot", title: str, content: str, color) -> None:
     annot.update()
 
 
+def _group_title(group: list[dict]) -> str:
+    """Heading for one note: the finding numbers and the check(s) behind them."""
+    numbers = ", ".join(f"#{f['n']}" for f in group)
+    checks = list(dict.fromkeys(f["check_name"] for f in group))
+    if len(group) == 1:
+        return f"{numbers} · {checks[0]}"
+    what = checks[0] if len(checks) == 1 else f"{len(checks)} checks"
+    return f"{numbers} · {what} ({len(group)} findings)"
+
+
+def _group_content(group: list[dict]) -> str:
+    """Body of one note — every finding that belongs to this spot, in order."""
+    if len(group) == 1:
+        f = group[0]
+        body = f["description"] or f["check_name"]
+        return f"{body}\n(Location: {f['location']})" if f["location"] else body
+
+    lines = [f"{len(group)} findings at this position:", ""]
+    for f in group:
+        lines.append(f"#{f['n']} · {f['check_name']}")
+        lines.append(f["description"] or "(no description)")
+        if f["location"]:
+            lines.append(f"(Location: {f['location']})")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
 def annotate_pdf(pdf_bytes: bytes, issues: list[dict]) -> bytes:
     """Return PDF bytes with every failed finding embedded as an in-place note.
 
-    Each finding becomes a real PDF annotation anchored where its offending text
-    appears: a coloured highlight + popup comment when the text can be located,
-    otherwise a sticky-note comment in the page margin. No extra pages are added —
-    only annotations on the original drawing.
+    Each finding is anchored where its offending text appears: a coloured
+    highlight + popup comment when the text can be located, otherwise a
+    sticky-note comment in the page margin. No extra pages are added — only
+    annotations on the original drawing.
+
+    Findings that land on the SAME piece of text share one note listing all of
+    them. Sixteen Stabliste findings anchored on the table's title used to stack
+    sixteen highlights on that one word, and the sheet came back looking as if a
+    single error had been found — one note reading "5 findings at this position"
+    says what is actually there.
 
     `issues` is a flat list of failed findings, each a dict with (at least):
     page, description, location, severity, check_name.
@@ -221,51 +245,66 @@ def annotate_pdf(pdf_bytes: bytes, issues: list[dict]) -> bytes:
     doc = fitz.open(tmp_path)
     page_count = doc.page_count
 
-    # Per-page running offset so unlocated sticky notes stack instead of overlap.
-    margin_slots: dict[int, int] = {}
-    # Rectangles already carrying a note, per page. Two findings never share one:
-    # sixteen Stabliste findings all anchored on the word "Stabliste" and the
-    # sheet came back looking as if only one error had been found.
-    used_rects: dict[int, set] = {}
+    # ── Pass 1: resolve every finding to a place ────────────────────────────
+    located: dict[tuple, list[dict]] = {}   # (page, rect key) -> findings there
+    rects: dict[tuple, "fitz.Rect"] = {}
+    unlocated: list[dict] = []
 
     for n, issue in enumerate(issues, start=1):
-        severity = str(issue.get("severity", "ERROR")).upper()
-        color = _SEVERITY_COLOR.get(severity, _DEFAULT_COLOR)
-        check_name = _clean(issue.get("check_name") or issue.get("category") or "QA")
+        location = _clean(issue.get("location") or "")
         description = _clean(issue.get("description"))
-        location = issue.get("location") or ""
-        pidx = _page_index(issue.get("page"), page_count)
-        page = doc[pidx]
-
-        title = f"#{n} · {check_name}"
-        content = description or check_name
-        if location:
-            content = f"{content}\n(Location: {_clean(location)})"
+        entry = {
+            "n": n,
+            "severity": str(issue.get("severity", "ERROR")).upper(),
+            "check_name": _clean(issue.get("check_name") or issue.get("category") or "QA"),
+            "description": description,
+            "location": location,
+            "page": _page_index(issue.get("page"), page_count),
+        }
+        page = doc[entry["page"]]
 
         tokens = _search_tokens(description, location)
         # Title-block fields (Anzahl, Gewicht, Volumen, BETONDECKUNG, …) repeat
         # elsewhere on the sheet; anchor on the bottom-most hit = the title block.
         prefer_bottom = "title block" in location.lower() or "titleblock" in location.lower()
-        taken = used_rects.setdefault(pidx, set())
         region = None if prefer_bottom else _location_region(page, location)
-        rect = _find_rect(
-            page, tokens, prefer_bottom=prefer_bottom, taken=taken, region=region,
-        )
+        rect = _find_rect(page, tokens, prefer_bottom=prefer_bottom, region=region)
 
-        if rect is not None:
-            taken.add(_rect_key(rect))
-            annot = page.add_highlight_annot(rect)
-            _add_comment(annot, title, content, color)
-        else:
-            # Margin fallback — stacked down the right edge and wrapped into
-            # further columns so a long finding list cannot run off the sheet.
-            slot = margin_slots.get(pidx, 0)
-            margin_slots[pidx] = slot + 1
-            per_column = max(1, int((page.rect.height - 72) // 26))
-            col, row = divmod(slot, per_column)
-            pt = fitz.Point(page.rect.width - 28 - col * 30, 36 + row * 26)
-            annot = page.add_text_annot(pt, content, icon="Comment")
-            _add_comment(annot, title, content, color)
+        if rect is None:
+            unlocated.append(entry)
+            continue
+        key = (entry["page"], _rect_key(rect))
+        rects.setdefault(key, rect)
+        located.setdefault(key, []).append(entry)
+
+    # ── Pass 2: one note per place, one per unlocated finding ───────────────
+    def _colour(group: list[dict]):
+        severities = {f["severity"] for f in group}
+        worst = "ERROR" if "ERROR" in severities else next(iter(severities), "ERROR")
+        return _SEVERITY_COLOR.get(worst, _DEFAULT_COLOR)
+
+    for key, group in located.items():
+        pidx, _ = key
+        # Keep the page alive: PyMuPDF holds annotations by weak reference to it.
+        page = doc[pidx]
+        annot = page.add_highlight_annot(rects[key])
+        _add_comment(annot, _group_title(group), _group_content(group), _colour(group))
+
+    # Per-page running offset so unlocated sticky notes stack instead of overlap.
+    margin_slots: dict[int, int] = {}
+    for entry in unlocated:
+        pidx = entry["page"]
+        page = doc[pidx]
+        # Margin fallback — stacked down the right edge and wrapped into further
+        # columns so a long finding list cannot run off the sheet.
+        slot = margin_slots.get(pidx, 0)
+        margin_slots[pidx] = slot + 1
+        per_column = max(1, int((page.rect.height - 72) // 26))
+        col, row = divmod(slot, per_column)
+        pt = fitz.Point(page.rect.width - 28 - col * 30, 36 + row * 26)
+        content = _group_content([entry])
+        annot = page.add_text_annot(pt, content, icon="Comment")
+        _add_comment(annot, _group_title([entry]), content, _colour([entry]))
 
     # Incremental save keeps the user's original bytes intact and only appends
     # the annotations. If that isn't possible (encrypted / oddly structured PDF)
