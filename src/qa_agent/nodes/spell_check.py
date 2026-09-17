@@ -903,17 +903,36 @@ def spell_check(state: GraphState) -> dict:
     mm = str(title_block.get("max_mattenliste_pos") or "").strip()
     print(f"[pos_count] TITLE_STAB={ts!r}  MAX_STAB={ms!r}  TITLE_MATTEN={tm!r}  MAX_MATTEN={mm!r}")
 
-    # ── revision_check: log pre-extracted values for debugging ───────────────
-    rev_tb  = str(title_block.get("revision_title_block") or "").strip().upper()
-    rev_tbl = str(title_block.get("revision_table_last") or "").strip().upper()
-    print(f"[revision_check] TITLE_BLOCK={rev_tb!r}  TABLE_LAST={rev_tbl!r}")
+    # ── revision / status codes: title block field, else the drawing name ────
+    # Title block layouts differ per drawing type and many carry no Revision or
+    # Status field. Those sheets state both codes at the end of their name
+    # ("…-FT-050-B-F" → revision B, status F), so the name is the fallback
+    # source — and, when a sheet has both, the cross-check between them.
+    plan_id      = str(title_block.get("plan_id") or "").strip()
+    rev_name     = str(title_block.get("revision_plan_id") or "").strip().upper()
+    status_name  = str(title_block.get("status_plan_id") or "").strip().upper()
 
-    # ── drawing_status: log pre-extracted values for debugging ───────────────
-    status_code  = str(title_block.get("status_title_block") or "").strip().upper()
+    rev_field = str(title_block.get("revision_title_block") or "").strip().upper()
+    rev_tbl   = str(title_block.get("revision_table_last") or "").strip().upper()
+    rev_tb    = rev_field or rev_name
+    print(
+        f"[revision_check] FIELD={rev_field!r}  NAME={rev_name!r}  "
+        f"EFFECTIVE={rev_tb!r}  TABLE_LAST={rev_tbl!r}  plan_id={plan_id!r}"
+    )
+    if not rev_field and rev_name:
+        print(f"[revision_check] revision read from the drawing name {plan_id!r}")
+
+    status_field = str(title_block.get("status_title_block") or "").strip().upper()
+    status_code  = status_field or status_name
     planfreigabe = str(title_block.get("planfreigabe_text") or "").strip()
-    print(f"[drawing_status] STATUS={status_code!r}  PLANFREIGABE={planfreigabe!r}")
+    print(
+        f"[drawing_status] FIELD={status_field!r}  NAME={status_name!r}  "
+        f"EFFECTIVE={status_code!r}  PLANFREIGABE={planfreigabe!r}"
+    )
+    if not status_field and status_name:
+        print(f"[drawing_status] status read from the drawing name {plan_id!r}")
     if not status_code:
-        print("[drawing_status] → NOT FOUND reason: status_title_block is empty")
+        print("[drawing_status] → NOT FOUND reason: no status code in the title block or the drawing name")
     if not planfreigabe:
         print("[drawing_status] → NOT FOUND reason: planfreigabe_text is empty")
 
@@ -1035,39 +1054,85 @@ def spell_check(state: GraphState) -> dict:
     # ── revision_check Python comparison ────────────────────────────────────
     rev_enabled = enabled_sub is None or "revision_check" in (enabled_sub or [])
     if rev_enabled:
-        if not rev_tb or not rev_tbl:
+        # Two independent comparisons, whichever the sheet supports: the revision
+        # against the revision history table, and the Revision field against the
+        # code carried in the drawing name. NOT FOUND only when neither can run.
+        rev_compared = False
+        if rev_tb and rev_tbl:
+            rev_compared = True
+            if rev_tb != rev_tbl:
+                src = "title block" if rev_field else f"drawing name {plan_id}"
+                by_check["revision_check"].append(_SpellIssue(
+                    check="revision_check", severity="error",
+                    description=f"Revision mismatch: {src}={rev_tb}, last revision in table={rev_tbl}",
+                    page=1, location="title block / revision history table", confidence=1.0,
+                ))
+        if rev_field and rev_name:
+            rev_compared = True
+            if rev_field != rev_name:
+                by_check["revision_check"].append(_SpellIssue(
+                    check="revision_check", severity="error",
+                    description=(
+                        f"Revision mismatch: title block Revision field={rev_field}, "
+                        f"drawing name {plan_id} ends in {rev_name}"
+                    ),
+                    page=1, location="title block / drawing name", confidence=1.0,
+                ))
+        if not rev_compared:
             not_found_set.add("revision_check")
-        elif rev_tb != rev_tbl:
-            by_check["revision_check"].append(_SpellIssue(
-                check="revision_check", severity="error",
-                description=f"Revision mismatch: title block={rev_tb}, last revision in table={rev_tbl}",
-                page=1, location="title block / revision history table", confidence=1.0,
-            ))
+            print(
+                f"[revision_check] NOT FOUND — nothing to compare "
+                f"(field={rev_field!r} name={rev_name!r} table={rev_tbl!r})"
+            )
 
     # ── drawing_status Python comparison ─────────────────────────────────────
     ds_enabled = enabled_sub is None or "drawing_status" in (enabled_sub or [])
     if ds_enabled:
-        if not status_code or not planfreigabe:
-            not_found_set.add("drawing_status")
-        else:
+        status_compared = False
+
+        # The Status field and the code at the end of the drawing name state the
+        # same thing — when the sheet carries both, they must agree.
+        if status_field and status_name:
+            status_compared = True
+            if status_field != status_name:
+                by_check["drawing_status"].append(_SpellIssue(
+                    check="drawing_status", severity="error",
+                    description=(
+                        f"Status mismatch: title block Status field={status_field}, "
+                        f"drawing name {plan_id} ends in {status_name}"
+                    ),
+                    page=1, location="title block / drawing name", confidence=1.0,
+                ))
+
+        if status_code and planfreigabe:
             pf_upper = planfreigabe.upper()
             first = status_code[0]
+            src = "title block" if status_field else f"drawing name {plan_id}"
             if first == "P":
+                status_compared = True
                 if "PRÜFUNG" not in pf_upper and "PRUFUNG" not in pf_upper:
                     by_check["drawing_status"].append(_SpellIssue(
                         check="drawing_status", severity="error",
-                        description=f"Status={status_code} (Prüfung) but Planfreigabe shows: {planfreigabe!r}",
+                        description=f"Status={status_code} (Prüfung, from {src}) but Planfreigabe shows: {planfreigabe!r}",
                         page=1, location="title block / Planfreigabe", confidence=1.0,
                     ))
             elif first in ("A", "F"):
+                status_compared = True
                 if "AUSFÜHRUNG" not in pf_upper and "AUSFUHRUNG" not in pf_upper:
                     by_check["drawing_status"].append(_SpellIssue(
                         check="drawing_status", severity="error",
-                        description=f"Status={status_code} (Ausführung) but Planfreigabe shows: {planfreigabe!r}",
+                        description=f"Status={status_code} (Ausführung, from {src}) but Planfreigabe shows: {planfreigabe!r}",
                         page=1, location="title block / Planfreigabe", confidence=1.0,
                     ))
             else:
-                not_found_set.add("drawing_status")
+                print(f"[drawing_status] status prefix {first!r} is not P / A / F — no Planfreigabe rule applies")
+
+        if not status_compared:
+            not_found_set.add("drawing_status")
+            print(
+                f"[drawing_status] NOT FOUND — nothing to compare "
+                f"(field={status_field!r} name={status_name!r} planfreigabe={planfreigabe!r})"
+            )
 
     # ── exposition_class Python comparison ───────────────────────────────────
     ec_enabled = enabled_sub is None or "exposition_class" in (enabled_sub or [])

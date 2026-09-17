@@ -9,6 +9,7 @@ _SECTION_ORDER = (
         "drawing.volumen", "drawing.gewicht", "drawing.anzahl", "drawing.gesamtmasse",
         "drawing.exposition_class", "drawing.betondeckung_cmin_dur", "drawing.betondeckung_delta_c",
         "drawing.betondeckung_cv", "drawing.revision_title_block", "drawing.revision_table_last",
+        "drawing.plan_id", "drawing.revision_plan_id", "drawing.status_plan_id",
         "drawing.status", "drawing.planfreigabe", "drawing.drawing_no", "drawing.drawing_title",
         "drawing.drawing_name", "drawing.element_code_top_left", "drawing.element_code_from_title",
         "drawing.scale_title_block", "drawing.letzte_stabstahlposition", "drawing.letzte_mattenposition",

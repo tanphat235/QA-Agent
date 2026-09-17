@@ -182,6 +182,24 @@ def extract_pdf_content(pdf_path: str) -> dict:
             )
         title_block["drawing_no_value"]    = _find_drawing_no_raw(raw_text)
         title_block["drawing_name"] = _find_drawing_name(words, page.height)
+
+        # Second chance for the name-carried revision / status codes: the sheet
+        # may name itself through a drawing-number field rather than a Plan-ID.
+        if not title_block.get("revision_plan_id") and not title_block.get("status_plan_id"):
+            _rev, _status, _src = _codes_from_names(
+                title_block.get("drawing_no_value"),
+                title_block.get("drawing_name"),
+                title_block.get("drawing_title_value"),
+            )
+            if _rev or _status:
+                title_block["revision_plan_id"] = _rev
+                title_block["status_plan_id"]   = _status
+                title_block["plan_id"] = title_block.get("plan_id") or _src
+        print(
+            f"[plan_id] name={title_block.get('plan_id')!r}  "
+            f"revision={title_block.get('revision_plan_id')!r}  "
+            f"status={title_block.get('status_plan_id')!r}"
+        )
         title_block["element_code_top_left"] = find_top_left_element_code(
             words, page.width, page.height, raw_text,
         )
@@ -1047,7 +1065,12 @@ def _find_anzahl(words: list[dict], raw_text: str) -> str | None:
 
 def _extract_title_block(words: list[dict], raw_text: str = "") -> dict:
     btd = _find_betondeckung_values(words, raw_text)
+    plan_id = _find_plan_id(words, raw_text)
+    plan_rev, plan_status = parse_codes_from_drawing_name(plan_id or "")
     return {
+        "plan_id":                  plan_id,
+        "revision_plan_id":         plan_rev,
+        "status_plan_id":           plan_status,
         "letzte_stabstahlposition": _find_number_right_of_label(words, "Stabstahlposition"),
         "letzte_mattenposition":    _find_number_right_of_label(words, "Mattenposition"),
         "revision_title_block":     _find_revision_in_title_block(words),
@@ -1261,6 +1284,99 @@ def _find_planfreigabe_text(raw_text: str) -> str | None:
 
 
 # ── Revision: title block field and history table ───────────────────────────
+
+# ── Revision / status codes carried in the drawing name ─────────────────────
+# Every drawing type lays its title block out differently and many carry no
+# "Revision" or "Status" field at all. Those sheets put both codes at the end of
+# the drawing name instead, as the last two dash-separated tokens:
+#   04-GBC-BW-TPL_-ST-GESAMT-5-FT-050-B-F  →  revision "B", status "F"
+# A name whose trailing tokens are not codes yields nothing rather than a guess.
+
+# A code is one letter, one letter plus digits, or two letters plus digits:
+# "B", "F", "A1", "C02". Two bare letters ("FT", "ST", "II") are NOT codes —
+# they are ordinary name segments and matching them would invent a revision out
+# of "…-ST-GESAMT" or "…-FT-050".
+_NAME_CODE_RE = re.compile(r"^(?:[A-Z]\d{0,3}|[A-Z]{2}\d{1,3})$")
+
+# A drawing name / Plan-ID: five or more dash-separated alphanumeric segments.
+_PLAN_ID_RE = re.compile(r"[A-Z0-9_]{1,14}(?:-[A-Z0-9_]{1,14}){4,}", re.IGNORECASE)
+
+_PLAN_ID_LABEL_RE = re.compile(r"^plan[-\s_]?(?:id|nr\.?|nummer)\s*:?$", re.IGNORECASE)
+
+
+def parse_codes_from_drawing_name(name: str) -> tuple[str | None, str | None]:
+    """(revision, status) read off the end of a drawing name / Plan-ID.
+
+    The last two dash-separated tokens are the revision and the status code, in
+    that order. A single trailing code is taken as the revision — that is the
+    one a name carries on its own — and leaves the status unknown. Anything the
+    code pattern does not match returns (None, None): a missing code is handled
+    upstream, an invented one is not.
+    """
+    parts = [p.strip() for p in (name or "").strip().strip("-").split("-")]
+    parts = [p for p in parts if p]
+    if len(parts) < 3:
+        return (None, None)
+    prev, last = parts[-2].upper(), parts[-1].upper()
+    if _NAME_CODE_RE.fullmatch(last) and _NAME_CODE_RE.fullmatch(prev):
+        return (prev, last)
+    if _NAME_CODE_RE.fullmatch(last):
+        return (last, None)
+    return (None, None)
+
+
+def _find_plan_id(words: list[dict], raw_text: str = "") -> str | None:
+    """The drawing's Plan-ID — the full dash-separated code naming the sheet.
+
+    Anchors on a "Plan-ID" / "Plan-Nr" / "Plannummer" label and reads the value
+    printed below it or beside it; falls back to the longest Plan-ID-shaped code
+    anywhere in the sheet text.
+    """
+    label = next((w for w in words if _PLAN_ID_LABEL_RE.fullmatch(w["text"].strip())), None)
+    if label is not None:
+        below = [
+            w for w in words
+            if w["top"] > label["bottom"] + _BELOW_Y_MIN
+            and w["top"] <= label["bottom"] + _BELOW_Y_MAX
+            and w["x0"] >= label["x0"] - 8
+            and _PLAN_ID_RE.fullmatch(w["text"].strip())
+        ]
+        if below:
+            val = min(below, key=lambda w: w["top"])["text"].strip()
+            print(f"[plan_id] below '{label['text']}' label: {val!r}")
+            return val
+        label_y = (label["top"] + label["bottom"]) / 2
+        right = [
+            w for w in words
+            if w["x0"] > label["x1"]
+            and abs((w["top"] + w["bottom"]) / 2 - label_y) <= _Y_BAND
+            and _PLAN_ID_RE.fullmatch(w["text"].strip())
+        ]
+        if right:
+            val = min(right, key=lambda w: w["x0"])["text"].strip()
+            print(f"[plan_id] right of '{label['text']}' label: {val!r}")
+            return val
+        print(f"[plan_id] '{label['text']}' label found but no code beside or below it")
+
+    candidates = _PLAN_ID_RE.findall(raw_text or "")
+    if candidates:
+        val = max(candidates, key=len)
+        print(f"[plan_id] longest code in sheet text: {val!r}")
+        return val
+    print("[plan_id] no Plan-ID found on sheet")
+    return None
+
+
+def _codes_from_names(*names: str | None) -> tuple[str | None, str | None, str | None]:
+    """(revision, status, name_used) from the first name that carries codes."""
+    for name in names:
+        if not (name or "").strip():
+            continue
+        rev, status = parse_codes_from_drawing_name(name or "")
+        if rev or status:
+            return (rev, status, (name or "").strip())
+    return (None, None, None)
+
 
 def _find_revision_in_title_block(words: list[dict]) -> str | None:
     """Return the revision code in the cell below the 'Revision' label in the title block."""
@@ -2056,9 +2172,12 @@ def _format_for_llm(raw_text: str, title_block: dict) -> str:
         f"Drawing Name (top of sheet): {title_block.get('drawing_name') or '(not found)'}",
         f"Element code (top-left label): {title_block.get('element_code_top_left') or '(not found)'}",
         f"Element code (from Drawing Title suffix): {title_block.get('element_code_from_title') or '(not found)'}",
+        f"Plan-ID / drawing name:      {title_block.get('plan_id') or '(not found)'}",
         f"Revision (title block):      {title_block.get('revision_title_block') or '(empty)'}",
+        f"Revision (drawing name):     {title_block.get('revision_plan_id') or '(not found)'}",
         f"Revision (last in table):    {title_block.get('revision_table_last') or '(not found)'}",
         f"Status (title block):        {title_block.get('status_title_block') or '(empty)'}",
+        f"Status (drawing name):       {title_block.get('status_plan_id') or '(not found)'}",
         f"Planfreigabe:                {title_block.get('planfreigabe_text') or '(not found)'}",
         f"Exposition class:            {title_block.get('exposition_class') or '(not found)'}",
         f"Betondeckung Cmin,dur:       {title_block.get('betondeckung_cmin_dur') or '(not found)'}",
