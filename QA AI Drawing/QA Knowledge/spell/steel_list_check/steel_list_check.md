@@ -35,8 +35,8 @@ Numbers compare as numbers, so a decimal comma or a trailing zero (`3,50` agains
 
 | Drawing field | Steel list field | Tolerance |
 |---|---|---|
-| Stabliste Gesamtmasse [kg] | Stabliste Gesamtmasse [kg] | ±1% |
-| Mattenstahlliste Gesamtgewicht [kg] | Mattenstahlliste Gesamtgewicht [kg] | ±1% |
+| Stabliste Gesamtmasse [kg] | Stabliste Gesamtmasse [kg] | ±0.1 kg |
+| Mattenstahlliste Gesamtgewicht [kg] | Mattenstahlliste Gesamtgewicht [kg] | ±0.1 kg |
 | Einbauteilliste — EBT-Nummer | Einbauteilliste — EBT-Nummer | exact |
 | Einbauteilliste — Hersteller | Einbauteilliste — Hersteller | exact |
 | Einbauteilliste — Bezeichnung | Einbauteilliste — Bezeichnung | exact |
@@ -50,7 +50,9 @@ Numbers compare as numbers, so a decimal comma or a trailing zero (`3,50` agains
 - **Extra position** — a position in the steel list that the drawing schedule does not carry.
 - **Value mismatch** — a position present on both sides whose Stück, Ø, Einzellänge, Gesamtlänge or Masse differs. The finding names every column that differs and both values.
 - **Duplicate position** — the same Pos number printed twice in one schedule.
-- **Total mismatch** — Gesamtmasse or Gesamtgewicht differing by more than 1%.
+- **Total mismatch** — Gesamtmasse or Gesamtgewicht differing by more than 0.1 kg.
+
+The tolerance on the totals covers rounding and nothing else. Every row's Masse is printed to two decimals, so summing a schedule can drift by half a centigram per row; a tenth of a kilo covers any realistic schedule. A relative band of 1% was 6.7 kg on a 674 kg element and passed a total that was out by 3.99 kg — a real difference between the two documents, not a rounding artefact.
 
 Any mismatch raises an error. The check reports NOT FOUND only when nothing at all could be compared — when the steel list has not been uploaded, or when neither document yields a schedule or a parts table. A schedule the drawing does not carry (a wall with no mesh, for instance) is not a defect and does not suppress the comparisons that did run.
 

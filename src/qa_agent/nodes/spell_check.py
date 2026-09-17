@@ -1723,7 +1723,13 @@ def spell_check(state: GraphState) -> dict:
             print(f"[steel_list_check]   EBT items               : drawing={len(dr_ebt)}  steel_list={len(sl_ebt)}")
             print(f"[steel_list_check] ────────────────────────────────────────────────")
 
-            _SL_TOL = 0.01  # 1% relative tolerance
+            # Rounding, and nothing else. Every row's Masse is printed to two
+            # decimals, so summing a schedule can drift by half a centigram per
+            # row — a tenth of a kilo covers any realistic schedule. A 1%
+            # relative band was 6.7 kg on this project and passed a total that
+            # was out by 3.99 kg (670.58 against 674.57), which is a real
+            # discrepancy between the two documents, not a rounding artefact.
+            _SL_TOL_KG = 0.1
 
             def _sl_cmp_float(label: str, dr_val: str, sl_val: str, unit: str = "kg") -> None:
                 # Nothing to compare against is not a defect: a sheet with no
@@ -1742,17 +1748,19 @@ def spell_check(state: GraphState) -> dict:
                     return
                 try:
                     d, s = float(dr_val.replace(",", ".")), float(sl_val.replace(",", "."))
-                    ref = max(abs(d), abs(s), 1e-9)
-                    diff_pct = abs(d - s) / ref * 100
-                    if diff_pct > _SL_TOL * 100:
-                        print(f"[steel_list_check]   MISMATCH {label}: drawing={d} vs steel_list={s}  diff={diff_pct:.2f}%")
+                    diff = abs(d - s)
+                    if diff > _SL_TOL_KG:
+                        print(f"[steel_list_check]   MISMATCH {label}: drawing={d} vs steel_list={s}  diff={diff:.2f} {unit}")
                         by_check["steel_list_check"].append(_SpellIssue(
                             check="steel_list_check", severity="error",
-                            description=f"{label} mismatch: drawing={d} {unit}, steel list={s} {unit} (diff {diff_pct:.2f}%)",
+                            description=(
+                                f"{label} mismatch: drawing={d} {unit}, steel list={s} {unit} "
+                                f"(differs by {diff:.2f} {unit})"
+                            ),
                             page=1, location=f"drawing {label}", confidence=1.0,
                         ))
                     else:
-                        print(f"[steel_list_check]   OK {label}: drawing={d} vs steel_list={s}  diff={diff_pct:.2f}%")
+                        print(f"[steel_list_check]   OK {label}: drawing={d} vs steel_list={s}  diff={diff:.2f} {unit}")
                 except ValueError:
                     print(f"[steel_list_check]   ERROR {label}: parse error drawing={dr_val!r} sl={sl_val!r}")
 

@@ -59,15 +59,20 @@ def _clean(text: str) -> str:
 # EBT/MT codes yield two anchors (bare number + labelled form), so handled apart.
 _EBT_RE = re.compile(r"\b(EBT|MT)\s*0*(\d{2,6})\b", re.IGNORECASE)
 
-# Each pattern has ONE capturing group; its matches become candidate anchors,
-# tried longest-first. Ordered roughly most-specific → most-generic.
+# Each pattern has ONE capturing group; its matches become candidate anchors.
+# Ordered most-specific → most-generic, and that ORDER is what ranks them: a
+# schedule row's own values locate the row, whereas the table's name locates
+# only the table. Sorting by raw length instead put "Stabliste" ahead of every
+# row value, so all sixteen Stabliste findings highlighted the same title word
+# and looked like one note.
 _TOKEN_PATTERNS = [
     re.compile(r"['‘’]([^'‘’]{2,80})['‘’]"),                       # 'quoted value'
     re.compile(r'["“”]([^"“”]{2,80})["“”]'),                       # "quoted value"
-    re.compile(r"\bPos\.?\s*0*(\d{1,4})\b", re.IGNORECASE),         # Pos 12
+    re.compile(r"(?<![\d.,])(\d{1,4}[.,]\d{2})(?![\d.,])"),        # 3.79, 9.17 — a row's own figures
     re.compile(r"([A-Za-zÄÖÜäöüß][\wÄÖÜäöüß./-]{2,})\s*(?:→|->|:)\s*\w"),  # wrong→correct
     re.compile(r"(\bSchnitt\s+[A-Z]-?[A-Z]?\b)"),                  # Schnitt A-A
     re.compile(r"(\b[A-ZÄÖÜ]{1,3}\d+(?:[/-][A-Z0-9]+)*\b)"),       # XC3, K38/17
+    re.compile(r"\bPos\.?\s*0*(\d{1,4})\b", re.IGNORECASE),         # Pos 12
     re.compile(r"(\b[A-ZÄÖÜ]{2,4}\b)"),                            # FV, KTL, V2A
     re.compile(r"(\b[A-ZÄÖÜ][A-Za-zÄÖÜäöüß]{3,}\b)"),              # Jordahl, Wandansicht
 ]
@@ -77,46 +82,100 @@ def _search_tokens(description: str, location: str) -> list[str]:
     """Ordered, de-duplicated list of strings to look for in the page — most
     specific (longest / most unique) first."""
     desc = description or ""
-    raw: list[str] = []
+    raw: list[tuple[int, str]] = []          # (rank, token) — lower rank = more specific
     for label, num in _EBT_RE.findall(desc):
-        raw += [num, f"{label.upper()} {num}"]
-    for pat in _TOKEN_PATTERNS:
-        raw += pat.findall(desc)
+        raw += [(0, f"{label.upper()} {num}"), (0, num)]
+    for rank, pat in enumerate(_TOKEN_PATTERNS, start=1):
+        raw += [(rank, m) for m in pat.findall(desc)]
     loc = _clean(location)
+    last = len(_TOKEN_PATTERNS) + 1
     if loc and len(loc) >= 4:
-        raw.append(loc)
+        # The location names the table or the field, so it is the anchor of last
+        # resort — it is the same for every finding in that table.
+        raw.append((last, loc))
         # The field name inside a "title block X" / "drawing X" location is the
         # cleanest anchor (e.g. "Anzahl", "Gewicht", "BETONDECKUNG").
         m = re.match(r"(?:title\s*block|drawing)\b[\s/]*(.+)", loc, re.IGNORECASE)
         if m and len(m.group(1)) >= 3:
-            raw.append(m.group(1))
+            raw.append((last, m.group(1)))
 
     seen: set[str] = set()
-    ordered: list[str] = []
-    for tok in raw:
+    ordered: list[tuple[int, int, str]] = []
+    for rank, tok in raw:
         t = _clean(tok)
         if len(t) < 2 or t.lower() in _STOPWORDS or t.lower() in seen:
             continue
         seen.add(t.lower())
-        ordered.append(t)
+        ordered.append((rank, -len(t), t))
 
-    ordered.sort(key=len, reverse=True)   # longest = most specific anchor wins
-    return ordered
+    # Pattern order first, longest within a pattern second.
+    ordered.sort()
+    return [t for _, _, t in ordered]
 
 
-def _find_rect(
-    page: "fitz.Page", tokens: list[str], prefer_bottom: bool = False,
-) -> "fitz.Rect | None":
-    """First token that matches wins. When prefer_bottom is set (title-block
-    findings), pick the lowest occurrence on the page — the title block is the
-    bottom-most element, so this skips identical labels in the body / schedules."""
-    for tok in tokens:
+def _rect_key(rect: "fitz.Rect") -> tuple[int, int, int, int]:
+    """Identity of a rectangle, rounded so near-identical hits count as one."""
+    return (round(rect.x0), round(rect.y0), round(rect.x1), round(rect.y1))
+
+
+def _location_region(page: "fitz.Page", location: str) -> "fitz.Rect | None":
+    """The part of the page the finding's location names, when it can be found.
+
+    A value like "3.25" occurs all over a drawing, but a finding located in the
+    Stabliste belongs in the Stabliste. Anchoring the search under that title
+    keeps a schedule finding inside its own table instead of landing on the
+    first identical number anywhere on the sheet.
+    """
+    key = _clean(location).split("/")[0].strip()
+    key = re.sub(r"^(?:title\s*block|drawing)\s+", "", key, flags=re.IGNORECASE).strip()
+    for candidate in (key, key.split()[0] if key else ""):
+        if len(candidate) < 4:
+            continue
         try:
-            hits = page.search_for(tok, quads=False)
+            hits = page.search_for(candidate, quads=False)
         except Exception:
             hits = []
         if hits:
-            return max(hits, key=lambda r: r.y0) if prefer_bottom else hits[0]
+            a = hits[0]
+            return fitz.Rect(a.x0 - 80, a.y0 - 30, a.x0 + 460, a.y1 + 440)
+    return None
+
+
+def _find_rect(
+    page: "fitz.Page",
+    tokens: list[str],
+    prefer_bottom: bool = False,
+    taken: set | None = None,
+    region: "fitz.Rect | None" = None,
+) -> "fitz.Rect | None":
+    """The best free spot on the page for this finding.
+
+    Tokens are tried in order; within a token every occurrence is tried, so a
+    second finding whose best anchor is already carrying a note moves to the
+    next occurrence rather than stacking invisibly on top of the first. When
+    every occurrence of every token is taken, None sends the finding to the
+    margin — one note per finding, always, and never two in the same place.
+
+    prefer_bottom (title-block findings) reads the lowest occurrence first: the
+    title block is the bottom-most element, so identical labels in the body and
+    the schedules are skipped.
+    """
+    used = taken if taken is not None else set()
+    # Two passes: inside the area the location names first, anywhere second.
+    for inside_only in (True, False) if region is not None else (False,):
+        for tok in tokens:
+            try:
+                hits = page.search_for(tok, quads=False)
+            except Exception:
+                hits = []
+            if inside_only and region is not None:
+                hits = [r for r in hits if region.contains(r)]
+            if not hits:
+                continue
+            hits.sort(key=lambda r: r.y0, reverse=prefer_bottom)
+            for rect in hits:
+                if _rect_key(rect) not in used:
+                    return rect
     return None
 
 
@@ -164,6 +223,10 @@ def annotate_pdf(pdf_bytes: bytes, issues: list[dict]) -> bytes:
 
     # Per-page running offset so unlocated sticky notes stack instead of overlap.
     margin_slots: dict[int, int] = {}
+    # Rectangles already carrying a note, per page. Two findings never share one:
+    # sixteen Stabliste findings all anchored on the word "Stabliste" and the
+    # sheet came back looking as if only one error had been found.
+    used_rects: dict[int, set] = {}
 
     for n, issue in enumerate(issues, start=1):
         severity = str(issue.get("severity", "ERROR")).upper()
@@ -183,15 +246,24 @@ def annotate_pdf(pdf_bytes: bytes, issues: list[dict]) -> bytes:
         # Title-block fields (Anzahl, Gewicht, Volumen, BETONDECKUNG, …) repeat
         # elsewhere on the sheet; anchor on the bottom-most hit = the title block.
         prefer_bottom = "title block" in location.lower() or "titleblock" in location.lower()
-        rect = _find_rect(page, tokens, prefer_bottom=prefer_bottom)
+        taken = used_rects.setdefault(pidx, set())
+        region = None if prefer_bottom else _location_region(page, location)
+        rect = _find_rect(
+            page, tokens, prefer_bottom=prefer_bottom, taken=taken, region=region,
+        )
 
         if rect is not None:
+            taken.add(_rect_key(rect))
             annot = page.add_highlight_annot(rect)
             _add_comment(annot, title, content, color)
         else:
+            # Margin fallback — stacked down the right edge and wrapped into
+            # further columns so a long finding list cannot run off the sheet.
             slot = margin_slots.get(pidx, 0)
             margin_slots[pidx] = slot + 1
-            pt = fitz.Point(page.rect.width - 28, 36 + slot * 26)
+            per_column = max(1, int((page.rect.height - 72) // 26))
+            col, row = divmod(slot, per_column)
+            pt = fitz.Point(page.rect.width - 28 - col * 30, 36 + row * 26)
             annot = page.add_text_annot(pt, content, icon="Comment")
             _add_comment(annot, title, content, color)
 
