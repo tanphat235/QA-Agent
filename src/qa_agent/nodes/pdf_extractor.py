@@ -152,6 +152,11 @@ def extract_pdf_content(pdf_path: str) -> dict:
             print(f"[pdf_extract] dropped {dropped_rotated} garbled rotated/vertical token(s)")
         rotated_words = readable_rotated
         page = deduped.filter(_is_normal_char)
+        # Only what is actually on the sheet. CAD files carry a comment layer
+        # parked outside the page — notes to the draughtsman in whatever language
+        # the office speaks ("dùng để xref vô Element…") — and reading it as
+        # drawing text produced spelling findings about text nobody ever prints.
+        page = page.crop((0, 0, page.width, page.height), strict=False)
         words = page.extract_words(x_tolerance=3, y_tolerance=3, keep_blank_chars=False)
         raw_text = page.extract_text(x_tolerance=3, y_tolerance=3) or ""
         if rotated_words:
@@ -173,9 +178,16 @@ def extract_pdf_content(pdf_path: str) -> dict:
         title_from_coords = (
             _find_text_below_label(words, "Drawing Title")
             or _find_text_below_label(words, "Bezeichnung")
+            # German sheets label the drawing title "Planinhalt", and its block
+            # runs over several lines — "Werkplanung / Schalplan und
+            # Bewehrungsplan / FT.- Stütze ST-11-01". The element code sits on
+            # the last of them, so the whole block is kept, not just line one.
+            or _find_text_below_label(words, "Planinhalt")
         )
         if title_from_coords:
-            title_block["drawing_title_value"] = title_from_coords.split("\n")[0].strip()
+            title_block["drawing_title_value"] = " ".join(
+                ln.strip() for ln in title_from_coords.split("\n") if ln.strip()
+            )[:200]
         else:
             title_block["drawing_title_value"] = (
                 _find_drawing_title_raw(raw_text)
@@ -299,14 +311,27 @@ def _find_text_below_label(words: list[dict], label_fragment: str) -> str | None
     Find text in the box directly below a label (e.g. "Drawing Title:").
     Returns lines of text joined by newline, or None if the box is empty.
     """
-    label_word = next(
-        (w for w in words if label_fragment.lower() in w["text"].lower()), None
-    )
-    if label_word is None:
-        return None
+    # A sheet carries the same title block more than once — a filled-in one and
+    # an abbreviated or blank copy — so every occurrence is read and the fullest
+    # block wins. Taking the first one found returned "Werkplanung" from the
+    # short copy and lost the element code on the third line of the real title.
+    blocks = [
+        text for w in [x for x in words if label_fragment.lower() in x["text"].lower()]
+        if (text := _text_below(words, w))
+    ]
+    return max(blocks, key=len) if blocks else None
 
+
+def _text_below(words: list[dict], label_word: dict) -> str | None:
+    """The block of text printed directly under one label word.
+
+    Bounded on the right by the next label on the label's own row. Without that
+    bound a blank cell swallows the neighbouring column's text — the sheet is
+    metres wide, so "everything to the right" is most of the title block.
+    """
     label_bottom = label_word["bottom"]
     label_x0 = label_word["x0"]
+    right_bound = _next_label_x(words, label_word) or float("inf")
 
     # Collect words in the column below the label
     below = sorted(
@@ -315,6 +340,7 @@ def _find_text_below_label(words: list[dict], label_fragment: str) -> str | None
             if w["top"] > label_bottom + _BELOW_Y_MIN
             and w["top"] <= label_bottom + _BELOW_Y_MAX
             and w["x0"] >= label_x0 - 8   # slight left tolerance
+            and w["x0"] < right_bound
         ],
         key=lambda w: (w["top"], w["x0"]),
     )
@@ -978,6 +1004,7 @@ def _find_drawing_title_raw(raw_text: str) -> str | None:
     for label_pat in (
         r"Bezeichnung[^:\n]*:\s*\n\s*(.+)",    # German label + next line
         r"Drawing Title[^:\n]*:\s*\n\s*(.+)",   # English label + next line
+        r"Planinhalt[^:\n]*:?\s*\n\s*(.+)",     # Planinhalt block, lines below
         r"Bezeichnung[^:\n]*:\s*([^\n:]{5,})",  # same-line value
     ):
         m = re.search(label_pat, raw_text, re.IGNORECASE)
@@ -1720,11 +1747,35 @@ def _find_stabliste_total(raw_text: str) -> str | None:
         section = raw_text[stab_m.start():end]
         print(f"[steel_list_check] Stabliste section: {len(section)} chars, "
               f"clipped_at={next_m.group(0) if next_m else 'EOF'}")
-        gw = re.findall(r"Gesamtgewicht\s*:?\s*([\d.,]+)", section, re.IGNORECASE)
-        print(f"[steel_list_check] Stabliste Gesamtgewicht candidates: {gw}")
+        # "Gesamtgewicht" first: the steel list prints per-page subtotals labelled
+        # "Gesamtmasse" and closes with the real total as "Gesamtgewicht", so
+        # preferring that spelling keeps a subtotal from winning.
+        gw = re.findall(r"Gesamtgewicht\s*(?:\[?\s*kg\s*\]?)?\s*:?\s*([\d.,]+)", section, re.IGNORECASE)
+        label = "Gesamtgewicht"
+        if not gw:
+            # German-only drawings close the Stabliste with "Gesamtmasse [kg] : 670.58"
+            # and carry no English counterpart, so strategy 1 never fires for them
+            # and there is no Gesamtgewicht to prefer.
+            gw = re.findall(r"Gesamtmasse\s*(?:\[?\s*kg\s*\]?)?\s*:?\s*([\d.,]+)", section, re.IGNORECASE)
+            label = "Gesamtmasse"
+        print(f"[steel_list_check] Stabliste {label} candidates: {gw}")
         if gw:
             val = gw[-1].replace(",", ".")
-            print(f"[steel_list_check] Stabliste Gesamtgewicht (last in section): {val!r}")
+            print(f"[steel_list_check] Stabliste {label} (last in section): {val!r}")
+            return val
+
+    # Strategy 3 — the whole text. On a metres-wide sheet the schedules sit side
+    # by side, so their titles land on adjacent extracted lines and the section
+    # clipped at the next title holds only a couple of rows — the closing total
+    # falls outside it. Gesamtgewicht is still preferred over Gesamtmasse, and
+    # the last occurrence is taken, so a subtotal cannot outrank the real total.
+    for label in ("Gesamtgewicht", "Gesamtmasse"):
+        hits = re.findall(
+            rf"{label}\s*(?:\[?\s*kg\s*\]?)?\s*:?\s*([\d.,]+)", raw_text, re.IGNORECASE,
+        )
+        if hits:
+            val = hits[-1].replace(",", ".")
+            print(f"[steel_list_check] Stabliste {label} (last on the sheet): {val!r}")
             return val
 
     print("[steel_list_check] Stabliste total: not found")

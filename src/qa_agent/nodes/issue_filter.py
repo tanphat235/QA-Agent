@@ -55,6 +55,9 @@ _VERDICT_PREFIX_RE = re.compile(r"^(?:PASS|FAIL|NOT\s+FOUND)\s*[—–-]\s*", re
 
 OUTPUT_RULES = """\
 RULES — FINAL RESULT ONLY:
+  • WRITE EVERY DESCRIPTION IN ENGLISH, whatever language the drawing is in. Quote a
+    German term or label verbatim when you need to name it, but the sentence around
+    it is English. Never answer in the drawing's language or in any other language.
   • Put ONLY confirmed violations in issues[]. An empty issues[] means that check PASSED.
   • Add check keys to not_found when required drawing elements are missing — never assume PASS.
   • Issue descriptions state the violation fact only (label, value, location). Never include

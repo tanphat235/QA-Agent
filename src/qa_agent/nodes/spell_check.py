@@ -1284,11 +1284,23 @@ def spell_check(state: GraphState) -> dict:
                     page=1, location="title block / drawing name", confidence=1.0,
                 ))
         if not rev_compared:
-            not_found_set.add("revision_check")
-            print(
-                f"[revision_check] NOT FOUND — nothing to compare "
-                f"(field={rev_field!r} name={rev_name!r} table={rev_tbl!r})"
-            )
+            if rev_tb:
+                # The sheet states its revision in exactly one place and nothing
+                # contradicts it. That is a pass, not a NOT FOUND: most sheets of
+                # this kind carry no revision history table at all, and reporting
+                # every one of them as unreadable buries the real findings.
+                src = "title block" if rev_field else f"drawing name {plan_id}"
+                dynamic_pass_descs["revision_check"] = (
+                    f"PASS — Revision {rev_tb}, read from the {src}. "
+                    f"The sheet states it in one place only, so there is nothing to compare it against."
+                )
+                print(f"[revision_check] PASS — revision {rev_tb!r} from {src}, single source")
+            else:
+                not_found_set.add("revision_check")
+                print(
+                    f"[revision_check] NOT FOUND — no revision code anywhere "
+                    f"(field={rev_field!r} name={rev_name!r} table={rev_tbl!r})"
+                )
 
     # ── drawing_status Python comparison ─────────────────────────────────────
     ds_enabled = enabled_sub is None or "drawing_status" in (enabled_sub or [])
@@ -1333,11 +1345,20 @@ def spell_check(state: GraphState) -> dict:
                 print(f"[drawing_status] status prefix {first!r} is not P / A / F — no Planfreigabe rule applies")
 
         if not status_compared:
-            not_found_set.add("drawing_status")
-            print(
-                f"[drawing_status] NOT FOUND — nothing to compare "
-                f"(field={status_field!r} name={status_name!r} planfreigabe={planfreigabe!r})"
-            )
+            if status_code:
+                src = "title block" if status_field else f"drawing name {plan_id}"
+                dynamic_pass_descs["drawing_status"] = (
+                    f"PASS — Status {status_code}, read from the {src}. "
+                    f"The sheet carries no Planfreigabe text and no second statement of the status, "
+                    f"so there is nothing to compare it against."
+                )
+                print(f"[drawing_status] PASS — status {status_code!r} from {src}, single source")
+            else:
+                not_found_set.add("drawing_status")
+                print(
+                    f"[drawing_status] NOT FOUND — no status code anywhere "
+                    f"(field={status_field!r} name={status_name!r})"
+                )
 
     # ── exposition_class Python comparison ───────────────────────────────────
     ec_enabled = enabled_sub is None or "exposition_class" in (enabled_sub or [])
@@ -1705,6 +1726,12 @@ def spell_check(state: GraphState) -> dict:
             _SL_TOL = 0.01  # 1% relative tolerance
 
             def _sl_cmp_float(label: str, dr_val: str, sl_val: str, unit: str = "kg") -> None:
+                # Nothing to compare against is not a defect: a sheet with no
+                # Mattenstahlliste has no total on either document, and the old
+                # order reported that as "could not extract (steel list has kg)".
+                if not sl_val:
+                    print(f"[steel_list_check]   SKIP {label}: the steel list states no value")
+                    return
                 if not dr_val:
                     print(f"[steel_list_check]   ERROR {label}: could not extract from drawing PDF")
                     by_check["steel_list_check"].append(_SpellIssue(
@@ -1712,9 +1739,6 @@ def spell_check(state: GraphState) -> dict:
                         description=f"{label}: could not extract value from drawing PDF (steel list has {sl_val} {unit})",
                         page=1, location=f"drawing {label}", confidence=1.0,
                     ))
-                    return
-                if not sl_val:
-                    print(f"[steel_list_check]   SKIP {label}: steel list value missing")
                     return
                 try:
                     d, s = float(dr_val.replace(",", ".")), float(sl_val.replace(",", "."))
