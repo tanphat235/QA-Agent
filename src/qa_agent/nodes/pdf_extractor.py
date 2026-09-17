@@ -14,6 +14,7 @@ from qa_agent.extraction.element_code import (
     resolve_element_code_from_title,
 )
 from qa_agent.extraction.scale import find_section_scales, find_title_block_scales
+from qa_agent.concrete_cover import EXPOSITION_CLASS_RE, normalize_class, parse_classes
 
 
 def _char_category(obj: dict) -> str:
@@ -374,15 +375,14 @@ def _find_drawing_name(words: list[dict], page_height: float) -> str | None:
 
 # ── Exposition class and BETONDECKUNG concrete cover ────────────────────────
 
-_XC_CODE_RE = re.compile(r"XC\s*[-]?\s*([1-4])", re.IGNORECASE)
+# Carbonation (XC), chloride (XD) and sea-water (XS) classes each state a cover,
+# so all three are read off the sheet. The shared pattern lives with the table.
+_XC_CODE_RE = EXPOSITION_CLASS_RE
 _INT_WORD_RE = re.compile(r"^\d+$")
 
 
 def _normalize_xc_code(text: str) -> str | None:
-    m = _XC_CODE_RE.search(text)
-    if not m:
-        return None
-    return f"XC{m.group(1)}"
+    return normalize_class(text)
 
 
 def _betondeckung_scope(words: list[dict]) -> list[dict]:
@@ -467,7 +467,7 @@ def _find_numeric_near_label(
 
 def _find_xc_split_adjacent(words: list[dict]) -> str | None:
     """Handle 'XC' and '3' extracted as separate words on the same row."""
-    xc_words = [w for w in words if re.fullmatch(r"XC", w["text"].strip(), re.IGNORECASE)]
+    xc_words = [w for w in words if re.fullmatch(r"X[CDS]", w["text"].strip(), re.IGNORECASE)]
     if not xc_words:
         return None
     for xc in sorted(xc_words, key=lambda w: w["top"], reverse=True):
@@ -477,7 +477,7 @@ def _find_xc_split_adjacent(words: list[dict]) -> str | None:
                 continue
             if w["x0"] > xc["x1"] - 2 and w["x0"] < xc["x1"] + 35:
                 if abs((w["top"] + w["bottom"]) / 2 - y) <= 16:
-                    code = f"XC{w['text'].strip()}"
+                    code = f"{xc['text'].strip().upper()}{w['text'].strip()}"
                     print(f"[exposition_class] split adjacent words → {code!r}")
                     return code
     return None
@@ -513,13 +513,13 @@ def _find_xc_near_exposition_label(words: list[dict], raw_text: str) -> str | No
                 return code
 
     for frag in ("Expositionsklasse", "Exposition", "Korrosionsklasse", "Korrosion"):
-        m = re.search(rf"{frag}[^\n]{{0,60}}(XC\s*[-]?\s*[1-4])", raw_text, re.IGNORECASE)
+        m = re.search(rf"{frag}[^\n]{{0,60}}(X[CDS]\s*[-]?\s*[1-4])", raw_text, re.IGNORECASE)
         if m:
             code = _normalize_xc_code(m.group(1))
             if code:
                 print(f"[exposition_class] raw same-line '{frag}' → {code!r}")
                 return code
-        m = re.search(rf"{frag}[^\n]*\n\s*(XC\s*[-]?\s*[1-4])", raw_text, re.IGNORECASE)
+        m = re.search(rf"{frag}[^\n]*\n\s*(X[CDS]\s*[-]?\s*[1-4])", raw_text, re.IGNORECASE)
         if m:
             code = _normalize_xc_code(m.group(1))
             if code:
@@ -528,8 +528,60 @@ def _find_xc_near_exposition_label(words: list[dict], raw_text: str) -> str | No
     return None
 
 
+def _find_exposition_classes(words: list[dict], raw_text: str = "") -> list[str]:
+    """Every exposition class stated in the title block, in the order printed.
+
+    A title block names them together — "Expositionsklassen: XC1, XD1" — and each
+    one states a cover the element must reach, so the caller needs all of them
+    and not just the first. The whole cell is read: the classes sit on one line
+    beside or under the label, so the single-code finders below would stop at the
+    first and hide the chloride class that actually governs.
+    """
+    label_frags = ("expositionsklass", "exposition class", "exposure class", "korrosionsklass")
+    # Every label occurrence is tried, bottommost first: a sheet carries the same
+    # title block twice — the filled-in one and a blank second copy — and reading
+    # only the bottommost found the blank cell and reported no class at all.
+    for frag in label_frags:
+        hits = [w for w in words if frag in w["text"].lower()]
+        for label in sorted(hits, key=lambda w: -w["top"]):
+            label_y = (label["top"] + label["bottom"]) / 2
+            cell = [
+                w for w in words
+                if (
+                    (w["x0"] >= label["x1"] - 6 and abs((w["top"] + w["bottom"]) / 2 - label_y) <= 20)
+                    or (
+                        label["bottom"] + _BELOW_Y_MIN < w["top"] <= label["bottom"] + _BELOW_Y_MAX
+                        and w["x0"] >= label["x0"] - 25
+                        and w["x0"] <= label["x1"] + 120
+                    )
+                )
+            ]
+            codes = parse_classes(" ".join(w["text"] for w in sorted(cell, key=lambda w: (w["top"], w["x0"]))))
+            if codes:
+                print(f"[exposition_class] classes under '{frag}' at top={round(label['top'])} → {codes}")
+                return codes
+
+    for frag in ("Expositionsklassen", "Expositionsklasse", "Exposure class", "Korrosionsklasse"):
+        for m in re.finditer(rf"{frag}[^\n]{{0,80}}", raw_text, re.IGNORECASE):
+            codes = parse_classes(m.group(0))
+            if codes:
+                print(f"[exposition_class] classes on the '{frag}' line → {codes}")
+                return codes
+        for m in re.finditer(rf"{frag}[^\n]*\n([^\n]{{0,120}})", raw_text, re.IGNORECASE):
+            codes = parse_classes(m.group(1))
+            if codes:
+                print(f"[exposition_class] classes on the line under '{frag}' → {codes}")
+                return codes
+
+    single = _find_exposition_class(words, raw_text)
+    if single:
+        print(f"[exposition_class] only a single code could be located → {single!r}")
+        return [single]
+    return []
+
+
 def _find_exposition_class(words: list[dict], raw_text: str = "") -> str | None:
-    """Return exposition class XC1–XC4 from label proximity or text patterns."""
+    """Return one exposition class from label proximity or text patterns."""
     near_label = _find_xc_near_exposition_label(words, raw_text)
     if near_label:
         return near_label
@@ -545,7 +597,7 @@ def _find_exposition_class(words: list[dict], raw_text: str = "") -> str | None:
             print(f"[exposition_class] standalone word (title block) → {code!r}")
             return code
 
-    m = re.search(r"\b(XC\s*[-]?\s*[1-4])\b", raw_text, re.IGNORECASE)
+    m = re.search(r"\b(X[CDS]\s*[-]?\s*[1-4])\b", raw_text, re.IGNORECASE)
     if m:
         code = _normalize_xc_code(m.group(1))
         if code:
@@ -677,8 +729,82 @@ def _find_betondeckung_from_raw(raw_text: str) -> dict:
     return result
 
 
+# The BETONDECKUNG cell is a three-column table: the headers Cmin,dur | ΔCdev | Cv
+# sit in one row and their values in the row under it, each value under its own
+# header. Reading them by that alignment is what the table itself states; the
+# label-proximity and raw-text strategies below are fallbacks for layouts where
+# the headers do not extract as separate words.
+_BTD_HEADER_BAND = 8    # pt — headers of one table share a y band
+_BTD_VALUE_DROP = 45    # pt — how far under the header row its value sits
+_BTD_COLUMN_SLACK = 20  # pt — how far a value may sit off its header's centre
+
+_BTD_CMIN_RE = re.compile(r"c\s*min", re.IGNORECASE)
+_BTD_CDEV_RE = re.compile(r"c\s*dev|[△▲Δ∆]\s*c", re.IGNORECASE)
+_BTD_CV_RE = re.compile(r"^c\s*v$", re.IGNORECASE)
+
+
+def _btd_value_under(words: list[dict], header: dict) -> str | None:
+    """The integer printed in *header*'s own column, in the row below it."""
+    centre = (header["x0"] + header["x1"]) / 2
+    below = [
+        w for w in words
+        if header["bottom"] < w["top"] <= header["bottom"] + _BTD_VALUE_DROP
+        and abs((w["x0"] + w["x1"]) / 2 - centre) <= _BTD_COLUMN_SLACK
+        and re.fullmatch(r"\d+", w["text"].strip())
+    ]
+    if not below:
+        return None
+    return min(below, key=lambda w: (w["top"], abs((w["x0"] + w["x1"]) / 2 - centre)))["text"].strip()
+
+
+def _betondeckung_from_headers(words: list[dict]) -> dict:
+    """Cmin,dur / ΔCdev / Cv read from the column each header stands over.
+
+    Every Cmin header on the sheet is tried, bottommost first, and the first
+    complete row wins. A sheet carries the same title block twice — the filled-in
+    one and a blank second copy — and scoping to the bottommost BETONDECKUNG
+    alone read the blank one, which left the values to be guessed by the
+    raw-text fallback.
+    """
+    empty = {"cmin_dur": None, "delta_c": None, "cv": None}
+    cmin_headers = [w for w in words if _BTD_CMIN_RE.search(w["text"])]
+
+    for cmin in sorted(cmin_headers, key=lambda w: -w["top"]):
+        mid = (cmin["top"] + cmin["bottom"]) / 2
+        row = [
+            w for w in words
+            if abs((w["top"] + w["bottom"]) / 2 - mid) <= _BTD_HEADER_BAND
+            and w["x0"] > cmin["x0"]
+        ]
+        cdev = next((w for w in sorted(row, key=lambda w: w["x0"]) if _BTD_CDEV_RE.search(w["text"])), None)
+        cv = next((w for w in sorted(row, key=lambda w: w["x0"]) if _BTD_CV_RE.match(w["text"].strip())), None)
+        if cdev is None or cv is None:
+            continue
+
+        found = {
+            "cmin_dur": _btd_value_under(words, cmin),
+            "delta_c":  _btd_value_under(words, cdev),
+            "cv":       _btd_value_under(words, cv),
+        }
+        print(
+            f"[exposition_class] header row at top={round(cmin['top'])} → "
+            f"cmin_dur={found['cmin_dur']!r} delta_c={found['delta_c']!r} cv={found['cv']!r}"
+        )
+        if all(found.values()):
+            return found
+    return empty
+
+
 def _find_betondeckung_values(words: list[dict], raw_text: str = "") -> dict:
     """Extract Cmin,dur, ΔCdev and Cv — value to the right of or below each header."""
+    headers = _betondeckung_from_headers(words)
+    if all(headers.values()):
+        print(
+            f"[exposition_class] read from header columns — cmin_dur={headers['cmin_dur']!r}  "
+            f"delta_c={headers['delta_c']!r}  cv={headers['cv']!r}"
+        )
+        return headers
+
     scoped = _betondeckung_scope(words)
 
     by_label = {
@@ -694,9 +820,9 @@ def _find_betondeckung_values(words: list[dict], raw_text: str = "") -> dict:
     raw_vals = _find_betondeckung_from_raw(raw_text)
 
     merged = {
-        "cmin_dur": by_label["cmin_dur"] or anchor["cmin_dur"] or raw_vals["cmin_dur"],
-        "delta_c":  by_label["delta_c"]  or anchor["delta_c"]  or raw_vals["delta_c"],
-        "cv":       by_label["cv"]       or anchor["cv"]       or raw_vals["cv"],
+        "cmin_dur": headers["cmin_dur"] or by_label["cmin_dur"] or anchor["cmin_dur"] or raw_vals["cmin_dur"],
+        "delta_c":  headers["delta_c"]  or by_label["delta_c"]  or anchor["delta_c"]  or raw_vals["delta_c"],
+        "cv":       headers["cv"]       or by_label["cv"]       or anchor["cv"]       or raw_vals["cv"],
     }
     print(
         f"[exposition_class] merged — cmin_dur={merged['cmin_dur']!r}  "
@@ -1191,6 +1317,7 @@ def _extract_title_block(words: list[dict], raw_text: str = "") -> dict:
         "revision_table_last":      _find_last_revision_in_table(words),
         "status_title_block":       _find_status_in_title_block(words),
         "exposition_class":         _find_exposition_class(words, raw_text),
+        "exposition_classes":       _find_exposition_classes(words, raw_text),
         "betondeckung_cmin_dur":    btd["cmin_dur"],
         "betondeckung_delta_c":     btd["delta_c"],
         "betondeckung_cv":          btd["cv"],

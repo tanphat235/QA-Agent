@@ -37,6 +37,7 @@ def build_extraction_context(state: GraphState) -> ExtractionContext:
         "drawing.anzahl": tb.get("anzahl"),
         "drawing.gesamtmasse": tb.get("gesamtmasse"),
         "drawing.exposition_class": tb.get("exposition_class"),
+        "drawing.exposition_classes": ", ".join(tb.get("exposition_classes") or []),
         "drawing.betondeckung_cmin_dur": tb.get("betondeckung_cmin_dur"),
         "drawing.betondeckung_delta_c": tb.get("betondeckung_delta_c"),
         "drawing.betondeckung_cv": tb.get("betondeckung_cv"),

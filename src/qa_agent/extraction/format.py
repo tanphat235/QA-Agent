@@ -7,7 +7,7 @@ from qa_agent.extraction.context import ExtractionContext
 _SECTION_ORDER = (
     ("Title block", (
         "drawing.volumen", "drawing.gewicht", "drawing.anzahl", "drawing.gesamtmasse",
-        "drawing.exposition_class", "drawing.betondeckung_cmin_dur", "drawing.betondeckung_delta_c",
+        "drawing.exposition_class", "drawing.exposition_classes", "drawing.betondeckung_cmin_dur", "drawing.betondeckung_delta_c",
         "drawing.betondeckung_cv", "drawing.revision_title_block", "drawing.revision_table_last",
         "drawing.plan_id", "drawing.revision_plan_id", "drawing.status_plan_id",
         "drawing.statische_position",

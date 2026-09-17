@@ -9,7 +9,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.outputs import LLMResult
 
 from qa_agent.state import GraphState
-from qa_agent.concrete_cover import expected_cover
+from qa_agent.concrete_cover import expected_cover, governing_class, parse_classes
 from qa_agent.drawing_language import (
     DrawingLanguage,
     detect_drawing_language,
@@ -1139,7 +1139,10 @@ def spell_check(state: GraphState) -> dict:
         print("[drawing_status] → NOT FOUND reason: planfreigabe_text is empty")
 
     # ── exposition_class: log pre-extracted values ───────────────────────────
-    xc_code      = str(title_block.get("exposition_class") or "").strip().upper()
+    ec_classes   = [str(c).upper() for c in (title_block.get("exposition_classes") or []) if c]
+    if not ec_classes:
+        ec_classes = parse_classes(str(title_block.get("exposition_class") or ""))
+    xc_code      = ", ".join(ec_classes)
     btd_cmin     = str(title_block.get("betondeckung_cmin_dur") or "").strip()
     btd_dc       = str(title_block.get("betondeckung_delta_c") or "").strip()
     btd_cv       = str(title_block.get("betondeckung_cv") or "").strip()
@@ -1342,12 +1345,22 @@ def spell_check(state: GraphState) -> dict:
         # Which Table 3.1 c_nom column to compare against — Ø10 unless the user
         # picked another diameter in Define Rules.
         ec_diameter = get_check_rebar_diameter("spell", "exposition_class")
-        expected = expected_cover(xc_code, ec_diameter)
+        # A drawing names several classes ("XC1, XD1") and must satisfy all of
+        # them, so the comparison is made against the one demanding the most
+        # cover — a chloride class outranks a carbonation class, and meeting it
+        # meets the others too.
+        ec_governing = governing_class(ec_classes, ec_diameter)
+        expected = expected_cover(ec_governing or "", ec_diameter)
+        if len(ec_classes) > 1:
+            print(
+                f"[exposition_class] classes on the drawing={ec_classes} → "
+                f"{ec_governing} governs at Ø{ec_diameter}"
+            )
         if expected is None:
             not_found_set.add("exposition_class")
             print(
                 f"[exposition_class] NOT FOUND — no cover table entry for "
-                f"xc_code={xc_code!r} at Ø{ec_diameter}"
+                f"{ec_classes or '(no class read)'} at Ø{ec_diameter}"
             )
         elif not btd_cmin and not btd_dc and not btd_cv:
             not_found_set.add("exposition_class")
@@ -1365,14 +1378,19 @@ def spell_check(state: GraphState) -> dict:
             act_dc   = _safe_int(btd_dc)
             act_cv   = _safe_int(btd_cv)
 
+            others = [c for c in ec_classes if c != ec_governing]
+            governs = (
+                f"{ec_governing} (governing; drawing also names {', '.join(others)})"
+                if others else f"{ec_governing}"
+            )
             print(
-                f"[exposition_class] {xc_code} @ Ø{ec_diameter} | "
+                f"[exposition_class] {governs} @ Ø{ec_diameter} | "
                 f"Cmin,dur: actual={act_cmin} expected={exp_cmin} {'✓' if act_cmin == exp_cmin else '✗'} | "
                 f"ΔCdev: actual={act_dc} expected={exp_dc} {'✓' if act_dc == exp_dc else '✗'} | "
                 f"Cv: actual={act_cv} expected={exp_cv} {'✓' if act_cv == exp_cv else '✗'}"
             )
             dynamic_pass_descs["exposition_class"] = (
-                f"PASS — {xc_code} at Ø{ec_diameter}: Cmin,dur={exp_cmin}, "
+                f"PASS — {governs} at Ø{ec_diameter}: Cmin,dur={exp_cmin}, "
                 f"ΔCdev={exp_dc}, Cv={exp_cv} (Table 3.1)"
             )
 
@@ -1380,7 +1398,7 @@ def spell_check(state: GraphState) -> dict:
                 by_check["exposition_class"].append(_SpellIssue(
                     check="exposition_class", severity="error",
                     description=(
-                        f"Cmin,dur mismatch for {xc_code}: "
+                        f"Cmin,dur mismatch for {governs}: "
                         f"drawing={act_cmin}, expected={exp_cmin} (Cnom Ø{ec_diameter})"
                     ),
                     page=1, location="title block BETONDECKUNG", confidence=1.0,
@@ -1389,7 +1407,7 @@ def spell_check(state: GraphState) -> dict:
                 by_check["exposition_class"].append(_SpellIssue(
                     check="exposition_class", severity="error",
                     description=(
-                        f"ΔCdev mismatch for {xc_code}: "
+                        f"ΔCdev mismatch for {governs}: "
                         f"drawing={act_dc}, expected={exp_dc}"
                     ),
                     page=1, location="title block BETONDECKUNG", confidence=1.0,
@@ -1398,7 +1416,7 @@ def spell_check(state: GraphState) -> dict:
                 by_check["exposition_class"].append(_SpellIssue(
                     check="exposition_class", severity="error",
                     description=(
-                        f"Cv mismatch for {xc_code} at Ø{ec_diameter}: "
+                        f"Cv mismatch for {governs} at Ø{ec_diameter}: "
                         f"drawing={act_cv}, expected={exp_cmin}+{exp_dc}={exp_cv}"
                     ),
                     page=1, location="title block BETONDECKUNG", confidence=1.0,
