@@ -45,6 +45,7 @@ def build_extraction_context(state: GraphState) -> ExtractionContext:
         "drawing.plan_id": tb.get("plan_id"),
         "drawing.revision_plan_id": tb.get("revision_plan_id"),
         "drawing.status_plan_id": tb.get("status_plan_id"),
+        "drawing.statische_position": tb.get("statische_position"),
         "drawing.status": tb.get("status_title_block"),
         "drawing.planfreigabe": tb.get("planfreigabe_text"),
         "drawing.drawing_no": tb.get("drawing_no_value"),

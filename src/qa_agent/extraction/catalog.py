@@ -28,6 +28,7 @@ EXTRACTION_FIELDS: tuple[ExtractField, ...] = (
     ExtractField("drawing.plan_id", "Plan-ID / drawing name", "drawing", "Full dash-separated code naming the sheet", "scalar"),
     ExtractField("drawing.revision_plan_id", "Revision (drawing name)", "drawing", "Revision code at the end of the Plan-ID", "scalar"),
     ExtractField("drawing.status_plan_id", "Status (drawing name)", "drawing", "Status code at the end of the Plan-ID", "scalar"),
+    ExtractField("drawing.statische_position", "Statische Positionsnummer", "drawing", "Structural position number in the title block (e.g. ST-12)", "scalar"),
     ExtractField("drawing.status", "Status", "drawing", "Drawing status code (P/A/F)", "scalar"),
     ExtractField("drawing.planfreigabe", "Planfreigabe", "drawing", "Planfreigabe label text", "scalar"),
     ExtractField("drawing.drawing_no", "Drawing No.", "drawing", "Drawing number in title block", "scalar"),

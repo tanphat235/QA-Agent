@@ -362,7 +362,11 @@ async def analyze(
         op_tmp = await _save_upload(op_bytes)
         try:
             overview_plan_data = await asyncio.to_thread(extract_overview_plan_pdf, op_tmp)
-            _log(f"[server] overview_plan extracted: pages={overview_plan_data.get('page_count')}  chars={len(overview_plan_data.get('raw_text', ''))}")
+            _log(
+                f"[server] overview_plan extracted: pages={overview_plan_data.get('page_count')}  "
+                f"chars={len(overview_plan_data.get('raw_text', ''))}  "
+                f"elements={len(overview_plan_data.get('element_records') or {})}"
+            )
         except Exception as exc:
             _log(f"[server] ERR overview_plan extraction failed: {exc}")
         finally:

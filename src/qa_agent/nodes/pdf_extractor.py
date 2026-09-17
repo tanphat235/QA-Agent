@@ -1031,16 +1031,23 @@ def _find_titleblock_value(
     words: list[dict], label_fragment: str, integer_only: bool = False,
 ) -> str | None:
     """Value for a title-block label, regardless of whether it is printed to the
-    right of the label or on the row below it. Uses the bottommost occurrence of
-    the label (the title block sits at the bottom of the sheet) and never reads
-    past the next column's label."""
+    right of the label or on the row below it, and never reading past the next
+    column's label.
+
+    A sheet often carries the same title block twice — the filled-in one and a
+    blank second copy. Taking the bottommost occurrence read the blank one and
+    reported the field as missing, so every occurrence is tried, bottommost
+    first, and the first that actually holds a value wins.
+    """
     matches = [w for w in words if label_fragment.lower() in w["text"].lower()]
     if not matches:
         return None
-    label = max(matches, key=lambda w: w["top"])
-    val = _value_near_word(words, label, integer_only, _next_label_x(words, label))
-    print(f"[titleblock] '{label_fragment}' (top={round(label['top'])}) → {val!r}")
-    return val
+    for label in sorted(matches, key=lambda w: -w["top"]):
+        val = _value_near_word(words, label, integer_only, _next_label_x(words, label))
+        print(f"[titleblock] '{label_fragment}' (top={round(label['top'])}) → {val!r}")
+        if val is not None:
+            return val
+    return None
 
 
 def _find_volumen(words: list[dict], raw_text: str) -> str | None:
@@ -1052,23 +1059,24 @@ def _find_gewicht(words: list[dict], raw_text: str) -> str | None:
     don't pick up a steel-list 'Gewicht' column header higher on the sheet.
     The value may be to the right of the label OR on the row below it.
     """
+    # Every Volumen row is tried, bottommost first — a sheet often carries a
+    # blank second copy of the title block, and only the filled one has a value.
     vol_matches = [w for w in words if "volumen" in w["text"].lower()]
-    if vol_matches:
-        vol_word = max(vol_matches, key=lambda w: w["top"])   # bottommost = title block
+    for vol_word in sorted(vol_matches, key=lambda w: -w["top"]):
         vol_y = vol_word["top"]
         gwt_matches = [
             w for w in words
             if "gewicht" in w["text"].lower() and abs(w["top"] - vol_y) <= 8
         ]
-        if gwt_matches:
-            gwt_word = max(gwt_matches, key=lambda w: w["x0"])  # rightmost if multiple
-            val = _value_near_word(words, gwt_word, right_bound=_next_label_x(words, gwt_word))
-            if val is not None:
-                print(f"[gewicht] near Gewicht on Volumen row (y≈{round(vol_y)}) → {val!r}")
-                return val
-            print("[gewicht] Gewicht found on vol-row but no numeric value right/below")
-        else:
+        if not gwt_matches:
             print(f"[gewicht] no 'Gewicht' word on Volumen row (y≈{round(vol_y)} ±8pt)")
+            continue
+        gwt_word = max(gwt_matches, key=lambda w: w["x0"])  # rightmost if multiple
+        val = _value_near_word(words, gwt_word, right_bound=_next_label_x(words, gwt_word))
+        if val is not None:
+            print(f"[gewicht] near Gewicht on Volumen row (y≈{round(vol_y)}) → {val!r}")
+            return val
+        print(f"[gewicht] Gewicht on vol-row y≈{round(vol_y)} has no numeric value right/below")
     # Fallbacks: bottommost 'Gewicht' anywhere, then bilingual raw-text search.
     return _find_titleblock_value(words, "Gewicht") or _find_bilingual_value(raw_text, "Gewicht", "Weight")
 
@@ -1085,6 +1093,47 @@ def _find_anzahl(words: list[dict], raw_text: str) -> str | None:
 
 
 
+# ── Title block: Statische Positionsnummer ──────────────────────────────────
+# A code ("ST-12"), not a number, so the numeric cell readers cannot fetch it.
+# It sits in the same label-row / value-row title block as Volumen and Anzahl.
+
+_STAT_POS_RE = re.compile(r"^[A-Z]{1,3}-\d{1,3}(?:-\d{1,3})?$", re.IGNORECASE)
+_STAT_POS_LABEL_RE = re.compile(r"positionsnummer", re.IGNORECASE)
+
+
+def _find_statische_position(words: list[dict], raw_text: str = "") -> str | None:
+    """Statische Positionsnummer ("ST-12") from the title block."""
+    # Bottommost first, but every occurrence is tried: the sheet often carries a
+    # blank second copy of the title block whose cell holds no code.
+    matches = [w for w in words if _STAT_POS_LABEL_RE.search(w["text"])]
+    for label in sorted(matches, key=lambda w: -w["top"]):
+        lo, hi = label["x0"] - 40, label["x1"] + 40
+        below = [
+            w for w in words
+            if w["top"] >= label["top"] - 3
+            and w["top"] <= label["bottom"] + 55
+            and (w["x0"] + w["x1"]) / 2 >= lo
+            and (w["x0"] + w["x1"]) / 2 <= hi
+            and _STAT_POS_RE.fullmatch(w["text"].strip())
+        ]
+        if below:
+            val = min(below, key=lambda w: (w["top"], w["x0"]))["text"].strip().upper()
+            print(f"[statische_position] below/right of label (top={round(label['top'])}) → {val!r}")
+            return val
+        print(f"[statische_position] label at top={round(label['top'])} has no code in its cell")
+
+    # Raw-text fallback: label row, then the code on the value row below it.
+    m = re.search(r"[^\n]*positionsnummer[^\n]*\n([^\n]+)", raw_text, re.IGNORECASE)
+    if m:
+        tokens = [t for t in m.group(1).split() if _STAT_POS_RE.fullmatch(t)]
+        if tokens:
+            val = tokens[-1].upper()      # rightmost column of the value row
+            print(f"[statische_position] raw-text value row → {val!r}")
+            return val
+    print("[statische_position] not found")
+    return None
+
+
 # ── Title block: pos_count labels ───────────────────────────────────────────
 
 def _extract_title_block(words: list[dict], raw_text: str = "") -> dict:
@@ -1097,6 +1146,7 @@ def _extract_title_block(words: list[dict], raw_text: str = "") -> dict:
         "status_plan_id":           plan_status,
         "letzte_stabstahlposition": _find_number_right_of_label(words, "Stabstahlposition"),
         "letzte_mattenposition":    _find_number_right_of_label(words, "Mattenposition"),
+        "statische_position":       _find_statische_position(words, raw_text),
         "revision_title_block":     _find_revision_in_title_block(words),
         "revision_table_last":      _find_last_revision_in_table(words),
         "status_title_block":       _find_status_in_title_block(words),
@@ -1347,6 +1397,19 @@ def parse_codes_from_drawing_name(name: str) -> tuple[str | None, str | None]:
     if _NAME_CODE_RE.fullmatch(last):
         return (last, None)
     return (None, None)
+
+
+def strip_name_codes(name: str) -> str:
+    """A drawing name without its trailing revision / status codes.
+
+    The sheet names itself "…-FT-050-B-F" while the overview plan lists the same
+    drawing as "…-FT-050". Comparing the two is only meaningful once the codes
+    the sheet appends are removed.
+    """
+    parts = [p for p in (name or "").strip().strip("-").split("-") if p.strip()]
+    rev, status = parse_codes_from_drawing_name(name)
+    drop = (1 if rev else 0) + (1 if status else 0)
+    return "-".join(parts[:len(parts) - drop]) if drop else "-".join(parts)
 
 
 def _find_plan_id(words: list[dict], raw_text: str = "") -> str | None:
@@ -2148,6 +2211,195 @@ _OVERVIEW_ROW_RE = re.compile(
 )
 
 
+# ── Overview plan: per-element records, read by element code ─────────────────
+# An overview plan states the same element twice, in two shapes:
+#
+#   a TABLE ROW      ST-11-01  04-GBC-…-FT-050  Schalplan und Bewehrungsplan
+#                    FT.- Stütze ST-11-01  1  ST-11
+#   a CALLOUT BLOCK  ST-11-01
+#   beside the         Stat. Pos. ST-11
+#   element on the     bxh= 50x50cm
+#   plan               UK-Stütze= -3.25
+#                      Gewicht= 7.79 T
+#
+# Sheets are metres wide and lay several tables side by side, so pdfplumber's
+# flat text puts six unrelated elements on one line and splits a callout into
+# one y-band per line — neither survives a line-oriented parse. Both shapes are
+# read from word coordinates instead: find the code, then read to its right for
+# the row and below it for the callout. That is layout-agnostic, which matters
+# because every overview plan is laid out differently.
+
+# Element codes have no shape in common across projects, so none is assumed here.
+# An element is recognised by WHERE it sits instead:
+#   • a table row opens with the code and the drawing number follows it;
+#   • a callout block opens with the code and its field lines follow underneath.
+# The only token that is matched on shape is the drawing number, which is a long
+# dash-separated code by construction — that is what makes it recognisable.
+_OP_DRAWING_NO_RE = re.compile(r"^[A-Z0-9_]{1,14}(?:-[A-Z0-9_]{1,14}){4,}$", re.IGNORECASE)
+_OP_INT_RE = re.compile(r"^\d{1,4}$")
+
+_OP_ROW_BAND = 5      # pt — half-height of the row's y band
+_OP_CALLOUT_DROP = 60  # pt — how far below the code a callout block reaches
+_OP_CALLOUT_SPAN = 90  # pt — how far either side of the code its lines may sit
+_OP_CALLOUT_GAP = 25   # pt — a heading's fields start immediately under it
+
+_OP_CALLOUT_FIELDS = (
+    ("stat_pos", re.compile(r"stat\.?\s*pos\.?\s*:?\s*([A-Z0-9-]+)", re.IGNORECASE)),
+    ("weight",   re.compile(r"gewicht\s*[:=]?\s*([\d.,]+)", re.IGNORECASE)),
+    ("volume",   re.compile(r"volumen\s*[:=]?\s*([\d.,]+)", re.IGNORECASE)),
+    ("quantity", re.compile(r"(?:anzahl|stück|stck)\s*[:=]?\s*(\d+)", re.IGNORECASE)),
+    ("bxh",      re.compile(r"bxh\s*[:=]?\s*(\S+)", re.IGNORECASE)),
+)
+
+
+def _op_column(words: list[dict], anchor: dict) -> list[dict]:
+    """Words in *anchor*'s own narrow column, from just under it downwards."""
+    return [
+        w for w in words
+        if anchor["bottom"] < w["top"] <= anchor["bottom"] + _OP_CALLOUT_DROP
+        and w["x0"] > anchor["x0"] - _OP_CALLOUT_SPAN
+        and w["x0"] < anchor["x1"] + _OP_CALLOUT_SPAN
+    ]
+
+
+def _op_lines_below(words: list[dict], anchor: dict) -> list[str]:
+    """Text lines printed directly below *anchor*, in its own narrow column.
+
+    Empty unless a line starts right under the anchor: a callout's fields are
+    stacked immediately below its heading, and a word with open space under it
+    heads nothing.
+    """
+    near = _op_column(words, anchor)
+    if not near or min(w["top"] for w in near) > anchor["bottom"] + _OP_CALLOUT_GAP:
+        return []
+    rows: dict[int, list[dict]] = {}
+    for w in near:
+        rows.setdefault(round(w["top"] / 4), []).append(w)
+    lines = []
+    for key in sorted(rows):
+        band = sorted(rows[key], key=lambda w: w["x0"])
+        lines.append(" ".join(w["text"] for w in band))
+    return lines
+
+
+
+
+def _op_parse_table_row(words: list[dict], anchor: dict, next_row_x: float) -> dict:
+    """The table-row fields printed to the right of a row-opening code."""
+    mid = (anchor["top"] + anchor["bottom"]) / 2
+    span = sorted(
+        (
+            w for w in words
+            if abs((w["top"] + w["bottom"]) / 2 - mid) <= _OP_ROW_BAND
+            and w["x0"] > anchor["x0"]
+            and w["x0"] < next_row_x
+        ),
+        key=lambda w: w["x0"],
+    )
+    if not span:
+        return {}
+
+    out: dict[str, str] = {}
+    texts = [w["text"].strip() for w in span]
+    drawing_no = next((t for t in texts if _OP_DRAWING_NO_RE.fullmatch(t)), "")
+    if drawing_no:
+        out["drawing_no"] = drawing_no.upper()
+
+    # The row ends "… <title words> <Anzahl> <Statische Positionsnummer>", so the
+    # two trailing columns are found by POSITION: the last bare integer on the row
+    # is the Anzahl, and whatever single token follows it is the Statische
+    # Positionsnummer, whatever shape that project gives it.
+    qty_idx = next(
+        (i for i in range(len(texts) - 1, -1, -1) if _OP_INT_RE.fullmatch(texts[i])),
+        None,
+    )
+    title_end = len(texts)
+    if qty_idx is not None:
+        out["quantity"] = texts[qty_idx]
+        title_end = qty_idx
+        if qty_idx + 1 < len(texts):
+            out["stat_pos"] = texts[qty_idx + 1].upper()
+    title = [t for t in texts[:title_end] if not _OP_DRAWING_NO_RE.fullmatch(t)]
+    if title:
+        out["title"] = " ".join(title[:12])
+    return out
+
+
+def parse_overview_elements(words: list[dict]) -> dict[str, dict]:
+    """Every element the overview plan names, keyed by its element code.
+
+    Each record carries whatever the plan actually states — code, drawing_no,
+    title, quantity, stat_pos, weight, volume, bxh — and nothing it does not.
+    A field absent from the plan stays absent rather than becoming an empty
+    guess, so the caller can skip it instead of failing it.
+
+    No element-code shape is assumed. An element is recognised by its position
+    in the layout: a table row is a token with a drawing number immediately to
+    its right, and a callout is a token with its field lines stacked underneath.
+    Whatever token sits in either place is the element code, as printed.
+    """
+    records: dict[str, dict] = {}
+
+    def _record(code: str) -> dict:
+        return records.setdefault(code.upper(), {"code": code.upper()})
+
+    # ── Table rows: a token whose right-hand neighbour is a drawing number ────
+    row_openers: list[dict] = []
+    for w in words:
+        mid = (w["top"] + w["bottom"]) / 2
+        right = [
+            x for x in words
+            if abs((x["top"] + x["bottom"]) / 2 - mid) <= _OP_ROW_BAND
+            and x["x0"] > w["x1"]
+        ]
+        if not right:
+            continue
+        nearest = min(right, key=lambda x: x["x0"])
+        if _OP_DRAWING_NO_RE.fullmatch(nearest["text"].strip()):
+            row_openers.append(w)
+
+    for w in row_openers:
+        mid = (w["top"] + w["bottom"]) / 2
+        later = [
+            o["x0"] for o in row_openers
+            if abs((o["top"] + o["bottom"]) / 2 - mid) <= _OP_ROW_BAND and o["x0"] > w["x0"]
+        ]
+        row = _op_parse_table_row(words, w, min(later, default=float("inf")))
+        if row:
+            _record(w["text"].strip()).update(row)
+
+    # ── Callouts: a token with named field lines stacked under it ────────────
+    # Every word is a candidate heading; one that carries named field lines in
+    # its own column immediately below is taken as a callout.
+    #
+    # This is deliberately generous. A word printed just above a callout picks
+    # up that callout's fields and lands here as a record of its own ("572",
+    # "STAT."), but such a key is inert: the caller looks an element up by the
+    # exact code read off the drawing's corner, and a table row always outranks
+    # a callout for a code that has both. Tightening this instead — demanding
+    # the heading stand alone on its line — was measured on a 129-element plan
+    # and cost 26 real elements their weight, which is the field the check most
+    # needs. Recall is worth more here than a tidy key set.
+    for w in words:
+        lines = _op_lines_below(words, w)
+        if not lines:
+            continue
+        block = " \n".join(lines)
+        found: dict[str, str] = {}
+        for key, pattern in _OP_CALLOUT_FIELDS:
+            m = pattern.search(block)
+            if m:
+                found[key] = m.group(1).strip().replace(",", ".")
+        # One stray label below a word proves nothing; a callout states several.
+        if len(found) < 2:
+            continue
+        rec = _record(w["text"].strip())
+        for key, val in found.items():
+            rec.setdefault(key, val)   # a table row outranks a callout
+
+    return records
+
+
 def extract_overview_plan_pdf(pdf_path: str) -> dict:
     """Extract text content and the element statistics table from an overview plan PDF.
 
@@ -2158,10 +2410,14 @@ def extract_overview_plan_pdf(pdf_path: str) -> dict:
     with pdfplumber.open(pdf_path) as pdf:
         page_count = len(pdf.pages)
         parts: list[str] = []
+        all_words: list[dict] = []
         for page in pdf.pages:
             raw = page.extract_text(x_tolerance=3, y_tolerance=3) or ""
             parts.append(raw)
+            all_words.extend(page.extract_words(x_tolerance=3, y_tolerance=3, keep_blank_chars=False))
     raw_text = "\n".join(parts)
+
+    element_records = parse_overview_elements(all_words)
 
     element_rows: list[dict] = []
     for m in _OVERVIEW_ROW_RE.finditer(raw_text):
@@ -2173,13 +2429,19 @@ def extract_overview_plan_pdf(pdf_path: str) -> dict:
             "drawing_no": m.group(5).upper(),
         })
 
-    print(f"[overview_plan] pages={page_count}  chars={len(raw_text)}  rows={len(element_rows)}")
+    print(
+        f"[overview_plan] pages={page_count}  chars={len(raw_text)}  "
+        f"rows={len(element_rows)}  element_records={len(element_records)}"
+    )
     if element_rows:
         print(f"[overview_plan] first row: {element_rows[0]}  last row: {element_rows[-1]}")
+    for code, rec in list(element_records.items())[:3]:
+        print(f"[overview_plan] record {code}: {rec}")
     return {
         "raw_text": raw_text.strip(),
         "page_count": page_count,
         "element_rows": element_rows,
+        "element_records": element_records,
     }
 
 
@@ -2197,6 +2459,7 @@ def _format_for_llm(raw_text: str, title_block: dict) -> str:
         f"Element code (top-left label): {title_block.get('element_code_top_left') or '(not found)'}",
         f"Element code (from Drawing Title suffix): {title_block.get('element_code_from_title') or '(not found)'}",
         f"Plan-ID / drawing name:      {title_block.get('plan_id') or '(not found)'}",
+        f"Statische Positionsnummer:    {title_block.get('statische_position') or '(not found)'}",
         f"Revision (title block):      {title_block.get('revision_title_block') or '(empty)'}",
         f"Revision (drawing name):     {title_block.get('revision_plan_id') or '(not found)'}",
         f"Revision (last in table):    {title_block.get('revision_table_last') or '(not found)'}",

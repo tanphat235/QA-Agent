@@ -23,7 +23,7 @@ from qa_agent.element_type import (
 )
 from qa_agent.rag.retriever import get_check_prompt, get_check_meta, get_check_rebar_diameter
 from qa_agent.nodes.issue_filter import OUTPUT_RULES, accept_finding, build_check_issues
-from qa_agent.nodes.pdf_extractor import _normalize_ebt_nr, _ebt_field_matches
+from qa_agent.nodes.pdf_extractor import _normalize_ebt_nr, _ebt_field_matches, strip_name_codes
 from qa_agent.nodes.user_ai_checks import run_user_ai_checks, _SYSTEM_VISION
 
 logger = logging.getLogger(__name__)
@@ -998,6 +998,95 @@ def _compare_schedule(
     return found
 
 
+# ── Overview plan lookup by element code ─────────────────────────────────────
+# Sheets in these projects carry their element code in the top-left corner
+# ("ST-11-01"). That code also names the element on the overview plan, in two
+# places at once: a row of the element table, and a callout block drawn beside
+# the element on the plan itself ("ST-11-01 / Stat. Pos. ST-11 / bxh= 50x50cm /
+# Gewicht= 7.79 T"). parse_overview_elements() reads both off the plan's word
+# coordinates; the comparison below is plain Python over what it found.
+
+def _compare_overview_element(
+    code: str, plan: dict, drawing: dict,
+) -> list[_SpellIssue]:
+    """Drawing title block against what the overview plan states for *code*.
+
+    A field the plan does not state is SKIPPED, not failed. Overview plans in
+    these projects carry no Volumen column at all, and a column the plan simply
+    does not have is not a defect in the drawing.
+    """
+    def _issue(desc: str, where: str) -> _SpellIssue:
+        return _SpellIssue(
+            check="overview_plan_check", severity="error", description=desc,
+            page=1, location=f"title block {where}", confidence=1.0,
+        )
+
+    found: list[_SpellIssue] = []
+    _TOL_PCT = 1.0  # % — the same band the drawing-number table comparison uses
+
+    for plan_key, dr_key, label, unit in (
+        ("volume",   "volumen", "Volumen", "m³"),
+        ("weight",   "gewicht", "Gewicht", "t"),
+        ("quantity", "anzahl",  "Anzahl",  ""),
+    ):
+        plan_val = str(plan.get(plan_key) or "").strip()
+        dr_val = str(drawing.get(dr_key) or "").strip()
+        if not plan_val:
+            print(f"[overview_plan_check]   SKIP {label}: the overview plan does not state it for {code}")
+            continue
+        if not dr_val:
+            print(f"[overview_plan_check]   ERROR {label}: not read from the drawing")
+            found.append(_issue(
+                f"{label}: could not read the value from the drawing "
+                f"(overview plan states {plan_val} {unit}".rstrip() + f" for {code})",
+                label,
+            ))
+            continue
+        d, pv = _parse_schedule_num(dr_val), _parse_schedule_num(plan_val)
+        if d is None or pv is None:
+            print(f"[overview_plan_check]   ERROR {label}: cannot parse drawing={dr_val!r} plan={plan_val!r}")
+            continue
+        diff_pct = abs(d - pv) / max(abs(d), abs(pv), 1e-9) * 100
+        if diff_pct > _TOL_PCT:
+            print(f"[overview_plan_check]   MISMATCH {label}: drawing={d} vs plan={pv} ({diff_pct:.2f}%)")
+            found.append(_issue(
+                f"{label} mismatch for {code}: drawing={dr_val} {unit}".rstrip()
+                + f", overview plan={plan_val} {unit}".rstrip()
+                + f" (diff {diff_pct:.2f}%)",
+                label,
+            ))
+        else:
+            print(f"[overview_plan_check]   OK {label}: drawing={d} vs plan={pv}")
+
+    # Codes compare as text, exactly. The sheet appends its revision and status
+    # to its own name ("…-FT-050-B-F") while the plan lists it without them.
+    for plan_key, dr_key, label, strip_codes in (
+        ("stat_pos",   "statische_position", "Statische Positionsnummer", False),
+        ("drawing_no", "plan_id",            "Drawing No.",               True),
+    ):
+        plan_val = str(plan.get(plan_key) or "").strip()
+        dr_val = str(drawing.get(dr_key) or "").strip()
+        if strip_codes:
+            dr_val = strip_name_codes(dr_val)
+        if not plan_val:
+            print(f"[overview_plan_check]   SKIP {label}: the overview plan does not state it for {code}")
+            continue
+        if not dr_val:
+            print(f"[overview_plan_check]   SKIP {label}: not read from the drawing")
+            continue
+        if dr_val.upper().replace(" ", "") != plan_val.upper().replace(" ", ""):
+            print(f"[overview_plan_check]   MISMATCH {label}: drawing={dr_val!r} vs plan={plan_val!r}")
+            found.append(_issue(
+                f"{label} mismatch for {code}: drawing={dr_val}, overview plan={plan_val}",
+                label,
+            ))
+        else:
+            print(f"[overview_plan_check]   OK {label}: {dr_val!r}")
+
+    return found
+
+
+
 def spell_check(state: GraphState) -> dict:
     pdf_content = state.get("pdf_content") or {}
     formatted: str = pdf_content.get("formatted") or ""
@@ -1379,10 +1468,46 @@ def spell_check(state: GraphState) -> dict:
 
     # ── overview_plan_check: compare title block with overview plan table ──────
     op_enabled = enabled_sub is None or "overview_plan_check" in (enabled_sub or [])
-    if op_enabled:
+    # Preferred route: the element code printed in the sheet's top-left corner
+    # ("ST-11-01") also names the element on the overview plan, both in its table
+    # row and in the callout block drawn beside it. Looking the element up by
+    # that code gets the plan's own figures for this exact element, which the
+    # Drawing-No. route cannot do on plans whose table carries no volume or
+    # weight column at all.
+    op_code = str(title_block.get("element_code_top_left") or "").strip().upper()
+    op_records: dict = (overview_plan_data or {}).get("element_records") or {}
+    op_matched_record = op_records.get(op_code) if op_code else None
+    if op_enabled and overview_plan_data:
+        print(
+            f"[overview_plan_check] top-left code={op_code!r}  "
+            f"records on plan={len(op_records)}  matched={bool(op_matched_record)}"
+        )
+
+    if op_enabled and op_matched_record:
+        print(f"[overview_plan_check] ── Element {op_code} ─────────────────────────────")
+        print(f"[overview_plan_check]   plan states: {op_matched_record}")
+        by_check["overview_plan_check"].extend(_compare_overview_element(
+            op_code,
+            op_matched_record,
+            {
+                "volumen":            op_vol_str,
+                "gewicht":            op_wt_str,
+                "anzahl":             op_qty_str,
+                "statische_position": str(title_block.get("statische_position") or ""),
+                "plan_id":            str(title_block.get("plan_id") or ""),
+            },
+        ))
+        n = len(by_check["overview_plan_check"])
+        print(f"[overview_plan_check] {'PASS' if n == 0 else f'FAIL — {n} mismatch(es)'}")
+    elif op_enabled:
+        if op_code and op_records:
+            print(
+                f"[overview_plan_check] {op_code!r} is not among the {len(op_records)} elements "
+                f"the plan names — falling back to the Drawing-No. table match"
+            )
         if not overview_plan_data or not overview_plan_data.get("element_rows"):
             not_found_set.add("overview_plan_check")
-            print("[overview_plan_check] NOT FOUND — no overview plan or table rows extracted")
+            print("[overview_plan_check] NOT FOUND — no overview plan, or neither the element code nor a table row matched")
         else:
             # Extract element code from drawing title (e.g. "Pr.- TT-Plate-202-850" → "202-850")
             # Fall back to scanning the raw text near the Bezeichnung / Drawing Title label.
