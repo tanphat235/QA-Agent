@@ -107,38 +107,43 @@ def _search_tokens(description: str, location: str) -> list[str]:
     """Ordered, de-duplicated list of strings to look for in the page — most
     specific (longest / most unique) first."""
     desc = description or ""
-    raw: list[tuple[int, str]] = []          # (rank, token) — lower rank = more specific
-    for label, num in _EBT_RE.findall(desc):
-        raw += [(0, f"{label.upper()} {num}"), (0, num)]
+    raw: list[tuple[int, int, str]] = []   # (rank, where it appears, token)
+    for m in _EBT_RE.finditer(desc):
+        label, num = m.group(1), m.group(2)
+        raw += [(0, m.start(), f"{label.upper()} {num}"), (0, m.start(), num)]
     # Long dash-codes are anchors in their own right and must not be chopped up,
     # so they are taken out before the generic patterns see the text.
-    codes = _DASH_CODE_RE.findall(desc)
-    raw += [(0, c) for c in codes]
+    for m in _DASH_CODE_RE.finditer(desc):
+        raw.append((0, m.start(), m.group(0)))
     desc_rest = _DASH_CODE_RE.sub(" ", desc)
     for rank, pat in enumerate(_TOKEN_PATTERNS, start=1):
-        raw += [(rank, m) for m in pat.findall(desc_rest)]
+        for m in pat.finditer(desc_rest):
+            raw.append((rank, m.start(1), m.group(1)))
     loc = _clean(location)
     last = len(_TOKEN_PATTERNS) + 1
     if loc and len(loc) >= 4:
         # The location names the table or the field, so it is the anchor of last
         # resort — it is the same for every finding in that table.
-        raw.append((last, loc))
+        raw.append((last, 0, loc))
         # The field name inside a "title block X" / "drawing X" location is the
         # cleanest anchor (e.g. "Anzahl", "Gewicht", "BETONDECKUNG").
         m = re.match(r"(?:title\s*block|drawing)\b[\s/]*(.+)", loc, re.IGNORECASE)
         if m and len(m.group(1)) >= 3:
-            raw.append((last, m.group(1)))
+            raw.append((last, 1, m.group(1)))
 
     seen: set[str] = set()
     ordered: list[tuple[int, int, str]] = []
-    for rank, tok in raw:
+    for rank, pos, tok in raw:
         t = _clean(tok)
         if len(t) < 2 or t.lower() in _STOPWORDS or t.lower() in seen:
             continue
         seen.add(t.lower())
-        ordered.append((rank, -len(t), t))
+        ordered.append((rank, pos, t))
 
-    # Pattern order first, longest within a pattern second.
+    # Pattern order first; within a pattern, the order the description states
+    # them. A finding names the offending text before it names the correction —
+    # "View titled 'Section 1-1' … it should be titled 'Schnitt 4-4'" must be
+    # annotated on the view that is wrong, not on the title it ought to carry.
     ordered.sort()
     return [t for _, _, t in ordered]
 

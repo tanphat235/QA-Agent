@@ -109,7 +109,7 @@ OUTPUT FORMAT — one item per finding
 
 DEBUG NOTES — always populate one entry per active check, regardless of pass/fail:
   spelling:      "spelling: language=<language you judged the sheet to be in> | scanned=[<areas checked>] | misspellings=[<word: correction>,...] | foreign_language=[<quoted text: its language>,...] | overlap/truncated=[<locations>]"
-  section_name:  "section_name: MARKERS=[<designation:orientation:viewed-from:position>,...] | VIEWS=[<designation:orientation drawn>,...] | matched=[...] | unmatched_markers=[...] | orphan_titles=[...] | misplaced=[<title: marker it really draws>,...]"
+  section_name:  "section_name: MARKERS in cut order=[<designation:orientation:viewed-from:where it cuts>,...] | VIEWS in layout order=[<title:orientation drawn>,...] | paired by position=[<marker -> view>,...] | correct=[...] | misnamed=[<title -> title it should carry>,...] | markers without a view=[...] | views without a marker=[...]"
   parts_label:   "parts_label: EBT found=[<part codes>] | MT found=[<part codes>] | missing_label=[...] | wrong_label=[...]"
 
 RULES:
