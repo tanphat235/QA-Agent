@@ -14,6 +14,10 @@ PASS — no spelling or language errors found in drawing text.
 
 NOT FOUND — no readable text found on sheet.
 
+## Requires Vision
+
+true
+
 ## Description
 
 Identify the language the drawing is written in, then check that all text is spelled correctly and written in that same language.
@@ -53,6 +57,17 @@ STEP 3 — LANGUAGE CONSISTENCY — flag readable text written in any language o
   For each item, name the offending text, the language it is in, and where it sits.
   Severity "error" for a foreign-language label, title, table header or note;
   severity "warning" for a single foreign word inside an otherwise correct phrase.
+
+  READ THE VIEW TITLES FIRST. They are the largest words on the sheet, they sit
+  over each view, and one of them in the wrong language is the most common form
+  of this defect — and the easiest to miss, because the title is correct German
+  on every other view. Check EVERY view heading against the sheet's language:
+    German sheet → Ansicht, Schnitt, Draufsicht, Detail, Wandansicht
+    English sheet → Elevation, Section, Top view, Detail
+  WORKED EXAMPLE: a German sheet whose views are titled "Ansicht", "Draufsicht 2-2"
+  and "Schnitt 3-3", with one view titled "Section 1-1". "Section" is English on a
+  German drawing — report it as an error, expected "Schnitt 1-1". The other three
+  titles are correct and must not be reported.
 
   DO NOT flag as a language error:
     • Words spelled identically in both languages (Detail, Plan, Index, Position,

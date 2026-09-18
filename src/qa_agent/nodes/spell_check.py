@@ -81,9 +81,12 @@ _LLM_CHECKS = ["spelling", "section_name", "parts_label"]
 # vertical in graphical views are dropped or fragmented by pdfplumber text
 # extraction. section_name: judging whether a view draws the cut its marker
 # defines needs the cut lines, the arrow directions and the view geometry, none
-# of which survive text extraction.
+# of which survive text extraction. spelling: a view title reads as a heading
+# only on the rendered sheet — in a flat text dump "Section 1-1" is one line
+# among hundreds, and the English title standing over a German drawing is
+# exactly the kind of defect that has to be seen to be judged.
 # Run on Sonnet with the PDF attached; fall back to the text call without one.
-_VISION_CHECKS = frozenset({"parts_label", "section_name"})
+_VISION_CHECKS = frozenset({"parts_label", "section_name", "spelling"})
 _ALL_CHECKS = _LLM_CHECKS + ["pos_count", "revision_check", "drawing_status", "exposition_class", "steel_content", "lastausgleich", "overview_plan_check", "steel_list_check"]
 
 _LOC_TITLE_BLOCK = "title block"

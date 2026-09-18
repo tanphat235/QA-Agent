@@ -57,7 +57,32 @@ def _clean(text: str) -> str:
 
 
 # EBT/MT codes yield two anchors (bare number + labelled form), so handled apart.
-_EBT_RE = re.compile(r"\b(EBT|MT)\s*0*(\d{2,6})\b", re.IGNORECASE)
+# The digits are kept EXACTLY as the finding prints them, leading zeros and all:
+# stripping "02083" to "2083" made it match inside "FFPO12083" and put the note
+# on a joint-profile label instead of on the part's row in the Einbauteilliste.
+_EBT_RE = re.compile(r"\b(EBT|MT)\s*(\d{2,6})\b", re.IGNORECASE)
+
+# A long dash-separated code is ONE anchor. Tokenising inside it turned
+# "04-GBC-BW-TPL_-ST-GESAMT-5-FT-050-B-F" into GBC / BW / FT / ST, each of which
+# matches dozens of unrelated places on the sheet.
+_DASH_CODE_RE = re.compile(r"\b[A-Z0-9_]{2,14}(?:-[A-Z0-9_]{1,14}){3,}\b", re.IGNORECASE)
+
+# The drawing's own value for the field a finding is about. Every comparison
+# finding states it the same way, and it is the most precise anchor there is:
+# it marks the cell the reviewer has to look at.
+_VALUE_HINT_RE = re.compile(r"\bdrawing\s*[=:]\s*['\"‘’]?([^\s,;'\"‘’)]+)", re.IGNORECASE)
+
+# Places a finding names in words the sheet does not print. A German drawing
+# heads its revision table "Art der Änderung", never "revision history table".
+_LOCATION_ALIASES: dict[str, tuple[str, ...]] = {
+    "revision history table": ("Art der Änderung", "Art der Anderung", "Verteiler"),
+    "planfreigabe":     ("Planfreigabe",),
+    "einbauteilliste":  ("Einbauteilliste", "EBT - Nummer", "EBT"),
+    "montageteilliste": ("Montageteilliste", "MT - Nummer"),
+    "stabliste":        ("Stabliste",),
+    "mattenstahlliste": ("Mattenstahlliste",),
+    "betondeckung":     ("BETONDECKUNG",),
+}
 
 # Each pattern has ONE capturing group; its matches become candidate anchors.
 # Ordered most-specific → most-generic, and that ORDER is what ranks them: a
@@ -85,8 +110,13 @@ def _search_tokens(description: str, location: str) -> list[str]:
     raw: list[tuple[int, str]] = []          # (rank, token) — lower rank = more specific
     for label, num in _EBT_RE.findall(desc):
         raw += [(0, f"{label.upper()} {num}"), (0, num)]
+    # Long dash-codes are anchors in their own right and must not be chopped up,
+    # so they are taken out before the generic patterns see the text.
+    codes = _DASH_CODE_RE.findall(desc)
+    raw += [(0, c) for c in codes]
+    desc_rest = _DASH_CODE_RE.sub(" ", desc)
     for rank, pat in enumerate(_TOKEN_PATTERNS, start=1):
-        raw += [(rank, m) for m in pat.findall(desc)]
+        raw += [(rank, m) for m in pat.findall(desc_rest)]
     loc = _clean(location)
     last = len(_TOKEN_PATTERNS) + 1
     if loc and len(loc) >= 4:
@@ -118,56 +148,141 @@ def _rect_key(rect: "fitz.Rect") -> tuple[int, int, int, int]:
     return (round(rect.x0), round(rect.y0), round(rect.x1), round(rect.y1))
 
 
-def _location_region(page: "fitz.Page", location: str) -> "fitz.Rect | None":
-    """The part of the page the finding's location names, when it can be found.
+def _value_hint(description: str) -> str:
+    """The drawing's own value for the field this finding is about, or ""."""
+    m = _VALUE_HINT_RE.search(description or "")
+    return _clean(m.group(1)) if m else ""
 
-    A value like "3.25" occurs all over a drawing, but a finding located in the
-    Stabliste belongs in the Stabliste. Anchoring the search under that title
-    keeps a schedule finding inside its own table instead of landing on the
-    first identical number anywhere on the sheet.
-    """
-    key = _clean(location).split("/")[0].strip()
-    key = re.sub(r"^(?:title\s*block|drawing)\s+", "", key, flags=re.IGNORECASE).strip()
-    for candidate in (key, key.split()[0] if key else ""):
-        if len(candidate) < 4:
+
+def _location_phrases(location: str) -> list[str]:
+    """Strings to look for when locating the place a finding names, best first."""
+    loc = _clean(location)
+    out = [loc]
+    for part in loc.split("/"):
+        part = part.strip()
+        if not part:
             continue
+        out.append(part)
+        # "title block Anzahl" → "Anzahl": the field name is what is printed.
+        stripped = re.sub(r"^(?:title\s*block|drawing)\b[\s/]*", "", part, flags=re.IGNORECASE).strip()
+        if stripped:
+            out.append(stripped)
+    low = loc.lower()
+    for key, alts in _LOCATION_ALIASES.items():
+        if key in low:
+            out.extend(alts)
+
+    seen: set[str] = set()
+    phrases: list[str] = []
+    for p in out:
+        if len(p) >= 3 and p.lower() not in seen:
+            seen.add(p.lower())
+            phrases.append(p)
+    return phrases
+
+
+def _word_rects(page: "fitz.Page", text: str) -> list["fitz.Rect"]:
+    """Rectangles of the WHOLE words equal to *text* — never a substring of one.
+
+    page.search_for matches substrings, so the value "5" hits inside "50003" and
+    "1050mm" and picked the wrong "Anzahl" column. A value is a cell of its own,
+    so it is matched as a complete word.
+    """
+    key = _clean(text).lower().rstrip(".,;:")
+    out = []
+    for x0, y0, x1, y1, word, *_ in page.get_text("words"):
+        if word.lower().rstrip(".,;:") == key:
+            out.append(fitz.Rect(x0, y0, x1, y1))
+    return out
+
+
+def _location_anchor(
+    page: "fitz.Page", location: str, description: str, value_hint: str,
+) -> "tuple[fitz.Rect | None, fitz.Rect | None]":
+    """(the label's rectangle, the area around it) for the place a finding belongs.
+
+    The table named in the DESCRIPTION comes first: a finding that says a part
+    "has no corresponding row in the Einbauteilliste" belongs in that list, even
+    though its location names the view the label was spotted on.
+
+    A label like "Anzahl" is then printed in three places on one sheet — the
+    filled title block, a blank second copy of it, and a schedule's column
+    header. The right one is the one whose cell holds the value the finding
+    quotes, so the drawing's own value picks the occurrence.
+    """
+    low_desc = _clean(description).lower()
+    described = [
+        alt
+        for key, alts in _LOCATION_ALIASES.items()
+        if key in low_desc
+        for alt in alts
+    ]
+    for phrase in described + _location_phrases(location):
         try:
-            hits = page.search_for(candidate, quads=False)
+            hits = page.search_for(phrase, quads=False)
         except Exception:
             hits = []
+        if not hits:
+            continue
+        chosen = hits[0]
+        if value_hint and len(hits) > 1:
+            value_hits = _word_rects(page, value_hint)
+            for h in hits:
+                cell = fitz.Rect(h.x0 - 30, h.y0 - 6, h.x1 + 170, h.y1 + 60)
+                if any(cell.intersects(v) for v in value_hits):
+                    chosen = h
+                    break
+        # The area starts AT the label, not above it: a revision finding kept
+        # landing on the Plan-ID printed just over the table instead of in it.
+        region = fitz.Rect(chosen.x0 - 80, chosen.y0 - 4, chosen.x0 + 460, chosen.y1 + 440)
+        return chosen, region
+    return None, None
+
+
+def _first_hit(
+    page: "fitz.Page", tokens: list[str], region: "fitz.Rect | None" = None,
+) -> "fitz.Rect | None":
+    """The first token that matches, optionally restricted to *region*."""
+    for tok in tokens:
+        try:
+            hits = page.search_for(tok, quads=False)
+        except Exception:
+            hits = []
+        if region is not None:
+            hits = [r for r in hits if region.intersects(r)]
         if hits:
-            a = hits[0]
-            return fitz.Rect(a.x0 - 80, a.y0 - 30, a.x0 + 460, a.y1 + 440)
+            return hits[0]
     return None
 
 
-def _find_rect(
-    page: "fitz.Page",
-    tokens: list[str],
-    prefer_bottom: bool = False,
-    region: "fitz.Rect | None" = None,
-) -> "fitz.Rect | None":
-    """Where on the page this finding belongs — the first token that matches.
+def _find_rect(page: "fitz.Page", location: str, description: str) -> "fitz.Rect | None":
+    """Where on the page this finding belongs.
+
+    Resolved from the outside in, because the place a finding names is far more
+    reliable than any word in its text:
+
+      1. the area the location names — the title block cell, the schedule, the
+         revision table;
+      2. inside it, the drawing's own value for the field, which marks the exact
+         cell the reviewer has to look at;
+      3. otherwise a token from the description, still inside that area;
+      4. otherwise the label itself, so the note at least lands on the right field;
+      5. only when the location is nowhere on the sheet, a free search.
 
     Two findings are free to resolve to the same rectangle; the caller merges
     them into one note rather than stacking two highlights on the same word.
-
-    prefer_bottom (title-block findings) reads the lowest occurrence first: the
-    title block is the bottom-most element, so identical labels in the body and
-    the schedules are skipped.
     """
-    # Two passes: inside the area the location names first, anywhere second.
-    for inside_only in (True, False) if region is not None else (False,):
-        for tok in tokens:
-            try:
-                hits = page.search_for(tok, quads=False)
-            except Exception:
-                hits = []
-            if inside_only and region is not None:
-                hits = [r for r in hits if region.contains(r)]
-            if hits:
-                return max(hits, key=lambda r: r.y0) if prefer_bottom else hits[0]
-    return None
+    hint = _value_hint(description)
+    anchor, region = _location_anchor(page, location, description, hint)
+    tokens = _search_tokens(description, location)
+
+    if region is None:
+        return _first_hit(page, tokens)
+    if hint:
+        inside = [r for r in _word_rects(page, hint) if region.intersects(r)]
+        if inside:
+            return inside[0]
+    return _first_hit(page, tokens, region) or anchor
 
 
 def _page_index(raw_page: object, page_count: int) -> int:
@@ -262,13 +377,7 @@ def annotate_pdf(pdf_bytes: bytes, issues: list[dict]) -> bytes:
             "page": _page_index(issue.get("page"), page_count),
         }
         page = doc[entry["page"]]
-
-        tokens = _search_tokens(description, location)
-        # Title-block fields (Anzahl, Gewicht, Volumen, BETONDECKUNG, …) repeat
-        # elsewhere on the sheet; anchor on the bottom-most hit = the title block.
-        prefer_bottom = "title block" in location.lower() or "titleblock" in location.lower()
-        region = None if prefer_bottom else _location_region(page, location)
-        rect = _find_rect(page, tokens, prefer_bottom=prefer_bottom, region=region)
+        rect = _find_rect(page, location, description)
 
         if rect is None:
             unlocated.append(entry)
